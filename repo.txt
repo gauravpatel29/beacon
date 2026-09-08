@@ -1,1 +1,3 @@
-Beacon Porject Repo
+Beacon Porject Repo consists two branch master and dev
+Use Dev for all development purposes.
+Master will be our serving branch.
