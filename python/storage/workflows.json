@@ -17,5 +17,24 @@
       "optimization": "pending"
     },
     "state_data": {}
+  },
+  "wf_05c15a46": {
+    "id": "wf_05c15a46",
+    "name": "v2 e2e probe",
+    "owner": "default_user",
+    "created_at": "2026-09-09T07:06:56.623922Z",
+    "updated_at": "2026-09-09T07:06:56.623922Z",
+    "current_stage": "Data Ingestion",
+    "current_route": "/ingestion",
+    "module_status": {
+      "ingestion": "in_progress",
+      "eda": "pending",
+      "transformation": "pending",
+      "modelling": "pending",
+      "results": "pending",
+      "response_curves": "pending",
+      "optimization": "pending"
+    },
+    "state_data": {}
   }
 }

@@ -28,6 +28,37 @@ def problem_json(status_code: int, title: str, detail: str, instance: str, error
     )
 
 
+def _jsonb(value: Any) -> Any:
+    """asyncpg hands jsonb back as a string; callers want the parsed object."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return {}
+    return value if value is not None else {}
+
+
+def _workflow_out(row) -> Dict[str, Any]:
+    """One shape for every workflow response, including the resume columns."""
+    keys = row.keys()
+    out = {
+        "id": row["id"],
+        "workflow_name": row["workflow_name"],
+        # Kept so screens written against the older payload keep working.
+        "name": row["workflow_name"],
+        "state": row["state"],
+        "tag": row["tag"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+    }
+    if "current_stage" in keys:
+        out["current_stage"] = row["current_stage"]
+        out["current_route"] = row["current_route"]
+        out["module_status"] = _jsonb(row["module_status"])
+        out["state_data"] = _jsonb(row["state_data"])
+    return out
+
+
 class WorkflowCreateRequest(BaseModel):
     workflow_name: str
     state: Optional[str] = "new"
@@ -147,8 +178,11 @@ async def list_workflows(
     params.append(limit + 1)
     limit_clause = f"LIMIT ${len(params)}"
 
+    # The resume columns come back here too: the Home screen renders each card's
+    # current stage and module progress straight off this list.
     sql = f"""
-    SELECT id, workflow_name, state, tag, created_at, updated_at
+    SELECT id, workflow_name, state, tag, created_at, updated_at,
+           current_stage, current_route, module_status, state_data
     FROM workflows
     {where_clause}
     ORDER BY created_at DESC, id DESC
@@ -158,16 +192,7 @@ async def list_workflows(
     async with pool.acquire() as conn:
         rows = await conn.fetch(sql, *params)
 
-    items = []
-    for r in rows[:limit]:
-        items.append({
-            "id": r["id"],
-            "workflow_name": r["workflow_name"],
-            "state": r["state"],
-            "tag": r["tag"],
-            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
-            "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
-        })
+    items = [_workflow_out(r) for r in rows[:limit]]
 
     next_cursor = None
     if len(rows) > limit:
@@ -185,21 +210,16 @@ async def get_workflow(workflow_id: str):
     if not pool:
         raise HTTPException(status_code=500, detail="Database connection pool unavailable.")
 
-    sql = "SELECT id, workflow_name, state, tag, created_at, updated_at FROM workflows WHERE id = $1;"
+    sql = ("SELECT id, workflow_name, state, tag, created_at, updated_at, "
+           "current_stage, current_route, module_status, state_data "
+           "FROM workflows WHERE id = $1;")
     async with pool.acquire() as conn:
         row = await conn.fetchrow(sql, workflow_id)
 
     if not row:
         return problem_json(404, "Workflow not found", f"Workflow '{workflow_id}' does not exist.", f"/v1/workflows/{workflow_id}")
 
-    return {
-        "id": row["id"],
-        "workflow_name": row["workflow_name"],
-        "state": row["state"],
-        "tag": row["tag"],
-        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-        "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
-    }
+    return _workflow_out(row)
 
 
 # ─── 4. PATCH /v1/workflows/{workflow_id} ────────────────────────────────────
@@ -241,23 +261,33 @@ async def patch_workflow(workflow_id: str, payload: Dict[str, Any]):
             params.append(tag_val)
             updates.append(f"tag = ${len(params)}")
 
+        # Session-resume columns. These exist on the table but were previously
+        # unreachable through this endpoint, so a snapshot silently did nothing
+        # and a resumed workflow came back empty.
+        for field in ("current_stage", "current_route"):
+            if field in payload:
+                params.append(str(payload[field])[:100] if payload[field] is not None else None)
+                updates.append(f"{field} = ${len(params)}")
+
+        for field in ("module_status", "state_data"):
+            if field in payload:
+                params.append(json.dumps(payload[field] or {}))
+                updates.append(f"{field} = ${len(params)}::jsonb")
+
+        returning = ("id, workflow_name, state, tag, created_at, updated_at, "
+                     "current_stage, current_route, module_status, state_data")
+
         if not updates:
-            row = await conn.fetchrow("SELECT id, workflow_name, state, tag, created_at, updated_at FROM workflows WHERE id = $1;", workflow_id)
+            row = await conn.fetchrow(
+                f"SELECT {returning} FROM workflows WHERE id = $1;", workflow_id)
         else:
             params.append(datetime.now(timezone.utc))
             updates.append(f"updated_at = ${len(params)}")
             set_clause = ", ".join(updates)
-            sql = f"UPDATE workflows SET {set_clause} WHERE id = $1 RETURNING id, workflow_name, state, tag, created_at, updated_at;"
+            sql = f"UPDATE workflows SET {set_clause} WHERE id = $1 RETURNING {returning};"
             row = await conn.fetchrow(sql, *params)
 
-    return {
-        "id": row["id"],
-        "workflow_name": row["workflow_name"],
-        "state": row["state"],
-        "tag": row["tag"],
-        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-        "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
-    }
+    return _workflow_out(row)
 
 
 # ─── 5. DELETE /v1/workflows/{workflow_id} ───────────────────────────────────

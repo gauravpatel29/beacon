@@ -3,12 +3,21 @@ import { useNavigate } from "react-router-dom";
 import toast from "react-hot-toast";
 import { useAppState } from "../context/AppContext";
 import {
-  listWorkflows,
-  createWorkflow,
-  getWorkflow,
-  updateWorkflow,
-  deleteWorkflow,
+  v1ListWorkflows,
+  v1CreateWorkflow,
+  v1GetWorkflow,
+  v1PatchWorkflow,
+  v1DeleteWorkflow,
+  problemMessage,
 } from "../services/api";
+
+// Workflows live in Neon Postgres and the v2 dataset API resolves them there,
+// so every call below targets /v1 rather than the old JSON-file /api store.
+const listWorkflows = v1ListWorkflows;
+const createWorkflow = v1CreateWorkflow;
+const getWorkflow = v1GetWorkflow;
+const updateWorkflow = v1PatchWorkflow;
+const deleteWorkflow = v1DeleteWorkflow;
 
 const PIPELINE_MODULES = [
   {
@@ -77,7 +86,7 @@ export default function Home() {
     setLoadingWorkflows(true);
     try {
       const res = await listWorkflows();
-      setWorkflowsList(res?.workflows || []);
+      setWorkflowsList(res?.items || res?.workflows || []);
     } catch (err) {
       console.warn("Could not fetch workflows:", err);
     } finally {
@@ -107,40 +116,20 @@ export default function Home() {
       })} ${new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}`;
       const wfName = newWorkflowName.trim() || defaultName;
 
-      const payload = {
-        name: wfName,
-        current_stage: "Data Ingestion",
-        current_route: "/ingestion",
-        module_status: {
-          ingestion: "in_progress",
-          eda: "pending",
-          transformation: "pending",
-          modelling: "pending",
-          results: "pending",
-          response_curves: "pending",
-          optimization: "pending",
-        },
-        state_data: {},
-      };
+      // No local-id fallback. A workflow that exists only in the browser cannot
+      // own datasets - every /v2 call would 404 on a workflow Postgres has never
+      // heard of. Better to fail here, visibly, than at the first upload.
+      const created = await createWorkflow({ workflow_name: wfName, state: "new" });
+      if (!created?.id) throw new Error("Server did not return a workflow id");
 
-      let createdId = `wf_${Date.now().toString(36)}`;
-      try {
-        const created = await createWorkflow(payload);
-        if (created && created.id) {
-          createdId = created.id;
-        }
-      } catch (apiErr) {
-        console.warn("Backend workflow endpoint not responding yet, initializing session locally:", apiErr);
-      }
-
-      setField("workflowId", createdId);
-      setField("workflowName", wfName);
+      setField("workflowId", created.id);
+      setField("workflowName", created.workflow_name || wfName);
       toast.success(`Created workflow: "${wfName}"`);
       setShowNewWorkflowModal(false);
       navigate("/ingestion");
     } catch (err) {
       console.error("Workflow creation error:", err);
-      toast.error("Could not initialize workflow session");
+      toast.error(problemMessage(err, "Could not create workflow — is the API running?"));
     } finally {
       setActionLoading(false);
     }
@@ -187,7 +176,7 @@ export default function Home() {
       return;
     }
     try {
-      await updateWorkflow(wfId, { name: renameValue.trim() });
+      await updateWorkflow(wfId, { workflow_name: renameValue.trim() });
       setWorkflowsList((prev) =>
         prev.map((w) => (w.id === wfId ? { ...w, name: renameValue.trim() } : w))
       );

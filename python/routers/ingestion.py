@@ -38,7 +38,7 @@ def _parse_content_to_polars(filename: str, content: bytes) -> pl.DataFrame:
             pdf = pd.read_csv(io.BytesIO(content), encoding="latin-1", on_bad_lines="skip")
             return pl.from_pandas(pdf)
         except Exception:
-            pdf = pd.read_csv(io.BytesIO(content), encoding="utf-8", errors="replace", on_bad_lines="skip")
+            pdf = pd.read_csv(io.BytesIO(content), encoding="utf-8", encoding_errors="replace", on_bad_lines="skip")
             return pl.from_pandas(pdf)
 
 
@@ -121,7 +121,7 @@ async def upload_files(files: List[UploadFile] = File(...)):
 async def standardize_columns(payload: dict):
     """Apply column selection, explicit data type casting, date formatting, and renaming."""
     try:
-        csv_bytes = payload["csv_data"].encode("latin-1")
+        csv_bytes = payload["csv_data"].encode("utf-8")
         df = _parse_content_to_polars("file.csv", csv_bytes)
 
         # 1. Column Selection
@@ -176,7 +176,7 @@ async def standardize_columns(payload: dict):
 async def filter_data(payload: dict):
     """Apply NPI validity filter, date range filter, categorical & numerical filters."""
     try:
-        csv_bytes = payload["csv_data"].encode("latin-1")
+        csv_bytes = payload["csv_data"].encode("utf-8")
         df = _parse_content_to_polars("file.csv", csv_bytes)
         npi_col = payload.get("npi_col")
         date_col = payload.get("date_col")
@@ -237,7 +237,7 @@ async def filter_data(payload: dict):
 async def detect_granularity(payload: dict):
     """Detect time granularity of a date column."""
     try:
-        csv_bytes = payload["csv_data"].encode("latin-1")
+        csv_bytes = payload["csv_data"].encode("utf-8")
         df = _parse_content_to_polars("file.csv", csv_bytes)
         date_col = payload["date_col"]
         gran = detect_date_granularity(df, date_col)
@@ -254,7 +254,7 @@ async def detect_granularity(payload: dict):
 async def modify_gran(payload: dict):
     """Modify time granularity of the dataset."""
     try:
-        csv_bytes = payload["csv_data"].encode("latin-1")
+        csv_bytes = payload["csv_data"].encode("utf-8")
         df = _parse_content_to_polars("file.csv", csv_bytes)
         result_df, new_date_col = modify_granularity(
             df=df,
@@ -282,7 +282,7 @@ async def modify_gran(payload: dict):
 async def normalize(payload: dict):
     """Apply normalization."""
     try:
-        csv_bytes = payload["csv_data"].encode("latin-1")
+        csv_bytes = payload["csv_data"].encode("utf-8")
         df = _parse_content_to_polars("file.csv", csv_bytes)
         result = normalize_columns_pl(df, payload["columns"], method=payload.get("method", "zscore"))
         return {
@@ -299,7 +299,7 @@ async def normalize(payload: dict):
 @router.post("/download")
 async def download_csv(payload: dict):
     """Return a CSV file for download."""
-    csv_bytes = payload["csv_data"].encode("latin-1")
+    csv_bytes = payload["csv_data"].encode("utf-8")
     filename = payload.get("filename", "download.csv")
     return StreamingResponse(io.BytesIO(csv_bytes), media_type="text/csv",
                              headers={"Content-Disposition": f'attachment; filename="{filename}"'})

@@ -11,6 +11,7 @@ const modellingRoutes = require("./routes/modelling");
 const resultsRoutes = require("./routes/results");
 const responseCurvesRoutes = require("./routes/responseCurves");
 const optimizationRoutes = require("./routes/optimization");
+const makePassthrough = require("./routes/passthrough");
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -36,6 +37,10 @@ app.use("/api/modelling", modellingRoutes);
 app.use("/api/results", resultsRoutes);
 app.use("/api/response-curves", responseCurvesRoutes);
 app.use("/api/optimization", optimizationRoutes);
+
+// Beacon v1/v2 contracts - forwarded verbatim (all verbs, path params, multipart).
+app.use("/v1", makePassthrough("/v1"));
+app.use("/v2", makePassthrough("/v2"));
 
 app.get("/health", (_req, res) => res.json({ status: "ok", python: PYTHON_URL }));
 

@@ -1,0 +1,57 @@
+# Render blueprint for the Beacon backend.
+#
+# Deploy:  Render dashboard -> New -> Blueprint -> pick this repo.
+# Render reads this file from the repo root; `rootDir` points it at python/.
+#
+# The Node gateway in server/ is a verbatim passthrough for /v1 and /v2, so it
+# is deliberately not deployed - the frontend talks to this service directly.
+
+services:
+  - type: web
+    name: beacon-api
+    runtime: python
+    rootDir: python
+    plan: starter # free tier sleeps after 15 min idle; cold start is slow here
+    region: oregon
+    branch: aashika-backend
+
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    # $PORT is provided by Render. 0.0.0.0 is required - binding 127.0.0.1
+    # makes the service unreachable and shows up as a failed health check.
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+
+    # /health probes Postgres and the bucket for real, so a green check here
+    # means the dependencies are actually reachable, not just that the process
+    # is alive.
+    healthCheckPath: /health
+
+    envVars:
+      # numpy 1.26 / polars 0.20 in requirements.txt have no wheels for 3.13+.
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+
+      # ─── Secrets: set these in the Render dashboard, not here ───────────
+      # Dashboard -> the service -> Environment. `sync: false` keeps them out
+      # of the repo and stops Render prompting for them on every deploy.
+      - key: DATABASE_URL # Neon -> Connect -> pooled
+        sync: false
+      - key: DATABASE_URL_UNPOOLED # same dialog, pooling off (migrations only)
+        sync: false
+      - key: AWS_ACCESS_KEY_ID # Neon -> Storage -> bucket credentials
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+
+      # ─── Non-secret: correct for the current Neon project ───────────────
+      - key: AWS_ENDPOINT_URL_S3
+        value: https://br-morning-wind-axeccd4h.storage.c-4.us-east-2.aws.neon.tech
+      - key: AWS_REGION
+        value: us-east-2
+      - key: NEON_BUCKET
+        value: data
+      - key: STORAGE_PREFIX
+        value: beacon
+      - key: MAX_UPLOAD_BYTES
+        value: "209715200"
+      - key: PRESIGN_EXPIRY_SECONDS
+        value: "900"

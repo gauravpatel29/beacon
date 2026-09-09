@@ -45,13 +45,7 @@ async def get_db_pool() -> Optional[asyncpg.Pool]:
     return _pool
 
 
-async def init_tables():
-    """Automatically creates all necessary tables in your Neon DB."""
-    pool = await get_db_pool()
-    if not pool:
-        return
-
-    create_tables_sql = """
+_CREATE_TABLES_SQL = """
     -- 1. Workflows Table
     CREATE TABLE IF NOT EXISTS workflows (
         id VARCHAR(64) PRIMARY KEY,
@@ -94,6 +88,24 @@ async def init_tables():
         PRIMARY KEY(workflow_id, filename)
     );
     """
+
+
+def init_tables_sql() -> str:
+    """The base schema, as one idempotent DDL script.
+
+    Exposed separately so scripts/migrate.py can apply it over an unpooled
+    connection without booting the app.
+    """
+    return _CREATE_TABLES_SQL
+
+
+async def init_tables():
+    """Automatically creates all necessary tables in your Neon DB."""
+    pool = await get_db_pool()
+    if not pool:
+        return
+
+    create_tables_sql = _CREATE_TABLES_SQL
     async with pool.acquire() as conn:
         await conn.execute(create_tables_sql)
         print(" Neon DB Tables Verified & Initialized!")

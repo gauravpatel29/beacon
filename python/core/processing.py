@@ -52,20 +52,73 @@ def luhn_valid_npi(npi) -> bool:
 # ---------------------------------------------------------------------------
 # Date formatting & parsing
 # ---------------------------------------------------------------------------
+# Candidate date formats in priority order: ISO first (unambiguous by
+# convention), then day-first, then month-first. "%Y-%d-%m" is deliberately
+# absent - it is not a real-world convention, and letting pandas infer it from
+# dayfirst=True is what silently transposes day and month on ISO input.
+_DATE_FORMATS = [
+    "%Y-%m-%d", "%Y/%m/%d", "%Y%m%d",
+    "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y",
+    "%m/%d/%Y", "%m-%d-%Y",
+    "%d-%b-%Y", "%d %b %Y", "%b %d, %Y", "%d-%B-%Y", "%B %d, %Y",
+    "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S",
+    "%d/%m/%Y %H:%M:%S", "%m/%d/%Y %H:%M:%S",
+]
+
+
+def _parse_dates_robust(s_clean: pd.Series) -> pd.Series:
+    """
+    Parse a cleaned string Series into datetimes deterministically.
+
+    Picks an explicit format by how many values it parses (ties broken by the
+    priority order of _DATE_FORMATS) rather than relying on pandas' dayfirst
+    inference. Genuinely ambiguous columns (every day-of-month <= 12) resolve
+    day-first, matching the UI's default "%d/%m/%Y".
+    """
+    non_empty = s_clean[s_clean != ""]
+    if non_empty.empty:
+        return pd.Series(pd.NaT, index=s_clean.index, dtype="datetime64[ns]")
+
+    # Score candidates against distinct values only - far cheaper on long columns.
+    uniques = pd.Series(non_empty.unique())
+    total = len(uniques)
+
+    best_fmt, best_hits = None, 0
+    for fmt in _DATE_FORMATS:
+        hits = int(pd.to_datetime(uniques, format=fmt, errors="coerce").notna().sum())
+        if hits > best_hits:
+            best_fmt, best_hits = fmt, hits
+        if hits == total:
+            break
+
+    if best_fmt is None:
+        parsed = pd.Series(pd.NaT, index=s_clean.index, dtype="datetime64[ns]")
+    else:
+        parsed = pd.to_datetime(s_clean, format=best_fmt, errors="coerce")
+
+    # Mixed-format column: fill remaining gaps with the other candidates.
+    if parsed.isna().any():
+        for fmt in _DATE_FORMATS:
+            if fmt == best_fmt:
+                continue
+            if not parsed.isna().any():
+                break
+            parsed = parsed.fillna(pd.to_datetime(s_clean, format=fmt, errors="coerce"))
+
+    # Anything still unparsed is exotic (month names, offsets); let pandas try.
+    if parsed.isna().any():
+        leftover = s_clean.where(parsed.isna(), "")
+        parsed = parsed.fillna(pd.to_datetime(leftover, errors="coerce", dayfirst=True))
+
+    return parsed
+
+
 def format_date_column(series: pd.Series, target_format: str = "%d/%m/%Y") -> pd.Series:
     orig_series = series.copy()
     s_clean = orig_series.astype(str).str.strip()
     s_clean = s_clean.replace({"nan": "", "None": "", "NaT": "", "<NA>": "", "null": ""})
 
-    parsed = pd.to_datetime(s_clean, errors="coerce", dayfirst=True)
-    if parsed.isna().sum() > 0:
-        parsed_d0 = pd.to_datetime(s_clean, errors="coerce", dayfirst=False)
-        parsed = parsed.fillna(parsed_d0)
-
-    if parsed.isna().sum() > 0:
-        for fmt in ["%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y/%m/%d"]:
-            p_fmt = pd.to_datetime(s_clean, format=fmt, errors="coerce")
-            parsed = parsed.fillna(p_fmt)
+    parsed = _parse_dates_robust(s_clean)
 
     fmt = target_format if target_format else "%d/%m/%Y"
     out = parsed.dt.strftime(fmt).fillna("")
@@ -84,15 +137,8 @@ def parse_date_series_polars(df: pl.DataFrame, date_column: str) -> pl.DataFrame
         return df.with_columns(pl.col(date_column).cast(pl.Date).alias(date_column))
 
     s_clean = s.to_pandas().astype(str).str.strip()
-    parsed = pd.to_datetime(s_clean, errors="coerce", dayfirst=True)
-    if parsed.isna().sum() > 0:
-        parsed_d0 = pd.to_datetime(s_clean, errors="coerce", dayfirst=False)
-        parsed = parsed.fillna(parsed_d0)
-
-    if parsed.isna().sum() > 0:
-        for fmt in ["%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y/%m/%d"]:
-            p_fmt = pd.to_datetime(s_clean, format=fmt, errors="coerce")
-            parsed = parsed.fillna(p_fmt)
+    s_clean = s_clean.replace({"nan": "", "None": "", "NaT": "", "<NA>": "", "null": ""})
+    parsed = _parse_dates_robust(s_clean)
 
     iso_strs = parsed.dt.strftime("%Y-%m-%d").fillna("")
 

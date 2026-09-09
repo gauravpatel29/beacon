@@ -1,0 +1,11 @@
+# Python
+python/.venv/
+__pycache__/
+*.pyc
+.env
+
+# Node
+node_modules/
+
+# Build output
+client/build/
