@@ -19,7 +19,10 @@ import {
   buildLiveUpdates,
   buildSpec,
   clampDtype,
+  humanFormat,
   localProblems,
+  localWarnings,
+  numericColumns,
   renamedName,
 } from '../../services/manifest.js';
 import './DataIngestion.css';
@@ -79,10 +82,11 @@ const DATA_TYPE_OPTIONS = [
   { value: 'date', label: 'Date' },
 ];
 
+// `value` is the strftime pattern the API needs; `label` is what the user sees.
 const DATE_FORMATS = [
-  { value: '%d/%m/%Y', label: '%d/%m/%Y (e.g. 24/05/2026)' },
-  { value: '%m/%d/%Y', label: '%m/%d/%Y (e.g. 05/24/2026)' },
-  { value: '%Y-%m-%d', label: '%Y-%m-%d (e.g. 2026-05-24)' },
+  { value: '%d/%m/%Y', label: 'DD/MM/YYYY (24/05/2026)' },
+  { value: '%m/%d/%Y', label: 'MM/DD/YYYY (05/24/2026)' },
+  { value: '%Y-%m-%d', label: 'YYYY-MM-DD (2026-05-24)' },
 ];
 
 const NUM_OPS = ['sum', 'average', 'min', 'max', 'product'];
@@ -119,6 +123,7 @@ function DataIngestion() {
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [isFiltering, setIsFiltering] = useState(false);
   const [isDetectingGranularity, setIsDetectingGranularity] = useState(false);
+  const [isModifyingGranularity, setIsModifyingGranularity] = useState(false);
   const [isRestoringFiles, setIsRestoringFiles] = useState(() => Boolean(storedWorkflowId()));
   const [isUploadingFiles, setIsUploadingFiles] = useState(false);
   const [deletingFileId, setDeletingFileId] = useState(null);
@@ -181,9 +186,19 @@ function DataIngestion() {
             columns: rawColumns, previewRows: currentDataset.preview || [], totalRows: dataset.row_count || 0,
             isParsing: false, parseError: null, selectedCols: rawColumns.filter((column) => !dropped.has(column)),
             renameMap: Object.fromEntries((updates.column_renames || []).map((item) => [item.from, item.to])),
+            profile,
             typeCastMap,
-            dateConfigs: (updates.date_formats || []).map((item) => ({ col: item.column, format: item.to })),
-            dateSourceFormats: Object.fromEntries((updates.date_formats || []).map((item) => [item.column, item.from])),
+            // Fall back to the detected dates when nothing has been committed
+            // yet, so resuming before the first Apply still offers the format
+            // controls rather than an empty box.
+            dateConfigs: (updates.date_formats || []).length
+              ? updates.date_formats.map((item) => ({ col: item.column, format: item.to }))
+              : profile.filter((p) => p.suggested_date_from)
+                  .map((p) => ({ col: p.column, format: '%Y-%m-%d' })),
+            dateSourceFormats: (updates.date_formats || []).length
+              ? Object.fromEntries(updates.date_formats.map((item) => [item.column, item.from]))
+              : Object.fromEntries(profile.filter((p) => p.suggested_date_from)
+                  .map((p) => [p.column, p.suggested_date_from])),
             filterConfig: { npiCol: '', dateCol: '', useLuhn: false, startDate: '', endDate: '' },
             granularityConfig: { dateCol: '', geoCol: '', detected: null, target: '', numOps: {} },
           };
@@ -222,10 +237,15 @@ function DataIngestion() {
           category: suggestCategory(dataset.filename), columns, previewRows: dataset.preview || [],
           totalRows: dataset.row_count || 0, isParsing: false, parseError: null, selectedCols: columns,
           renameMap: {},
+          profile,
           typeCastMap: Object.fromEntries(profile.map((p) => [p.column, clampDtype(p.suggested_dtype)])),
-          dateConfigs: profile.filter((p) => p.suggested_date_from && !p.ambiguous_date)
+          // Every detected date column gets a Target Date Format row. Excluding
+          // the ambiguous ones hid the control precisely where the user most
+          // needs it - a file whose dates are all day <= 12 showed no date
+          // options at all.
+          dateConfigs: profile.filter((p) => p.suggested_date_from)
             .map((p) => ({ col: p.column, format: '%Y-%m-%d' })),
-          dateSourceFormats: Object.fromEntries(profile.filter((p) => p.suggested_date_from && !p.ambiguous_date)
+          dateSourceFormats: Object.fromEntries(profile.filter((p) => p.suggested_date_from)
             .map((p) => [p.column, p.suggested_date_from])),
           filterConfig: { npiCol: '', dateCol: '', useLuhn: false, startDate: '', endDate: '' },
           granularityConfig: { dateCol: '', geoCol: '', detected: null, target: '', numOps: {} },
@@ -306,12 +326,21 @@ function DataIngestion() {
   const setColType = (file, col, type) => {
     const typeCastMap = { ...file.typeCastMap, [col]: type };
     let dateConfigs = file.dateConfigs;
+    // The API needs the format the file actually uses, not just the target, and
+    // it never guesses. Seed it from the server profile so marking a column as
+    // Date by hand still produces a usable conversion.
+    const dateSourceFormats = { ...(file.dateSourceFormats || {}) };
     if (type === 'date' && !dateConfigs.find((d) => d.col === col)) {
       dateConfigs = [...dateConfigs, { col, format: '%d/%m/%Y' }];
+      const detected = (file.profile || []).find((p) => p.column === col);
+      if (detected?.suggested_date_from) {
+        dateSourceFormats[col] = detected.suggested_date_from;
+      }
     } else if (type !== 'date') {
       dateConfigs = dateConfigs.filter((d) => d.col !== col);
+      delete dateSourceFormats[col];
     }
-    updateFileConfig(file.id, { typeCastMap, dateConfigs });
+    updateFileConfig(file.id, { typeCastMap, dateConfigs, dateSourceFormats });
   };
   const setDateFormat = (file, col, format) =>
     updateFileConfig(file.id, {
@@ -369,7 +398,7 @@ function DataIngestion() {
         previewColumns: committed.columns || file.columns,
         totalRows: committed.row_count,
       });
-      setApplyMessage('Configuration applied successfully. The preview now shows the transformed dataset.');
+      setApplyMessage(['Configuration applied successfully. The preview now shows the transformed dataset.', ...localWarnings(file)].join(' '));
     } catch (err) {
       setApplyMessage(err instanceof ApiError ? err.text : 'Configuration could not be applied.');
     } finally {
@@ -393,11 +422,40 @@ function DataIngestion() {
         previewRowCount: preview.row_count,
       });
       setPreviewResult({ fileId: file.id, applied: preview.applied || {} });
-      setApplyMessage('Preview ready. These changes have not been saved.');
+      setApplyMessage(['Preview ready. These changes have not been saved.', ...localWarnings(file)].join(' '));
     } catch (err) {
       setApplyMessage(err instanceof ApiError ? err.text : 'Changes could not be previewed.');
     } finally {
       setIsPreviewing(false);
+    }
+  };
+
+  const modifyGranularity = async (file) => {
+    const problems = localProblems(file);
+    if (problems.length) {
+      setApplyMessage(problems.join(' '));
+      return;
+    }
+    setIsModifyingGranularity(true);
+    setApplyMessage('Modifying granularity… Nothing is being saved.');
+    try {
+      const preview = await previewSpec(file.workflowId, file.filename, buildSpec(file));
+      updateFileConfig(file.id, {
+        previewRows: preview.preview || [],
+        previewColumns: preview.columns || file.columns,
+        previewRowCount: preview.row_count,
+      });
+      setPreviewResult({ fileId: file.id, applied: preview.applied || {} });
+      const dropped = preview.applied?.unhandled_columns || [];
+      setApplyMessage(
+        dropped.length
+          ? `Granularity preview ready. These columns had no aggregation and were dropped: ${dropped.join(', ')}. Nothing has been saved.`
+          : 'Granularity preview ready. These changes have not been saved.'
+      );
+    } catch (err) {
+      setApplyMessage(err instanceof ApiError ? err.text : 'Granularity could not be modified.');
+    } finally {
+      setIsModifyingGranularity(false);
     }
   };
 
@@ -428,6 +486,9 @@ function DataIngestion() {
   const selectedFile = uploadedFiles.find((f) => f.id === selectedFileId);
   const previewColumns = selectedFile?.previewColumns || selectedFile?.columns || [];
   const hasFiles = uploadedFiles.length > 0;
+  // Only numeric, kept columns can be aggregated, and never the two grouping
+  // keys. The rollup drops anything else, so offering them would be misleading.
+  const aggregatableColumns = selectedFile ? numericColumns(selectedFile) : [];
 
   return (
     <div className="data-ingestion-page">
@@ -514,16 +575,9 @@ function DataIngestion() {
                     <div>
                       <p className="file-item-name">{f.name}</p>
                       {/* <p className="file-item-filename">{f.name}</p> */}
-                      <p
-                        className={`file-item-status${
-                          !f.category
-                            ? ' unmapped-label'
-                            : categoryInfo?.required
-                            ? ' required-label'
-                            : ''
-                        }`}
-                      >
+                      <p className={`file-item-status${!f.category ? ' unmapped-label' : ''}`}>
                         {categoryInfo ? categoryInfo.label : 'Unmapped'}
+                        {categoryInfo?.required && <span className="file-item-required-badge">Required</span>}
                       </p>
                     </div>
                     <div className="file-item-actions">
@@ -622,50 +676,6 @@ function DataIngestion() {
                   </div>
                 )}
 
-                <div className="mapping-preview-section">
-                  <p className="mapping-section-label">Preview</p>
-
-                  {selectedFile.isParsing && (
-                    <p className="mapping-config-subtitle">Parsing file...</p>
-                  )}
-
-                  {selectedFile.parseError && (
-                    <p className="mapping-config-subtitle">
-                      Couldn't read this file: {selectedFile.parseError}
-                    </p>
-                  )}
-
-                  {!selectedFile.isParsing &&
-                    !selectedFile.parseError &&
-                    previewColumns.length > 0 && (
-                      <div className="preview-table-wrapper">
-                        <div className="preview-table-scroll">
-                            <table className="preview-table">
-                            <thead>
-                                <tr>
-                                {previewColumns.map((col) => (
-                                    <th key={col}>{col}</th>
-                                ))}
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {selectedFile.previewRows.map((row, i) => (
-                                <tr key={i}>
-                                    {previewColumns.map((col) => (
-                                    <td key={col}>{row[col]}</td>
-                                    ))}
-                                </tr>
-                                ))}
-                            </tbody>
-                            </table>
-                        </div>
-                        <p className="preview-row-count">
-                          {(selectedFile.previewRowCount ?? selectedFile.totalRows).toLocaleString()} rows
-                        </p>
-                      </div>
-                    )}
-                </div>
-
                 {unmappedCount > 0 && (
                   <div className="mapping-warning-banner">
                     {unmappedCount} file{unmappedCount > 1 ? 's' : ''} still
@@ -753,27 +763,36 @@ function DataIngestion() {
                     {selectedFile.dateConfigs.length > 0 && (
                       <div className="date-format-box">
                         <p className="mapping-section-label" style={{ marginBottom: 0 }}>
-                          Target Date Format
+                          Date Format (source &rarr; target)
                         </p>
-                        {selectedFile.dateConfigs.map((dc) => (
-                          <div key={dc.col} className="date-format-row">
-                            <span>{dc.col}</span>
-                            <select
-                              value={dc.format}
-                              onChange={(e) => setDateFormat(selectedFile, dc.col, e.target.value)}
-                            >
-                              {DATE_FORMATS.map((f) => (
-                                <option key={f.value} value={f.value}>
-                                  {f.label}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                        ))}
+                        {selectedFile.dateConfigs.map((dc) => {
+                          // Read-only: the source format is detected from the
+                          // file itself, so it is shown rather than chosen.
+                          const source = selectedFile.dateSourceFormats?.[dc.col];
+                          return (
+                            <div key={dc.col} className="date-format-row">
+                              <span>{dc.col}</span>
+                              <span>{humanFormat(source) || 'not detected'}</span>
+                              <span>&rarr;</span>
+                              <select
+                                value={dc.format}
+                                onChange={(e) => setDateFormat(selectedFile, dc.col, e.target.value)}
+                              >
+                                {DATE_FORMATS.map((f) => (
+                                  <option key={f.value} value={f.value}>
+                                    {f.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                     <p className="tab-placeholder-note">
-                      Column config is stored locally will be sent as live_updates once the standardize API is wired in.
+                      The source format is the one your file already uses. It is detected per
+                      column and never guessed at conversion time, which is what stops day and
+                      month being swapped for days of the month up to 12.
                     </p>
                   </>
                 )}
@@ -907,7 +926,7 @@ function DataIngestion() {
 
                     {selectedFile.granularityConfig.detected && (
                       <>
-                        {selectedFile.columns.map((col) => (
+                        {aggregatableColumns.map((col) => (
                           <div key={col} className="agg-op-row">
                             <span>{col}</span>
                             <select
@@ -940,17 +959,93 @@ function DataIngestion() {
                             <option key={g} value={g}>{g}</option>
                           ))}
                         </select>
+
+                        <div className="filter-actions">
+                          {previewResult?.fileId === selectedFile.id
+                            && previewResult.applied.granularity_applied && (
+                            <p className="preview-filter-result" role="status">
+                              {previewResult.applied.rows_out} rows after rolling up to{' '}
+                              {selectedFile.granularityConfig.target}
+                              {previewResult.applied.unhandled_columns?.length > 0
+                                && ` · not aggregated: ${previewResult.applied.unhandled_columns.join(', ')}`}.
+                            </p>
+                          )}
+                          <button
+                            className="mapping-btn primary"
+                            disabled={
+                              !selectedFile.granularityConfig.target
+                              || isPreviewing || isApplying || isFiltering || isModifyingGranularity
+                            }
+                            onClick={() => modifyGranularity(selectedFile)}
+                          >
+                            {isModifyingGranularity ? 'Modifying granularity…' : 'Modify Granularity'}
+                          </button>
+                        </div>
                       </>
                     )}
                     <p className="tab-placeholder-note">
-                      Granularity detection is a local placeholder will call the real detect/modify API once available.
+                      Only numeric columns can be aggregated. Modifying granularity previews the
+                      rolled-up rows without saving changes.
                     </p>
                   </>
                 )}
 
-                <div className="mapping-actions">
-                  <button className="mapping-btn secondary">Back</button>
+                {/* Shared across every tab: previewing from Standardize, Filter or
+                    Granularity should show its result in place, not send the user
+                    back to Assign Category. */}
+                <hr className="mapping-divider" />
+
+                <div className="mapping-preview-section">
+                  <p className="mapping-section-label">Preview</p>
+
+                  {isPreviewing && (
+                    <p className="mapping-config-subtitle" role="status">
+                      <span className="loading-spinner" aria-hidden="true" /> Previewing changes…
+                    </p>
+                  )}
+
+                  {selectedFile.isParsing && (
+                    <p className="mapping-config-subtitle">Parsing file...</p>
+                  )}
+
+                  {selectedFile.parseError && (
+                    <p className="mapping-config-subtitle">
+                      Couldn't read this file: {selectedFile.parseError}
+                    </p>
+                  )}
+
+                  {!selectedFile.isParsing &&
+                    !selectedFile.parseError &&
+                    previewColumns.length > 0 && (
+                      <div className="preview-table-wrapper">
+                        <div className="preview-table-scroll">
+                            <table className="preview-table">
+                            <thead>
+                                <tr>
+                                {previewColumns.map((col) => (
+                                    <th key={col}>{col}</th>
+                                ))}
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {selectedFile.previewRows.map((row, i) => (
+                                <tr key={i}>
+                                    {previewColumns.map((col) => (
+                                    <td key={col}>{row[col]}</td>
+                                    ))}
+                                </tr>
+                                ))}
+                            </tbody>
+                            </table>
+                        </div>
+                        <p className="preview-row-count">
+                          {(selectedFile.previewRowCount ?? selectedFile.totalRows).toLocaleString()} rows
+                        </p>
+                      </div>
+                    )}
                 </div>
+
+
               </>
             ) : (
               <p className="mapping-config-subtitle">

@@ -277,9 +277,17 @@
   color: #c07a1f;
 }
 
-.file-item-status.required-label {
-  color: var(--color-primary);
+.file-item-required-badge {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid #dfe4ec;
+  border-radius: var(--radius-pill);
+  background-color: #eef1f6;
+  color: #55627a;
+  font-size: 0.68rem;
   font-weight: var(--font-weight-semibold);
+  vertical-align: 1px;
 }
 
 .file-item-actions {
@@ -688,12 +696,6 @@
 }
 
 /* ---- Footer actions ---- */
-.mapping-actions {
-  display: flex;
-  justify-content: flex-start;
-  margin-top: var(--spacing-lg);
-}
-
 .mapping-btn {
   padding: 0.7rem 1.5rem;
   border-radius: var(--radius-sm);

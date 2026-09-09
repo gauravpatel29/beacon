@@ -26,6 +26,31 @@ export function clampDtype(suggested) {
   return DTYPE_MAP[suggested] ? suggested : 'string';
 }
 
+// strftime is what the API speaks, but "%d/%m/%Y" is not something to put in
+// front of a user. Tokens are replaced longest-first so "%Y" cannot be matched
+// inside a longer directive.
+const FORMAT_TOKENS = [
+  ['%Y', 'YYYY'], ['%y', 'YY'],
+  ['%B', 'Month'], ['%b', 'Mon'], ['%m', 'MM'],
+  ['%d', 'DD'], ['%j', 'DDD'],
+  ['%H', 'HH'], ['%I', 'hh'], ['%M', 'mm'], ['%S', 'ss'], ['%p', 'AM/PM'],
+];
+
+/**
+ * A strftime pattern rewritten for display: "%d/%m/%Y" -> "DD/MM/YYYY".
+ *
+ * Generic rather than a lookup table, so any format the server detects renders
+ * readably instead of falling back to raw percent codes.
+ */
+export function humanFormat(pattern) {
+  if (!pattern) return '';
+  let out = pattern;
+  for (const [token, label] of FORMAT_TOKENS) {
+    out = out.split(token).join(label);
+  }
+  return out;
+}
+
 /** Original column name -> name after renames. */
 export function renamedName(file, col) {
   const to = (file.renameMap?.[col] || '').trim();
@@ -110,6 +135,29 @@ export function buildFilters(file) {
 }
 
 /** Build `granularity` from the Granularity tab, or null when incomplete. */
+/**
+ * Columns a rollup can actually aggregate: kept, numeric, and not one of the
+ * two grouping keys.
+ *
+ * The Granularity tab renders exactly this list, and `buildGranularity` sends
+ * exactly this list, so what the user sees is what gets aggregated. Anything
+ * outside it is dropped by the rollup, which the API reports back as
+ * `applied.unhandled_columns`.
+ *
+ * Type comes from `typeCastMap`, so a column the user re-typed on the
+ * Standardize tab is honoured over the server's original guess.
+ */
+export function numericColumns(file) {
+  const g = file.granularityConfig || {};
+  const kept = new Set(file.selectedCols || file.columns || []);
+  return (file.columns || []).filter((col) => {
+    if (!kept.has(col)) return false;
+    if (col === g.dateCol || col === g.geoCol) return false;
+    const type = file.typeCastMap?.[col];
+    return type === 'integer' || type === 'float';
+  });
+}
+
 export function buildGranularity(file) {
   const g = file.granularityConfig || {};
   if (!g.detected || !g.target || !g.dateCol || !g.geoCol) return null;
@@ -117,23 +165,19 @@ export function buildGranularity(file) {
   // API only accepts a coarser one, and a same-grain rollup is a no-op anyway.
   if (g.target === g.detected) return null;
 
-  const dateCol = renamedName(file, g.dateCol);
-  const geoCol = renamedName(file, g.geoCol);
-  const kept = new Set(file.selectedCols || file.columns || []);
-
-  // Only columns the user gave an operation to, excluding the two keys.
+  // Every aggregatable column is sent, defaulting to the "sum" the dropdown
+  // already shows. Sending only the ones the user happened to touch would
+  // silently drop the rest, even though the UI showed an operation for them.
   const numeric = {};
-  for (const [col, op] of Object.entries(g.numOps || {})) {
-    if (col === g.dateCol || col === g.geoCol) continue;
-    if (!kept.has(col)) continue;
-    numeric[renamedName(file, col)] = op;
+  for (const col of numericColumns(file)) {
+    numeric[renamedName(file, col)] = g.numOps?.[col] || 'sum';
   }
 
   return {
     from: g.detected,
     to: g.target,
-    date_column: dateCol,
-    geo_column: geoCol,
+    date_column: renamedName(file, g.dateCol),
+    geo_column: renamedName(file, g.geoCol),
     numeric,
     categorical: {},
   };
@@ -171,15 +215,41 @@ export function localProblems(file) {
     problems.push('Keep at least one column.');
   }
 
+  return problems;
+}
+
+/**
+ * Non-blocking notices worth telling the user after a successful run.
+ *
+ * Kept separate from `localProblems` so an undetectable date format does not
+ * stop the whole file being processed - the column simply stays as text.
+ */
+export function localWarnings(file) {
+  const warnings = [];
+  const profileFor = (col) => (file.profile || []).find((p) => p.column === col);
+
   const missingFormat = (file.dateConfigs || [])
     .filter((d) => !file.dateSourceFormats?.[d.col])
     .map((d) => d.col);
   if (missingFormat.length) {
-    problems.push(
-      `Could not detect the source date format for: ${missingFormat.join(', ')}. ` +
-        `That column will be left as text.`
+    warnings.push(
+      `No source date format could be detected for ${missingFormat.join(', ')}, ` +
+        `so ${missingFormat.length > 1 ? 'those columns are' : 'that column is'} left as text.`
     );
   }
 
-  return problems;
+  // Two formats fit these values equally well (every day-of-month <= 12), so
+  // the highest-ranked candidate is assumed. Say which, because reading it the
+  // other way round silently swaps day and month.
+  const ambiguous = (file.dateConfigs || [])
+    .map((d) => ({ col: d.col, info: profileFor(d.col), from: file.dateSourceFormats?.[d.col] }))
+    .filter((d) => d.info?.ambiguous_date && d.from);
+  for (const { col, info, from } of ambiguous) {
+    warnings.push(
+      `${col} could be ${(info.ambiguous_between || []).map(humanFormat).join(' or ')}; ` +
+        `read as ${humanFormat(from)}. Check this is right for your file.`
+    );
+  }
+
+  return warnings;
 }

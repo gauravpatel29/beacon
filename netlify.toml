@@ -1,0 +1,20 @@
+# Netlify deploy config for the Beacon frontend.
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  # Vite 8 requires Node ^20.19 || >=22.12. Pin it so a change to Netlify's
+  # default image can't silently break the build.
+  NODE_VERSION = "22"
+
+# The app uses BrowserRouter, so the server must hand index.html to every
+# path and let the router resolve it. Without this, loading or refreshing
+# /data-ingestion directly returns a 404 — only the site root would work.
+# Keep this rule last: Netlify applies redirects in file order, so any API
+# proxy rule must sit above it.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
