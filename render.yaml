@@ -13,7 +13,9 @@ services:
     rootDir: python
     plan: starter # free tier sleeps after 15 min idle; cold start is slow here
     region: oregon
-    branch: aashika-backend
+    # backend-dep carries the v2 backend. aashika-backend predates it and has
+    # neither the v2 modules nor the dependencies they need.
+    branch: backend-dep
 
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     # $PORT is provided by Render. 0.0.0.0 is required - binding 127.0.0.1
