@@ -1,0 +1,830 @@
+openapi: 3.1.0
+
+info:
+  title: Beacon API
+  version: 1.0.0
+  description: |
+    Two contracts:
+
+      1. Workflows - CRUD over the `workflow` table.
+      2. Workflow files - upload to Neon Object Storage, applying structural
+         transformations *before* the object is written.
+
+    Storage layout (bucket `data`):
+
+        data/
+          {workflow_id}/
+            {filename}               each transformed data file
+            _log.json                config_metadata, keyed by filename
+            _struct_updates.json     live_updates, keyed by filename
+
+    There is exactly ONE `_log.json` and ONE `_struct_updates.json` per
+    workflow folder. Both accumulate: a second upload adds an entry under
+    `files` rather than replacing the first file's.
+
+servers:
+  - url: /v1
+
+tags:
+  - name: workflows
+    description: CRUD over the workflow table.
+  - name: files
+    description: Object-storage CRUD, scoped to a workflow.
+
+paths:
+
+  # ----------------------------------------------------------------------
+  # Contract 1 :: Workflows
+  # ----------------------------------------------------------------------
+
+  /workflows:
+    post:
+      tags: [workflows]
+      operationId: createWorkflow
+      summary: Create a workflow
+      description: |
+        Backs the "Create New Workflow" form. `state` defaults to `new` when
+        omitted; `tag` is optional and may be null.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowCreate"
+            examples:
+              minimal:
+                summary: Only the required field
+                value:
+                  workflow_name: Q3 Revenue Ingest
+              full:
+                summary: All fields supplied
+                value:
+                  workflow_name: Q3 Revenue Ingest
+                  state: new
+                  tag: finance
+      responses:
+        "201":
+          description: Created.
+          headers:
+            Location:
+              description: URI of the new workflow.
+              schema:
+                type: string
+                format: uri-reference
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workflow"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+    get:
+      tags: [workflows]
+      operationId: listWorkflows
+      summary: List workflows
+      parameters:
+        - name: state
+          in: query
+          description: Filter by exact state.
+          schema:
+            $ref: "#/components/schemas/WorkflowState"
+        - name: tag
+          in: query
+          description: Filter by exact tag.
+          schema:
+            type: string
+        - name: q
+          in: query
+          description: Case-insensitive substring match on workflow_name.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: cursor
+          in: query
+          description: Opaque cursor from a previous response's next_cursor.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: A page of workflows.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Workflow"
+                  next_cursor:
+                    type: [string, "null"]
+                    description: Pass as `cursor` for the next page; null on the last page.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /workflows/{workflow_id}:
+    parameters:
+      - $ref: "#/components/parameters/WorkflowId"
+
+    get:
+      tags: [workflows]
+      operationId: getWorkflow
+      summary: Fetch one workflow
+      responses:
+        "200":
+          description: Found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workflow"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    patch:
+      tags: [workflows]
+      operationId: updateWorkflow
+      summary: Partially update a workflow
+      description: |
+        Only supplied fields change. `tag` accepts an explicit null to clear
+        it. `id` is immutable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkflowUpdate"
+            examples:
+              advanceState:
+                summary: Move the workflow out of `new`
+                value:
+                  state: configured
+              clearTag:
+                summary: Remove the tag
+                value:
+                  tag: null
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Workflow"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+    delete:
+      tags: [workflows]
+      operationId: deleteWorkflow
+      summary: Delete a workflow
+      description: |
+        Deletes the row. Stored objects under `data/{workflow_id}/` are removed
+        only when `purge_objects=true`; otherwise a workflow that still owns
+        objects is rejected with 409 so files are never orphaned silently.
+      parameters:
+        - name: purge_objects
+          in: query
+          description: Also delete every object under the workflow's storage prefix.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "204":
+          description: Deleted.
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Workflow still has stored objects and purge_objects was false.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+
+  # ----------------------------------------------------------------------
+  # Contract 2 :: Object storage
+  # ----------------------------------------------------------------------
+
+  /workflows/{workflow_id}/files:
+    parameters:
+      - $ref: "#/components/parameters/WorkflowId"
+
+    post:
+      tags: [files]
+      operationId: uploadWorkflowFiles
+      summary: Upload files, applying live_updates before storing
+      description: |
+        `multipart/form-data` carrying one JSON manifest part and one or more
+        file parts.
+
+        Server sequence, per request:
+
+          1. Resolve `workflow_id`; 404 if absent.
+          2. Parse and validate `manifest` against the real header row of each
+             file. Unknown columns fail here, before anything is written.
+          3. Apply `live_updates` in fixed order:
+             date_formats -> dtype_changes -> column_renames.
+             Every operation names the column as it appears in the *uploaded*
+             file; renames land last, so no operation ever refers to a name
+             produced by another operation.
+          4. Write the transformed file, then merge this file's entries into
+             the workflow's shared `_log.json` and `_struct_updates.json`.
+
+        Atomicity: the request is all-or-nothing. If any file fails validation
+        or transformation, no object from that request is written, and any
+        object already written by this request is removed.
+      parameters:
+        - name: overwrite
+          in: query
+          description: Replace objects that already exist at the target keys.
+          schema:
+            type: boolean
+            default: false
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [manifest, files]
+              properties:
+                manifest:
+                  $ref: "#/components/schemas/UploadManifest"
+                files:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: string
+                    format: binary
+            encoding:
+              manifest:
+                contentType: application/json
+              files:
+                contentType: text/csv, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/json, application/octet-stream
+      responses:
+        "201":
+          description: All files transformed and stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [workflow_id, files]
+                properties:
+                  workflow_id:
+                    type: string
+                    format: uuid
+                  files:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/StoredFile"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: A target object key exists and `overwrite` was false.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "413":
+          description: Upload exceeds the size limit.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "415":
+          description: Unsupported file type.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "422":
+          $ref: "#/components/responses/TransformFailed"
+
+    get:
+      tags: [files]
+      operationId: listWorkflowFiles
+      summary: List stored objects for a workflow
+      parameters:
+        - name: include_sidecars
+          in: query
+          description: Include the `_log.json` / `_struct_updates.json` objects in the listing.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: Objects under `data/{workflow_id}/`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/StoredFile"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /workflows/{workflow_id}/files/{filename}:
+    parameters:
+      - $ref: "#/components/parameters/WorkflowId"
+      - $ref: "#/components/parameters/Filename"
+
+    get:
+      tags: [files]
+      operationId: getWorkflowFile
+      summary: Get a stored file's metadata and a download URL
+      description: |
+        Bucket `data` is private, so the response carries a short-lived
+        presigned URL rather than the bytes.
+      responses:
+        "200":
+          description: File metadata plus a presigned download URL.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/StoredFile"
+                  - type: object
+                    required: [download_url, download_url_expires_at]
+                    properties:
+                      download_url:
+                        type: string
+                        format: uri
+                      download_url_expires_at:
+                        type: string
+                        format: date-time
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    put:
+      tags: [files]
+      operationId: replaceWorkflowFile
+      summary: Re-upload one file, re-running transformations
+      description: |
+        Same processing as POST, scoped to a single file. Replaces the data
+        object and both sidecars together.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [manifest, file]
+              properties:
+                manifest:
+                  $ref: "#/components/schemas/UploadManifest"
+                file:
+                  type: string
+                  format: binary
+            encoding:
+              manifest:
+                contentType: application/json
+      responses:
+        "200":
+          description: Replaced.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StoredFile"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/TransformFailed"
+
+    delete:
+      tags: [files]
+      operationId: deleteWorkflowFile
+      summary: Delete a file and its sidecars
+      description: |
+        Removes the data object and drops this file's entries from the
+        workflow's shared `_log.json` and `_struct_updates.json`. The sidecar
+        objects themselves survive - other files still have entries in them.
+      responses:
+        "204":
+          description: Deleted.
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /workflows/{workflow_id}/files/{filename}/config:
+    parameters:
+      - $ref: "#/components/parameters/WorkflowId"
+      - $ref: "#/components/parameters/Filename"
+
+    get:
+      tags: [files]
+      operationId: getFileConfig
+      summary: Read the sidecars for a file
+      description: Returns this file's slice of the workflow's two sidecars.
+      responses:
+        "200":
+          description: Sidecar contents.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [config_metadata, live_updates]
+                properties:
+                  config_metadata:
+                    $ref: "#/components/schemas/ConfigMetadata"
+                  live_updates:
+                    $ref: "#/components/schemas/LiveUpdates"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    patch:
+      tags: [files]
+      operationId: updateFileConfig
+      summary: Update config_metadata only
+      description: |
+        Rewrites this file's entry inside the workflow's `_log.json`. This
+        endpoint deliberately does not accept
+        `live_updates`: those describe a transformation already baked into the
+        stored bytes, so changing them would desynchronise the sidecar from the
+        data. To change structure, re-upload via PUT.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [config_metadata]
+              properties:
+                config_metadata:
+                  $ref: "#/components/schemas/ConfigMetadata"
+      responses:
+        "200":
+          description: Updated entry in `_log.json`.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  config_metadata:
+                    $ref: "#/components/schemas/ConfigMetadata"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+# --------------------------------------------------------------------------
+
+components:
+
+  parameters:
+    WorkflowId:
+      name: workflow_id
+      in: path
+      required: true
+      description: Workflow UUID. Doubles as the storage folder under bucket `data`.
+      schema:
+        type: string
+        format: uuid
+    Filename:
+      name: filename
+      in: path
+      required: true
+      description: File name as stored, including extension.
+      schema:
+        type: string
+  schemas:
+
+    WorkflowState:
+      type: string
+      description: |
+        Workflow lifecycle state. `new` is the value set at creation. The set is
+        intentionally open - the column is `text`, so adding a value needs an
+        API allowlist change only, never a migration.
+      default: new
+      examples: [new, configured, running, complete, failed]
+
+    Workflow:
+      type: object
+      description: A row of the `workflow` table.
+      required: [id, workflow_name, state, tag]
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        workflow_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        state:
+          $ref: "#/components/schemas/WorkflowState"
+        tag:
+          type: [string, "null"]
+          maxLength: 100
+
+    WorkflowCreate:
+      type: object
+      required: [workflow_name]
+      additionalProperties: false
+      properties:
+        workflow_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Trimmed before storage; must not be blank once trimmed.
+        state:
+          allOf:
+            - $ref: "#/components/schemas/WorkflowState"
+          description: Defaults to `new` when omitted.
+        tag:
+          type: [string, "null"]
+          maxLength: 100
+          description: Optional.
+
+    WorkflowUpdate:
+      type: object
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        workflow_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        state:
+          $ref: "#/components/schemas/WorkflowState"
+        tag:
+          type: [string, "null"]
+          maxLength: 100
+
+    ConfigMetadata:
+      type: object
+      description: |
+        Free-form configuration captured in the upload form. Stored verbatim
+        under `files/{filename}` in the workflow's single `_log.json`; the
+        server does not interpret it.
+      additionalProperties: true
+      examples:
+        - source_system: SAP
+          refresh: daily
+          owner: finance-ops
+
+    ColumnRename:
+      type: object
+      required: [from, to]
+      additionalProperties: false
+      properties:
+        from:
+          type: string
+          description: Column name in the uploaded file.
+        to:
+          type: string
+          description: Name to write to storage.
+
+    DtypeChange:
+      type: object
+      required: [column, to]
+      additionalProperties: false
+      properties:
+        column:
+          type: string
+          description: Column name in the uploaded file.
+        to:
+          type: string
+          enum: [string, integer, bigint, float, decimal, boolean, date, timestamp]
+        precision:
+          type: integer
+          description: For `decimal` only.
+        scale:
+          type: integer
+          description: For `decimal` only.
+        on_error:
+          type: string
+          enum: [fail, null_out]
+          default: fail
+          description: |
+            `fail` aborts the whole request on the first uncastable value.
+            `null_out` writes null for uncastable values and reports a count.
+
+    DateFormatChange:
+      type: object
+      required: [column, from, to]
+      additionalProperties: false
+      properties:
+        column:
+          type: string
+        from:
+          type: string
+          description: strptime pattern of the incoming values, e.g. "%d-%m-%Y".
+        to:
+          type: string
+          description: strftime pattern to write, e.g. "%Y-%m-%d".
+
+    LiveUpdates:
+      type: object
+      description: |
+        Structural changes applied to the data file *before* it reaches object
+        storage. Stored under `files/{filename}` in the workflow's single
+        `_struct_updates.json`.
+
+        Applied in fixed order: date_formats -> dtype_changes ->
+        column_renames. Every `column` / `from` names the column as it appears
+        in the uploaded file.
+      additionalProperties: false
+      properties:
+        column_renames:
+          type: array
+          items:
+            $ref: "#/components/schemas/ColumnRename"
+        dtype_changes:
+          type: array
+          items:
+            $ref: "#/components/schemas/DtypeChange"
+        date_formats:
+          type: array
+          items:
+            $ref: "#/components/schemas/DateFormatChange"
+
+    FileOverride:
+      type: object
+      required: [filename]
+      additionalProperties: false
+      description: Per-file override replacing the request-level blocks entirely.
+      properties:
+        filename:
+          type: string
+          description: Must match an uploaded file part.
+        config_metadata:
+          $ref: "#/components/schemas/ConfigMetadata"
+        live_updates:
+          $ref: "#/components/schemas/LiveUpdates"
+
+    UploadManifest:
+      type: object
+      description: |
+        The single JSON sent alongside the files. Request-level
+        `config_metadata` / `live_updates` apply to every uploaded file; an
+        entry in `files` replaces them for that one file.
+      additionalProperties: false
+      properties:
+        config_metadata:
+          $ref: "#/components/schemas/ConfigMetadata"
+        live_updates:
+          $ref: "#/components/schemas/LiveUpdates"
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/FileOverride"
+      examples:
+        - config_metadata:
+            source_system: SAP
+            refresh: daily
+          live_updates:
+            date_formats:
+              - column: txn_date
+                from: "%d-%m-%Y"
+                to: "%Y-%m-%d"
+            dtype_changes:
+              - column: amount
+                to: decimal
+                precision: 18
+                scale: 2
+            column_renames:
+              - from: cust_id
+                to: customer_id
+
+    StoredFile:
+      type: object
+      required: [filename, object_key, size_bytes, content_type]
+      properties:
+        filename:
+          type: string
+        object_key:
+          type: string
+          description: Key within bucket `data`, i.e. `{workflow_id}/{filename}`.
+        size_bytes:
+          type: integer
+          description: Size after transformation.
+        content_type:
+          type: string
+        checksum_sha256:
+          type: string
+        stored_at:
+          type: string
+          format: date-time
+        row_count:
+          type: [integer, "null"]
+        columns:
+          type: array
+          items:
+            type: string
+          description: Final column names, after renames.
+        sidecars:
+          type: object
+          properties:
+            config_metadata:
+              type: string
+              description: Key of the workflow's `_log.json`.
+            live_updates:
+              type: string
+              description: Key of the workflow's `_struct_updates.json`.
+        applied:
+          type: object
+          description: Count of operations actually applied.
+          properties:
+            column_renames:
+              type: integer
+            dtype_changes:
+              type: integer
+            date_formats:
+              type: integer
+            nulled_values:
+              type: integer
+              description: Values nulled by a dtype change with on_error=null_out.
+
+    Problem:
+      type: object
+      description: RFC 9457 problem detail.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+          default: "about:blank"
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+        errors:
+          type: array
+          description: Field- or column-level causes.
+          items:
+            type: object
+            properties:
+              filename:
+                type: string
+              column:
+                type: string
+              pointer:
+                type: string
+                description: JSON Pointer into the request body.
+              code:
+                type: string
+              message:
+                type: string
+
+  responses:
+    BadRequest:
+      description: Malformed request.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    NotFound:
+      description: Resource does not exist.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    ValidationFailed:
+      description: Body parsed but failed validation.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: "https://beacon.api/problems/validation-failed"
+            title: Validation failed
+            status: 422
+            errors:
+              - pointer: /workflow_name
+                code: blank
+                message: workflow_name must not be blank.
+    TransformFailed:
+      description: |
+        A live_updates operation could not be applied. Nothing was written.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: "https://beacon.api/problems/transform-failed"
+            title: Transformation failed
+            status: 422
+            detail: No object was written; the request was rolled back.
+            errors:
+              - filename: sales_2024.csv
+                column: cust_idd
+                code: column_not_found
+                message: Column "cust_idd" is not present in the uploaded file.
+              - filename: sales_2024.csv
+                column: amount
+                code: cast_failed
+                message: Value "N/A" at row 42 cannot be cast to decimal(18,2).
