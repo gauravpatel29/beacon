@@ -1,0 +1,122 @@
+/* ==========================================================================
+   App.css — Global foundation styles for ProcTimize
+   Contains: CSS variables (design tokens), resets, base typography
+   ========================================================================== */
+
+:root {
+  /* ---- Colors ---- */
+  --color-primary: #1e4fd8;          /* main blue (buttons, links) */
+  --color-primary-dark: #0d2b8c;     /* gradient dark end for buttons */
+  --color-primary-light: #eaf1ff;    /* hero section background tint */
+  --color-accent: #2f6fed;           /* "ProcTimize" blue text, icons */
+
+  --color-text-primary: #1a1a1a;     /* headings */
+  --color-text-secondary: #5f6b7a;   /* paragraph / muted text */
+  --color-text-light: #8a94a3;       /* footer text */
+
+  --color-white: #ffffff;
+  --color-bg-section: #ffffff;       /* white section background */
+  --color-border: #d7e4fb;           /* light blue card borders */
+  --color-border-light: #eef2f7;
+
+  --color-card-hover-bg: #eef4ff;    /* active/hovered card bg (MMM Modelling card) */
+
+  /* ---- Typography ---- */
+  --font-family-base: 'Inter', 'Segoe UI', Arial, sans-serif;
+
+  --font-size-h1: 2rem;        /* Marketing Mix Modeling Platform */
+  --font-size-h2: 1.75rem;     /* Full MMM Pipeline */
+  --font-size-logo: 1.5rem;    /* ProcTimize wordmark */
+  --font-size-card-title: 1.05rem;
+  --font-size-body: 1rem;
+  --font-size-small: 0.875rem;
+  --font-size-footer: 0.8rem;
+
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  /* ---- Spacing ---- */
+  --spacing-xs: 0.5rem;
+  --spacing-sm: 1rem;
+  --spacing-md: 1.5rem;
+  --spacing-lg: 2.5rem;
+  --spacing-xl: 4rem;
+
+  /* ---- Radius & Shadows ---- */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --radius-pill: 999px;
+
+  --shadow-card: 0 2px 6px rgba(20, 40, 90, 0.06);
+  --shadow-card-hover: 0 6px 16px rgba(20, 40, 90, 0.12);
+  --shadow-hero-image: 0 10px 40px rgba(20, 40, 90, 0.1);
+
+  /* ---- Layout ---- */
+  --max-width-content: 1200px;
+  --transition-base: all 0.2s ease-in-out;
+}
+
+/* ---- Reset ---- */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-family-base);
+  color: var(--color-text-primary);
+  background-color: var(--color-bg-section);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  text-decoration: none;
+  color: inherit;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+}
+
+ul {
+  list-style: none;
+}
+
+img, svg {
+  display: block;
+  max-width: 100%;
+}
+
+/* ---- Shared utility classes ---- */
+.container {
+  max-width: var(--max-width-content);
+  margin: 0 auto;
+  padding: 0 var(--spacing-lg);
+}
+
+/* Generic placeholder box — used wherever an image/icon/graphic
+   needs to be swapped in later. Dashed border makes it obvious
+   during development. Remove/replace once real assets are added. */
+.placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--color-border-light);
+  border: 1px dashed #b7c4d9;
+  color: var(--color-text-light);
+  font-size: var(--font-size-small);
+  text-align: center;
+  border-radius: var(--radius-sm);
+}

@@ -1,0 +1,105 @@
+/* ==========================================================================
+   Navbar.css — Top navigation bar, shared across all pages
+   ========================================================================== */
+
+.navbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.85rem var(--spacing-lg);
+  background-color: var(--color-white);
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+/* ---- Left: logo + wordmark ---- */
+.navbar-left {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+/* PLACEHOLDER: replace with actual ProcDNA logo image/svg */
+.navbar-logo-placeholder {
+  width: 110px;
+  height: 34px;
+}
+
+.navbar-logo-placeholder img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.navbar-divider {
+  width: 1px;
+  height: 24px;
+  background-color: var(--color-border);
+}
+
+/* PLACEHOLDER: "ProcTimize" text — will be replaced with final logo/wordmark asset */
+.navbar-wordmark {
+  font-size: 1.15rem;
+  font-weight: var(--font-weight-bold);
+  color: var(--color-text-primary);
+}
+
+.navbar-wordmark span {
+  color: var(--color-accent);
+}
+
+/* ---- Right: user info ---- */
+.navbar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  cursor: pointer;
+}
+
+.navbar-user-text {
+  text-align: right;
+  line-height: 1.3;
+}
+
+.navbar-greeting {
+  font-size: var(--font-size-small);
+  color: var(--color-text-secondary);
+}
+
+/* PLACEHOLDER: replace "Selena" with logged-in user's actual name once auth is implemented */
+.navbar-username {
+  font-size: var(--font-size-small);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-primary);
+}
+
+/* PLACEHOLDER: replace with actual user avatar image once auth is implemented */
+.navbar-avatar-placeholder {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.navbar-avatar-placeholder img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.navbar-chevron {
+  font-size: 0.7rem;
+  color: var(--color-text-secondary);
+  transition: transform 0.2s ease;
+}
+
+.navbar-right:hover .navbar-chevron {
+  transform: translateY(1px);
+}
+
+/* ---- Responsive ---- */
+@media (max-width: 560px) {
+  .navbar-greeting {
+    display: none;
+  }
+}

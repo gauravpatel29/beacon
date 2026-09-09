@@ -1,0 +1,95 @@
+/* ==========================================================================
+   Sidebar.css — Left navigation sidebar, shared across app pages
+   Two states: expanded (default) and collapsed
+   ========================================================================== */
+
+.sidebar {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, var(--color-primary) 0%, var(--color-primary-dark) 100%);
+  padding: var(--spacing-lg) var(--spacing-sm);
+  width: 240px;
+  min-height: 100%;
+  transition: width 0.25s ease;
+}
+
+.sidebar.collapsed {
+  width: 76px;
+  padding: var(--spacing-lg) 0.5rem;
+}
+
+/* ---- Toggle button (chevron), floats on the right edge ---- */
+.sidebar-toggle-btn {
+  position: absolute;
+  top: var(--spacing-md);
+  right: -16px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background-color: var(--color-white);
+  color: var(--color-text-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow-card-hover);
+  font-size: 0.9rem;
+  z-index: 5;
+}
+
+/* ---- Nav list ---- */
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: var(--spacing-lg);
+}
+
+.sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: 0.7rem 0.9rem;
+  border-radius: var(--radius-pill);
+  color: var(--color-white);
+  font-size: var(--font-size-small);
+  font-weight: var(--font-weight-medium);
+  white-space: nowrap;
+  overflow: hidden;
+  transition: var(--transition-base);
+}
+
+.sidebar.collapsed .sidebar-item {
+  justify-content: center;
+  padding: 0.7rem;
+}
+
+.sidebar-item:hover {
+  background-color: rgba(255, 255, 255, 0.12);
+}
+
+/* Active / currently selected page */
+.sidebar-item.active {
+  background-color: var(--color-white);
+  color: var(--color-primary);
+}
+
+.sidebar-item .icon-placeholder {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  background-color: transparent;
+  border: none;
+  color: inherit;
+  font-size: 0.65rem;
+}
+
+.sidebar-item-label {
+  opacity: 1;
+  transition: opacity 0.15s ease;
+}
+
+/* Hide text labels when collapsed, keep only icons */
+.sidebar.collapsed .sidebar-item-label {
+  display: none;
+}

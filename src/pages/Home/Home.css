@@ -1,0 +1,383 @@
+/* ==========================================================================
+   Home.css — Styles for the ProcTimize Landing/Home page
+   Sections: Hero, Full MMM Pipeline (feature cards), Footer
+   ========================================================================== */
+
+/* ---------------- HERO SECTION ---------------- */
+
+.hero-section {
+  background: linear-gradient(180deg, var(--color-primary-light) 0%, #f3f7ff 100%);
+  padding: var(--spacing-xl) 0;
+}
+
+.hero-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-lg);
+  flex-wrap: wrap;
+}
+
+.hero-content {
+  flex: 1 1 420px;
+  max-width: 560px;
+}
+
+/* --- Logo row --- */
+.logo-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-lg);
+}
+
+/* PLACEHOLDER: replace with actual ProcDNA logo image/svg */
+.logo-placeholder {
+  width: 130px;
+  height: 40px;
+}
+
+.logo-divider {
+  width: 1px;
+  height: 28px;
+  background-color: var(--color-border);
+}
+
+.logo-wordmark {
+  font-size: var(--font-size-logo);
+  font-weight: var(--font-weight-bold);
+  color: var(--color-text-primary);
+}
+
+.logo-wordmark span {
+  color: var(--color-accent);
+}
+
+/* --- Hero heading & copy --- */
+.hero-heading {
+  font-size: var(--font-size-h1);
+  font-weight: var(--font-weight-bold);
+  color: var(--color-text-primary);
+  margin-bottom: var(--spacing-sm);
+  line-height: 1.3;
+}
+
+.hero-heading .highlight {
+  color: var(--color-primary);
+}
+
+.hero-description {
+  font-size: var(--font-size-body);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--spacing-md);
+  max-width: 460px;
+}
+
+/* --- CTA buttons --- */
+.hero-cta-group {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.85rem 1.5rem;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-size-body);
+  font-weight: var(--font-weight-medium);
+  transition: var(--transition-base);
+}
+
+.btn-primary {
+  background: linear-gradient(90deg, var(--color-primary) 0%, var(--color-primary-dark) 100%);
+  color: var(--color-white);
+  box-shadow: var(--shadow-card);
+}
+
+.btn-primary:hover {
+  opacity: 0.92;
+  transform: translateY(-1px);
+}
+
+.btn-secondary {
+  background-color: var(--color-white);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border);
+}
+
+.btn-secondary:hover {
+  background-color: var(--color-border-light);
+}
+
+/* --- Hero graphic (right side) --- */
+.hero-graphic-wrapper {
+  flex: 1 1 480px;
+  position: relative;
+  display: flex;
+  justify-content: center;
+}
+
+/* PLACEHOLDER: replace with the full hero illustration/mockup image */
+.hero-graphic-placeholder {
+  width: 490px;
+  max-width: 598px;
+  aspect-ratio: 4 / 3;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-hero-image);
+}
+
+/* Floating "End-to-end MMM" card on top of hero graphic */
+.hero-floating-card {
+  position: absolute;
+  bottom: -20px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  background-color: var(--color-white);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card-hover);
+  width: 90%;
+  max-width: 340px;
+}
+
+/* PLACEHOLDER: replace with database/end-to-end icon svg */
+.hero-floating-card .icon-placeholder {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+
+.hero-floating-card-title {
+  font-size: var(--font-size-small);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.hero-floating-card-subtitle {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+}
+
+.pipeline-card-arrow-btn {
+  position: absolute;
+  bottom: -18px;
+  right: var(--spacing-md);
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: linear-gradient(90deg, var(--color-primary) 0%, var(--color-primary-dark) 100%);
+  color: var(--color-white);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow-card-hover);
+  font-size: 1.1rem;
+
+  /* Hidden by default */
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+.pipeline-card:hover .pipeline-card-arrow-btn {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+/* .pipeline-card.active .pipeline-card-arrow-btn {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+} */
+
+/* ---------------- FULL MMM PIPELINE SECTION ---------------- */
+
+.pipeline-section {
+  padding: var(--spacing-xl) 0;
+  background-color: var(--color-bg-section);
+}
+
+.pipeline-header {
+  text-align: center;
+  margin-bottom: var(--spacing-lg);
+}
+
+.pipeline-title {
+  font-size: var(--font-size-h2);
+  font-weight: var(--font-weight-bold);
+  margin-bottom: var(--spacing-xs);
+}
+
+.pipeline-subtitle {
+  font-size: var(--font-size-body);
+  color: var(--color-text-secondary);
+}
+
+/* --- Cards grid: 4 columns x 2 rows --- */
+.pipeline-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--spacing-md);
+}
+
+
+
+/* The concave notch — sits behind the button, redraws the corner */
+.pipeline-card {
+  position: relative;
+  z-index: 1;
+  background-color: var(--color-white);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-md);
+  transition: var(--transition-base), border-bottom-right-radius 0.25s ease;
+}
+
+/* .pipeline-card:hover {
+  box-shadow: var(--shadow-card-hover);
+  transform: translateY(-2px);
+} */
+
+.pipeline-card:hover {
+  z-index: 10;
+  border-bottom-right-radius: 58px;
+  box-shadow: var(--shadow-card-hover);
+  transform: translateY(-2px);
+}
+
+/* Active/highlighted card state (e.g. "MMM Modelling" in the design) */
+.pipeline-card:hover {
+  background-color: var(--color-card-hover-bg);
+  border-color: var(--color-primary);
+}
+
+/* PLACEHOLDER: replace with each card's respective icon svg */
+.pipeline-card .icon-placeholder {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--spacing-sm);
+}
+
+.pipeline-card-title {
+  font-size: var(--font-size-card-title);
+  font-weight: var(--font-weight-semibold);
+  margin-bottom: var(--spacing-xs);
+  color: var(--color-text-primary);
+}
+
+.pipeline-card.active .pipeline-card-title {
+  color: var(--color-primary);
+}
+
+.pipeline-card-description {
+  font-size: var(--font-size-small);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+/* Circular arrow button shown on the active card (bottom-right) */
+.pipeline-card-arrow-btn {
+  position: absolute;
+  bottom: -1px;
+  right: -4px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: linear-gradient(90deg, var(--color-primary) 0%, var(--color-primary-dark) 100%);
+  color: var(--color-white);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow-card-hover);
+  font-size: 1.1rem;
+  z-index: 2;
+
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+.pipeline-card:hover .pipeline-card-arrow-btn {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+/* ---------------- FOOTER ---------------- */
+
+.home-footer {
+  border-top: 1px solid var(--color-border-light);
+  padding: var(--spacing-sm) 0;
+}
+
+.footer-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+}
+
+.footer-text,
+.footer-links {
+  font-size: var(--font-size-footer);
+  color: var(--color-text-light);
+}
+
+.footer-links {
+  display: flex;
+  gap: var(--spacing-sm);
+}
+
+.footer-links a:hover {
+  color: var(--color-primary);
+}
+
+/* ---------------- RESPONSIVE ---------------- */
+
+@media (max-width: 1024px) {
+  .pipeline-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .hero-inner {
+    flex-direction: column;
+    text-align: center;
+  }
+
+  .hero-cta-group {
+    justify-content: center;
+  }
+
+  .logo-row {
+    justify-content: center;
+  }
+
+  .hero-description {
+    margin-left: auto;
+    margin-right: auto;
+  }
+}
+
+@media (max-width: 560px) {
+  .pipeline-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .footer-inner {
+    flex-direction: column;
+    text-align: center;
+  }
+}
