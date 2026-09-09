@@ -1,4 +1,12 @@
 import "./Home.css";
+import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import {
+  ApiError,
+  createWorkflow,
+  listWorkflows,
+  selectWorkflow,
+} from '../../services/api.js';
 import procdna_logo from "../../assets/procdna_logo.png";
 import hero_image from "../../assets/hero_image.jpg";
 import database from "../../assets/database.png";
@@ -73,6 +81,54 @@ const pipelineCards = [
 ];
 
 function Home() {
+  const navigate = useNavigate();
+  const [showWorkflowDialog, setShowWorkflowDialog] = useState(false);
+  const [workflowName, setWorkflowName] = useState('');
+  const [workflows, setWorkflows] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const loadWorkflows = async () => {
+    setLoading(true);
+    try {
+      const data = await listWorkflows();
+      setWorkflows(data.items || []);
+    } catch (err) {
+      window.alert(err instanceof ApiError ? err.text : 'Could not load workflows.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { loadWorkflows(); }, []);
+
+  const openWorkflowDialog = () => {
+    setShowWorkflowDialog(true);
+    loadWorkflows();
+  };
+
+  const startWorkflow = async (event) => {
+    event.preventDefault();
+    const name = workflowName.trim();
+    if (!name) return window.alert('Enter a workflow name.');
+    setLoading(true);
+    try {
+      const workflow = await createWorkflow({ workflow_name: name, state: 'new' });
+      selectWorkflow(workflow.id);
+      setShowWorkflowDialog(false);
+      setWorkflowName('');
+      navigate('/data-ingestion');
+    } catch (err) {
+      window.alert(err instanceof ApiError ? err.text : 'Could not create workflow.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const resumeWorkflow = (workflow) => {
+    selectWorkflow(workflow.id);
+    setShowWorkflowDialog(false);
+    navigate('/data-ingestion');
+  };
   return (
     <>
       {/* ---------------- HERO SECTION ---------------- */}
@@ -106,10 +162,10 @@ function Home() {
 
             {/* CTAs */}
             <div className="hero-cta-group">
-              <button className="btn btn-primary">
+              <button className="btn btn-primary" onClick={openWorkflowDialog}>
                 Get Started <span aria-hidden="true">→</span>
               </button>
-              <button className="btn btn-secondary">Continue Workflow</button>
+              <button className="btn btn-secondary" onClick={openWorkflowDialog}>Continue Workflow</button>
             </div>
           </div>
 
@@ -162,6 +218,7 @@ function Home() {
                 <button
                 className="pipeline-card-arrow-btn"
                 aria-label={`Go to ${card.title}`}
+                onClick={() => card.id === 'data-ingestion' && openWorkflowDialog()}
                 >
                 →
                 </button>
@@ -184,6 +241,42 @@ function Home() {
           </div>
         </div>
       </footer>
+
+      {showWorkflowDialog && (
+        <div className="workflow-dialog-backdrop" role="presentation" onMouseDown={() => setShowWorkflowDialog(false)}>
+          <section className="workflow-dialog" role="dialog" aria-modal="true" aria-labelledby="workflow-dialog-title" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="workflow-dialog-header">
+              <div>
+                <h2 id="workflow-dialog-title">Choose a workflow</h2>
+                <p>Create a named workspace or continue an existing one.</p>
+              </div>
+              <button type="button" className="workflow-dialog-close" onClick={() => setShowWorkflowDialog(false)} aria-label="Close">×</button>
+            </div>
+
+            <form className="workflow-create-form" onSubmit={startWorkflow}>
+              <label htmlFor="workflow-name">New workflow name</label>
+              <div>
+                <input id="workflow-name" value={workflowName} onChange={(event) => setWorkflowName(event.target.value)} placeholder="e.g. Q4 Brand MMM" maxLength="200" autoFocus />
+                <button type="submit" disabled={loading}>{loading ? 'Creating…' : 'Create workflow'}</button>
+              </div>
+            </form>
+
+            <div className="workflow-existing">
+              <h3>Continue existing workflow</h3>
+              {loading ? <p>Loading workflows…</p> : workflows.length === 0 ? <p>No saved workflows yet.</p> : (
+                <div className="workflow-list">
+                  {workflows.map((workflow) => (
+                    <button type="button" key={workflow.id} onClick={() => resumeWorkflow(workflow)}>
+                      <span>{workflow.workflow_name || workflow.name}</span>
+                      <small>{workflow.current_stage || 'Data Ingestion'} · {new Date(workflow.updated_at || workflow.created_at).toLocaleDateString()}</small>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      )}
     </>
   );
 }

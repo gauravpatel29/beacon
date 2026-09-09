@@ -20,9 +20,9 @@ function Navbar() {
 
         <div className="navbar-divider" />
 
-        {/* PLACEHOLDER: "ProcTimize" — replace with final logo/wordmark asset when ready */}
+        {/* Beacon product wordmark */}
         <span className="navbar-wordmark">
-          Proc<span>Timize</span>
+          Beacon
         </span>
       </div>
 

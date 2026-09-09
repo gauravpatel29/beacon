@@ -1,6 +1,27 @@
-import { useRef, useState, useMemo } from 'react';
-import Papa from 'papaparse';
+import { useEffect, useRef, useState, useMemo } from 'react';
 import cloud from '../../assets/sidebar_icon/cloud.png';
+import {
+  ApiError,
+  commitSpec,
+  deleteFile,
+  detectGranularity,
+  ensureWorkflow,
+  forgetWorkflow,
+  getFile,
+  getProfile,
+  listFiles,
+  previewSpec,
+  storedWorkflowId,
+  uploadFiles,
+} from '../../services/api.js';
+import {
+  buildFilters,
+  buildLiveUpdates,
+  buildSpec,
+  clampDtype,
+  localProblems,
+  renamedName,
+} from '../../services/manifest.js';
 import './DataIngestion.css';
 
 // ─── Category model ──────────────────────────────────────────────────────
@@ -67,8 +88,8 @@ const DATE_FORMATS = [
 const NUM_OPS = ['sum', 'average', 'min', 'max', 'product'];
 const GRAN_OPTIONS = {
   Daily: ['Weekly', 'Monthly'],
-  Weekly: ['Weekly', 'Monthly'],
-  Monthly: ['Monthly'],
+  Weekly: ['Monthly'],
+  Monthly: ['Yearly'],
 };
 
 // Guess a category from the filename the user can always override it
@@ -94,6 +115,15 @@ function DataIngestion() {
   const [selectedFileId, setSelectedFileId] = useState(null);
   const [isDragging, setIsDragging] = useState(false);
   const [activeTab, setActiveTab] = useState('mapping'); // mapping | standardize | filter | granularity
+  const [isApplying, setIsApplying] = useState(false);
+  const [isPreviewing, setIsPreviewing] = useState(false);
+  const [isFiltering, setIsFiltering] = useState(false);
+  const [isDetectingGranularity, setIsDetectingGranularity] = useState(false);
+  const [isRestoringFiles, setIsRestoringFiles] = useState(() => Boolean(storedWorkflowId()));
+  const [isUploadingFiles, setIsUploadingFiles] = useState(false);
+  const [deletingFileId, setDeletingFileId] = useState(null);
+  const [applyMessage, setApplyMessage] = useState('');
+  const [previewResult, setPreviewResult] = useState(null);
   const fileInputRef = useRef(null);
 
   const unmappedCount = useMemo(
@@ -117,94 +147,97 @@ function DataIngestion() {
 
   const canProceed = unmappedCount === 0 && hasRequiredCategories && uploadedFiles.length > 0;
 
+  // Resume the server-side datasets for the selected workflow. The browser
+  // holds only metadata; bytes remain in object storage and are never
+  // re-uploaded just to resume this screen.
+  useEffect(() => {
+    const workflowId = storedWorkflowId();
+    if (!workflowId) return undefined;
+    let cancelled = false;
+
+    const hydrate = async () => {
+      setIsRestoringFiles(true);
+      try {
+        const response = await listFiles(workflowId);
+        const files = await Promise.all((response.items || []).map(async (dataset) => {
+          // Listing metadata is enough to render a resumed file. Profile and
+          // preview failures must not hide every file in the workflow.
+          const [profileResult, fileResult] = await Promise.allSettled([
+            getProfile(workflowId, dataset.filename),
+            getFile(workflowId, dataset.filename),
+          ]);
+          const profileResponse = profileResult.status === 'fulfilled' ? profileResult.value : {};
+          const currentDataset = fileResult.status === 'fulfilled' ? fileResult.value : {};
+          const profile = profileResponse.profile || [];
+          const rawColumns = profileResponse.columns || dataset.columns || [];
+          const spec = dataset.spec || {};
+          const updates = spec.live_updates || {};
+          const dropped = new Set(updates.column_drops || []);
+          const typeCastMap = Object.fromEntries(profile.map((p) => [p.column, clampDtype(p.suggested_dtype)]));
+          for (const change of updates.dtype_changes || []) typeCastMap[change.column] = change.to;
+          return {
+            id: `file-${++fileIdCounter}`, filename: dataset.filename, name: dataset.filename, workflowId,
+            category: spec.config_metadata?.category || suggestCategory(dataset.filename),
+            columns: rawColumns, previewRows: currentDataset.preview || [], totalRows: dataset.row_count || 0,
+            isParsing: false, parseError: null, selectedCols: rawColumns.filter((column) => !dropped.has(column)),
+            renameMap: Object.fromEntries((updates.column_renames || []).map((item) => [item.from, item.to])),
+            typeCastMap,
+            dateConfigs: (updates.date_formats || []).map((item) => ({ col: item.column, format: item.to })),
+            dateSourceFormats: Object.fromEntries((updates.date_formats || []).map((item) => [item.column, item.from])),
+            filterConfig: { npiCol: '', dateCol: '', useLuhn: false, startDate: '', endDate: '' },
+            granularityConfig: { dateCol: '', geoCol: '', detected: null, target: '', numOps: {} },
+          };
+        }));
+        if (!cancelled) {
+          setUploadedFiles(files);
+          setSelectedFileId(files[0]?.id || null);
+        }
+      } catch (err) {
+        if (!cancelled) window.alert(err instanceof ApiError ? err.text : 'Could not load workflow files.');
+      } finally {
+        if (!cancelled) setIsRestoringFiles(false);
+      }
+    };
+    hydrate();
+    return () => { cancelled = true; };
+  }, []);
+
   // ─── File upload + parsing ───────────────────────────────────────────
-  const addFiles = (fileList) => {
+  const addFiles = async (fileList) => {
+    if (isUploadingFiles) return;
     const csvFiles = Array.from(fileList).filter((file) =>
-      file.name.toLowerCase().endsWith('.csv')
+      /\.(csv|tsv|txt|xlsx|xlsm|xls)$/i.test(file.name)
     );
     if (!csvFiles.length) return;
-
-    const newEntries = csvFiles.map((file) => ({
-      id: `file-${++fileIdCounter}`,
-      file,
-      name: file.name,
-      category: suggestCategory(file.name), // auto-suggested, user can change
-      columns: [],
-      previewRows: [],
-      totalRows: 0,
-      isParsing: true,
-      parseError: null,
-      // Standardize tab
-      selectedCols: [],
-      renameMap: {},
-      typeCastMap: {},
-      dateConfigs: [],
-      // Filter tab
-      filterConfig: {
-        npiCol: '',
-        dateCol: '',
-        useLuhn: false,
-        startDate: '',
-        endDate: '',
-      },
-      // Granularity tab
-      granularityConfig: {
-        dateCol: '',
-        geoCol: '',
-        detected: null,
-        target: '',
-        numOps: {},
-      },
-    }));
-
-    setUploadedFiles((prev) => [...prev, ...newEntries]);
-    setSelectedFileId(newEntries[0].id);
-
-    newEntries.forEach((entry) => {
-      Papa.parse(entry.file, {
-        header: true,
-        skipEmptyLines: true,
-        complete: (results) => {
-          const columns = results.meta.fields || [];
-          const rows = results.data || [];
-          const typeCastMap = {};
-          columns.forEach((c) => {
-            const lower = c.toLowerCase();
-            typeCastMap[c] = lower.includes('date') || lower.includes('week') || lower.includes('month')
-              ? 'date'
-              : 'string';
-          });
-
-          setUploadedFiles((prev) =>
-            prev.map((f) =>
-              f.id === entry.id
-                ? {
-                    ...f,
-                    columns,
-                    previewRows: rows.slice(0, 100),
-                    totalRows: rows.length,
-                    isParsing: false,
-                    selectedCols: columns,
-                    typeCastMap,
-                    dateConfigs: columns
-                      .filter((c) => typeCastMap[c] === 'date')
-                      .map((c) => ({ col: c, format: '%d/%m/%Y' })),
-                  }
-                : f
-            )
-          );
-        },
-        error: (err) => {
-          setUploadedFiles((prev) =>
-            prev.map((f) =>
-              f.id === entry.id
-                ? { ...f, isParsing: false, parseError: err.message }
-                : f
-            )
-          );
-        },
-      });
-    });
+    setIsUploadingFiles(true);
+    try {
+      const workflowId = await ensureWorkflow();
+      const result = await uploadFiles(workflowId, csvFiles);
+      const newEntries = await Promise.all(result.files.map(async (dataset) => {
+        const profileResponse = dataset.profile ? dataset : await getProfile(workflowId, dataset.filename);
+        const profile = profileResponse.profile || [];
+        const columns = dataset.columns || profileResponse.columns || [];
+        return {
+          id: `file-${++fileIdCounter}`, filename: dataset.filename, name: dataset.filename, workflowId,
+          category: suggestCategory(dataset.filename), columns, previewRows: dataset.preview || [],
+          totalRows: dataset.row_count || 0, isParsing: false, parseError: null, selectedCols: columns,
+          renameMap: {},
+          typeCastMap: Object.fromEntries(profile.map((p) => [p.column, clampDtype(p.suggested_dtype)])),
+          dateConfigs: profile.filter((p) => p.suggested_date_from && !p.ambiguous_date)
+            .map((p) => ({ col: p.column, format: '%Y-%m-%d' })),
+          dateSourceFormats: Object.fromEntries(profile.filter((p) => p.suggested_date_from && !p.ambiguous_date)
+            .map((p) => [p.column, p.suggested_date_from])),
+          filterConfig: { npiCol: '', dateCol: '', useLuhn: false, startDate: '', endDate: '' },
+          granularityConfig: { dateCol: '', geoCol: '', detected: null, target: '', numOps: {} },
+        };
+      }));
+      setUploadedFiles((prev) => [...prev, ...newEntries]);
+      setSelectedFileId(newEntries[0]?.id || null);
+    } catch (err) {
+      window.alert(err instanceof ApiError ? err.text : 'Upload failed.');
+    } finally {
+      setIsUploadingFiles(false);
+    }
   };
 
   const handleDragOver = (e) => {
@@ -217,14 +250,27 @@ function DataIngestion() {
     setIsDragging(false);
     addFiles(e.dataTransfer.files);
   };
-  const handleBrowseClick = () => fileInputRef.current?.click();
+  const handleBrowseClick = () => {
+    if (!isUploadingFiles) fileInputRef.current?.click();
+  };
   const handleFileInputChange = (e) => {
     addFiles(e.target.files);
     e.target.value = '';
   };
 
-  const handleRemoveFile = (fileId, e) => {
+  const handleRemoveFile = async (fileId, e) => {
     e.stopPropagation();
+    if (deletingFileId) return;
+    const file = uploadedFiles.find((item) => item.id === fileId);
+    setDeletingFileId(fileId);
+    try {
+      if (file?.workflowId) await deleteFile(file.workflowId, file.filename);
+    } catch (err) {
+      window.alert(err instanceof ApiError ? err.text : 'Could not remove this file.');
+      return;
+    } finally {
+      setDeletingFileId(null);
+    }
     setUploadedFiles((prev) => prev.filter((f) => f.id !== fileId));
     if (selectedFileId === fileId) setSelectedFileId(null);
   };
@@ -239,6 +285,7 @@ function DataIngestion() {
     setUploadedFiles([]);
     setSelectedFileId(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
+    forgetWorkflow();
   };
 
   const updateFileConfig = (fileId, updates) => {
@@ -286,12 +333,100 @@ function DataIngestion() {
   // PLACEHOLDER: no backend endpoint yet — just marks a granularity as
   // "detected" locally so the UI flow can be reviewed. Replace with a real
   // API call once available.
-  const handleDetectGranularity = (file) => {
-    if (!file.granularityConfig.dateCol) return;
-    setGranularityField(file, 'detected', 'Weekly');
+  const handleDetectGranularity = async (file) => {
+    if (!file.granularityConfig.dateCol || isDetectingGranularity) return;
+    setIsDetectingGranularity(true);
+    try {
+      const detail = await detectGranularity(file.workflowId, file.filename, {
+        date_column: renamedName(file, file.granularityConfig.dateCol),
+        live_updates: buildLiveUpdates(file),
+        filters: buildFilters(file),
+      });
+      setGranularityField(file, 'detected', detail.granularity);
+    } catch (err) {
+      window.alert(err instanceof ApiError ? err.text : 'Granularity detection failed.');
+    } finally {
+      setIsDetectingGranularity(false);
+    }
+  };
+
+  const applyFile = async (file) => {
+    const problems = localProblems(file);
+    if (problems.length) {
+      setApplyMessage(problems.join(' '));
+      return;
+    }
+    setIsApplying(true);
+    setApplyMessage('Validating configuration…');
+    try {
+      const spec = buildSpec(file);
+      setApplyMessage('Previewing transformations…');
+      await previewSpec(file.workflowId, file.filename, spec);
+      setApplyMessage('Saving transformed dataset…');
+      const committed = await commitSpec(file.workflowId, file.filename, spec);
+      updateFileConfig(file.id, {
+        previewRows: committed.preview || [],
+        previewColumns: committed.columns || file.columns,
+        totalRows: committed.row_count,
+      });
+      setApplyMessage('Configuration applied successfully. The preview now shows the transformed dataset.');
+    } catch (err) {
+      setApplyMessage(err instanceof ApiError ? err.text : 'Configuration could not be applied.');
+    } finally {
+      setIsApplying(false);
+    }
+  };
+
+  const previewFile = async (file) => {
+    const problems = localProblems(file);
+    if (problems.length) {
+      setApplyMessage(problems.join(' '));
+      return;
+    }
+    setIsPreviewing(true);
+    setApplyMessage('Previewing changes… Nothing is being saved.');
+    try {
+      const preview = await previewSpec(file.workflowId, file.filename, buildSpec(file));
+      updateFileConfig(file.id, {
+        previewRows: preview.preview || [],
+        previewColumns: preview.columns || file.columns,
+        previewRowCount: preview.row_count,
+      });
+      setPreviewResult({ fileId: file.id, applied: preview.applied || {} });
+      setApplyMessage('Preview ready. These changes have not been saved.');
+    } catch (err) {
+      setApplyMessage(err instanceof ApiError ? err.text : 'Changes could not be previewed.');
+    } finally {
+      setIsPreviewing(false);
+    }
+  };
+
+  const applyFilter = async (file) => {
+    const problems = localProblems(file);
+    if (problems.length) {
+      setApplyMessage(problems.join(' '));
+      return;
+    }
+    setIsFiltering(true);
+    setApplyMessage('Applying filter… Nothing is being saved.');
+    try {
+      const preview = await previewSpec(file.workflowId, file.filename, buildSpec(file));
+      updateFileConfig(file.id, {
+        previewRows: preview.preview || [],
+        previewColumns: preview.columns || file.columns,
+        previewRowCount: preview.row_count,
+      });
+      setPreviewResult({ fileId: file.id, applied: preview.applied || {} });
+      setApplyMessage('Filter preview ready. These changes have not been saved.');
+    } catch (err) {
+      setApplyMessage(err instanceof ApiError ? err.text : 'Filter could not be applied.');
+    } finally {
+      setIsFiltering(false);
+    }
   };
 
   const selectedFile = uploadedFiles.find((f) => f.id === selectedFileId);
+  const previewColumns = selectedFile?.previewColumns || selectedFile?.columns || [];
   const hasFiles = uploadedFiles.length > 0;
 
   return (
@@ -318,19 +453,24 @@ function DataIngestion() {
       <input
         ref={fileInputRef}
         type="file"
-        accept=".csv"
+        accept=".csv,.tsv,.txt,.xlsx,.xlsm,.xls"
         multiple
         className="upload-input-hidden"
         onChange={handleFileInputChange}
       />
 
-      {!hasFiles ? (
+      {isRestoringFiles ? (
+        <div className="operation-loader" role="status" aria-live="polite">
+          <span className="loading-spinner" aria-hidden="true" />
+          <span>Loading files from storage…</span>
+        </div>
+      ) : !hasFiles ? (
         /* ============ DEFAULT VIEW (no files yet) ============ */
         <div className="upload-card">
           <p className="upload-card-title">Upload CSV Files</p>
 
           <div
-            className={`upload-dropzone${isDragging ? ' dragging' : ''}`}
+            className={`upload-dropzone${isDragging ? ' dragging' : ''}${isUploadingFiles ? ' loading' : ''}`}
             onClick={handleBrowseClick}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
@@ -338,12 +478,12 @@ function DataIngestion() {
             role="button"
             tabIndex={0}
           >
-            <img src={cloud} alt="Upload" className="icon-placeholder" />
+            {isUploadingFiles ? <span className="loading-spinner" aria-hidden="true" /> : <img src={cloud} alt="Upload" className="icon-placeholder" />}
             <p className="upload-dropzone-text">
-              Drag &amp; drop CSV files here, or click to browse
+              {isUploadingFiles ? 'Uploading files…' : 'Drag & drop CSV files here, or click to browse'}
             </p>
             <p className="upload-dropzone-subtext">
-              Supports all standard CSV files
+              Supports CSV, TSV, and Excel files
             </p>
           </div>
         </div>
@@ -352,9 +492,10 @@ function DataIngestion() {
         <div className="mapping-layout">
           {/* ---- Left: file list ---- */}
           <div className="file-list-panel">
-            <button className="upload-files-btn" onClick={handleBrowseClick}>
-              Upload files
+            <button className="upload-files-btn" onClick={handleBrowseClick} disabled={isUploadingFiles}>
+              {isUploadingFiles ? 'Uploading files…' : 'Upload files'}
             </button>
+            {isUploadingFiles && <p className="file-operation-status" role="status"><span className="loading-spinner" aria-hidden="true" /> Uploading and preparing files…</p>}
             <p className="file-list-count">
               Uploaded {uploadedFiles.length} of {uploadedFiles.length}
             </p>
@@ -367,8 +508,8 @@ function DataIngestion() {
                     key={f.id}
                     className={`file-list-item${
                       f.id === selectedFileId ? ' selected' : ''
-                    }${!f.category ? ' unmapped' : ''}`}
-                    onClick={() => setSelectedFileId(f.id)}
+                    }${!f.category ? ' unmapped' : ''}${deletingFileId === f.id ? ' deleting' : ''}`}
+                    onClick={() => deletingFileId !== f.id && setSelectedFileId(f.id)}
                   >
                     <div>
                       <p className="file-item-name">{f.name}</p>
@@ -390,8 +531,9 @@ function DataIngestion() {
                         className="file-item-icon-btn"
                         onClick={(e) => handleRemoveFile(f.id, e)}
                         aria-label={`Remove ${f.name}`}
+                        disabled={Boolean(deletingFileId)}
                       >
-                        &#10005;
+                        {deletingFileId === f.id ? <span className="loading-spinner" aria-hidden="true" /> : '×'}
                       </button>
                     </div>
                   </div>
@@ -407,13 +549,6 @@ function DataIngestion() {
             {selectedFile ? (
               <>
                 <div className="mapping-panel-header">
-                  <div>
-                    <p className="mapping-config-title">Mapping configuration</p>
-                    <p className="mapping-config-subtitle">
-                      File {uploadedFiles.findIndex((f) => f.id === selectedFile.id) + 1}{' '}
-                        {selectedFile.name}
-                    </p>
-                  </div>
                   <div className="tab-group">
                     <button
                       className={`tab-btn${activeTab === 'mapping' ? ' active' : ''}`}
@@ -438,6 +573,15 @@ function DataIngestion() {
                       onClick={() => setActiveTab('granularity')}
                     >
                       Granularity
+                    </button>
+                  </div>
+                  <div className="mapping-top-actions">
+                    {applyMessage && <p className="apply-config-message" role="status">{applyMessage}</p>}
+                    <button className="mapping-btn secondary" disabled={!selectedFile || isApplying || isPreviewing || isFiltering} onClick={() => previewFile(selectedFile)}>
+                      {isPreviewing ? 'Previewing changes…' : 'Preview changes'}
+                    </button>
+                    <button className="mapping-btn primary" disabled={!selectedFile || isApplying || isPreviewing || isFiltering} onClick={() => applyFile(selectedFile)}>
+                      {isApplying ? 'Applying configurations…' : 'Apply configuration'}
                     </button>
                   </div>
                 </div>
@@ -493,13 +637,13 @@ function DataIngestion() {
 
                   {!selectedFile.isParsing &&
                     !selectedFile.parseError &&
-                    selectedFile.columns.length > 0 && (
+                    previewColumns.length > 0 && (
                       <div className="preview-table-wrapper">
                         <div className="preview-table-scroll">
                             <table className="preview-table">
                             <thead>
                                 <tr>
-                                {selectedFile.columns.map((col) => (
+                                {previewColumns.map((col) => (
                                     <th key={col}>{col}</th>
                                 ))}
                                 </tr>
@@ -507,7 +651,7 @@ function DataIngestion() {
                             <tbody>
                                 {selectedFile.previewRows.map((row, i) => (
                                 <tr key={i}>
-                                    {selectedFile.columns.map((col) => (
+                                    {previewColumns.map((col) => (
                                     <td key={col}>{row[col]}</td>
                                     ))}
                                 </tr>
@@ -516,7 +660,7 @@ function DataIngestion() {
                             </table>
                         </div>
                         <p className="preview-row-count">
-                          {selectedFile.totalRows.toLocaleString()} rows
+                          {(selectedFile.previewRowCount ?? selectedFile.totalRows).toLocaleString()} rows
                         </p>
                       </div>
                     )}
@@ -696,8 +840,23 @@ function DataIngestion() {
                         />
                       </div>
                     </div>
+                    <div className="filter-actions">
+                      {previewResult?.fileId === selectedFile.id && previewResult.applied.filters_applied > 0 && (
+                        <p className="preview-filter-result" role="status">
+                          {previewResult.applied.rows_out} of {previewResult.applied.rows_in} rows match
+                          {previewResult.applied.rows_removed > 0 && ` (${previewResult.applied.rows_removed} removed)`}.
+                        </p>
+                      )}
+                      <button
+                        className="mapping-btn primary"
+                        disabled={isPreviewing || isApplying || isFiltering}
+                        onClick={() => applyFilter(selectedFile)}
+                      >
+                        {isFiltering ? 'Applying filter…' : 'Apply Filter'}
+                      </button>
+                    </div>
                     <p className="tab-placeholder-note">
-                      Filter config is stored locally will call the filter API once available.
+                      Applying the filter previews the matching rows without saving changes.
                     </p>
                   </>
                 )}
@@ -736,8 +895,9 @@ function DataIngestion() {
                     <button
                       className="granularity-detect-btn"
                       onClick={() => handleDetectGranularity(selectedFile)}
+                      disabled={!selectedFile.granularityConfig.dateCol || isDetectingGranularity}
                     >
-                      Detect Granularity
+                      {isDetectingGranularity ? 'Detecting granularity…' : 'Detect Granularity'}
                     </button>
                     {selectedFile.granularityConfig.detected && (
                       <span className="granularity-detected-badge">
@@ -790,9 +950,6 @@ function DataIngestion() {
 
                 <div className="mapping-actions">
                   <button className="mapping-btn secondary">Back</button>
-                  <button className="mapping-btn primary" disabled={!canProceed}>
-                    Proceed
-                  </button>
                 </div>
               </>
             ) : (
