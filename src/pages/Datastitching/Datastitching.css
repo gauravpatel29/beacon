@@ -178,13 +178,30 @@
 }
 
 /* ---- Grain tabs ---- */
+.stitching-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+/* Each section reads as its own card on the grey page, matching
+   .upload-card / .mapping-config-panel on the Data Ingestion screen. */
+.source-files-card,
+.current-joins-card,
+.preview-panel {
+  background-color: var(--color-white);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+  padding: var(--spacing-md);
+}
+
 .grain-tabs {
   display: flex;
   gap: 0.3rem;
   background-color: #eef1f6;
   border-radius: var(--radius-sm);
   padding: 0.3rem;
-  margin-bottom: var(--spacing-md);
 }
 
 .grain-tab {
@@ -230,13 +247,6 @@
 }
 
 /* ---- Current Joins section (directly under Source Files) ---- */
-.current-joins-card {
-  border: 1px solid var(--color-border-light);
-  border-radius: var(--radius-md);
-  padding: var(--spacing-md);
-  margin-bottom: var(--spacing-md);
-}
-
 .join-summary-card {
   border: 1px solid var(--color-border-light);
   border-radius: var(--radius-sm);
@@ -335,23 +345,33 @@
 }
 
 /* ---- Two-column: action buttons (left) | preview panel (right) ---- */
-.stitch-two-part {
-  display: grid;
-  grid-template-columns: 260px 1fr;
-  gap: var(--spacing-md);
-  align-items: start;
-}
-
-.stitch-part-actions {
+.stitch-result {
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
+  gap: var(--spacing-md);
+}
+
+.stitch-generate-actions {
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+/* Names the dataset the build will produce. Sits beside Generate so the name
+   is visible at the moment it is committed. */
+.ard-name-field {
+  flex: 1 1 16rem;
+  max-width: 22rem;
+  text-align: left;
+}
+
+.ard-name-field .step-field-label {
+  display: block;
 }
 
 .preview-panel {
-  border: 1px solid var(--color-border-light);
-  border-radius: var(--radius-md);
-  padding: var(--spacing-md);
   min-height: 260px;
 }
 
@@ -434,10 +454,6 @@
 }
 
 /* ---- Source files checkbox grid ---- */
-.source-files-card {
-  margin-bottom: var(--spacing-md);
-}
-
 .file-checkbox-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -610,6 +626,43 @@
 
 .step-key-block .step-field-label {
   color: var(--color-primary);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
+/* Removes one key pair. Sits inside the right-hand label so rows stay aligned,
+   and is not rendered at all when a single pair remains. */
+.step-key-remove {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: #94a3b8;
+  font-size: 0.75rem;
+  line-height: 1;
+  padding: 0 0.15rem;
+}
+
+.step-key-remove:hover {
+  color: #dc2626;
+}
+
+.step-key-add {
+  margin: 0.1rem 0 0.6rem;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-white);
+  color: var(--color-primary);
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.4rem 0.75rem;
+}
+
+.step-key-add:hover {
+  border-style: solid;
+  background-color: #f7f9fc;
 }
 
 .stitching-actions {
@@ -618,20 +671,37 @@
   margin-top: var(--spacing-sm);
 }
 
+.current-joins-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-sm);
+  margin-bottom: 0.6rem;
+}
+
+.current-joins-header .section-heading {
+  margin-bottom: 0;
+}
+
 .add-step-btn {
-  width: 100%;
-  text-align: center;
-  padding: 0.65rem 0;
+  flex-shrink: 0;
+  padding: 0.45rem 0.9rem;
   border: 1.5px dashed var(--color-primary);
   border-radius: var(--radius-sm);
   color: var(--color-primary);
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   font-weight: var(--font-weight-semibold);
-  margin-bottom: var(--spacing-md);
+  white-space: nowrap;
 }
 
-.add-step-btn:hover {
+.add-step-btn:hover:not(:disabled) {
   background-color: var(--color-primary-light);
+}
+
+.add-step-btn:disabled {
+  border-color: var(--color-border);
+  color: var(--color-text-light);
+  cursor: not-allowed;
 }
 
 .step-error-text {
@@ -641,8 +711,8 @@
 }
 
 .execute-btn {
-  width: 100%;
-  padding: 0.9rem 0;
+  min-width: 260px;
+  padding: 0.9rem 1.5rem;
   border-radius: var(--radius-sm);
   background: linear-gradient(90deg, #1e2a5e 0%, #1d4ed8 100%);
   color: var(--color-white);
@@ -793,7 +863,26 @@
   .step-grid-2 {
     grid-template-columns: 1fr 1fr;
   }
-  .stitch-two-part {
-    grid-template-columns: 1fr;
+  .current-joins-header {
+    flex-direction: column;
+    align-items: stretch;
   }
+}
+.step-hint-text {
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+  padding: 0.7rem 0.85rem;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: #fafbfd;
+}
+
+.join-summary-card.has-error {
+  border-color: #c0392b;
+  background-color: #fdf3f2;
+}
+
+/* Same heading, marked so a finished ARD reads differently from a step preview. */
+.preview-panel-heading.is-generated {
+  color: var(--color-success, #1a7f4b);
 }

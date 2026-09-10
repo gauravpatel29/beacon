@@ -5,8 +5,22 @@ import './Datastitching.css';
 const DEFAULT_TABS = [
   { id: 'hcp', title: 'HCP-Level ARD', grain: 'hcp', removable: false, editing: false },
   { id: 'dma', title: 'DMA-Level ARD', grain: 'dma', removable: false, editing: false },
-  { id: 'custom', title: 'Create Custom ARD', grain: 'custom', removable: false, editing: false },
 ];
+
+// The five join_type values the build endpoint accepts. Labels deliberately
+// carry no file name — the guide warns that a label like "Left Join (Keep all
+// crosswalk.csv rows)" is ambiguous — and only `value` is ever sent.
+const JOIN_TYPES = [
+  { value: 'left', label: 'Left Join | keep every left row' },
+  { value: 'inner', label: 'Inner Join | keep only rows matching on both sides' },
+  { value: 'right', label: 'Right Join | keep every right row' },
+  { value: 'outer', label: 'Outer Join | keep every row from both sides' },
+  { value: 'cross', label: 'Cross Join | every combination, no keys' },
+];
+
+const JOIN_LABELS = Object.fromEntries(
+  JOIN_TYPES.map((j) => [j.value, j.label.split(' | ')[0]])
+);
 
 const CUSTOM_GRAIN_OPTIONS = [
   { value: 'geo', label: 'Geo-Level ARD' },
@@ -17,13 +31,18 @@ const CUSTOM_GRAIN_OPTIONS = [
 function makeEmptyStep() {
   return {
     leftFile: '', rightFile: '', joinType: 'left',
-    leftIdKey: '', rightIdKey: '', leftDateKey: '', rightDateKey: '',
+    // Positional pairs: keyPairs[n].left joins to keyPairs[n].right. A date key
+    // is simply a second pair rather than a dedicated field.
+    keyPairs: [{ left: '', right: '' }],
   };
 }
 
 function makeDefaultDraft() {
   return {
     customGrain: 'geo',
+    // Blank means "use the grain-based default". Kept per tab so each ARD in
+    // the workflow can be named separately.
+    ardName: '',
     selectedFiles: new Set(),
     steps: [],
     joinCards: [],
@@ -34,6 +53,7 @@ function makeDefaultDraft() {
     isGenerating: false,
     generateError: null,
     activePreview: null, // { cardIndex, data, isLoading, error }
+    generatedArd: null,  // the committed build: { filename, version, row_count, columns, preview }
   };
 }
 
@@ -48,7 +68,7 @@ function Datastitching() {
   const [tabs, setTabs] = useState(DEFAULT_TABS);
   const [activeTabId, setActiveTabId] = useState('hcp');
   const [drafts, setDrafts] = useState(() => ({
-    hcp: makeDefaultDraft(), dma: makeDefaultDraft(), custom: makeDefaultDraft(),
+    hcp: makeDefaultDraft(), dma: makeDefaultDraft(),
   }));
 
   // Modal now edits exactly ONE step at a time.
@@ -131,24 +151,50 @@ function Datastitching() {
     if (!step.leftFile || !step.rightFile) {
       return 'Choose both a left and right dataset.';
     }
-    if (!step.leftIdKey || !step.rightIdKey) {
-      return 'An ID key is required on both sides.';
+    if (step.joinType === 'cross') return null; // cross takes no keys
+
+    const pairs = step.keyPairs || [];
+    const filled = pairs.filter((p) => p.left && p.right);
+    if (!filled.length) {
+      return 'At least one key pair is required.';
     }
-    if (Boolean(step.leftDateKey) !== Boolean(step.rightDateKey)) {
-      return 'Pair the date key on both sides, or leave both empty.';
+    // The API pairs keys positionally and rejects a count mismatch, so a
+    // half-filled row has to be caught before it is sent.
+    if (pairs.some((p) => Boolean(p.left) !== Boolean(p.right))) {
+      return 'Every key pair needs a column on both sides, or remove the row.';
+    }
+    const leftKeys = filled.map((p) => p.left);
+    if (new Set(leftKeys).size !== leftKeys.length) {
+      return 'The same left column is used in more than one key pair.';
     }
     return null;
   };
 
+  // Shown as the placeholder and used when the field is left blank. Matches
+  // what the API would pick on its own, so the two never disagree.
+  const defaultArdName = `__ard_${targetGrain}__.csv`;
+
   const payloadFor = (steps) => ({
-    steps: steps.map((s) => ({
-      left_file: s.leftFile,
-      right_file: s.rightFile,
-      left_key: s.leftDateKey ? [s.leftIdKey, s.leftDateKey] : [s.leftIdKey],
-      right_key: s.rightDateKey ? [s.rightIdKey, s.rightDateKey] : [s.rightIdKey],
-      join_type: s.joinType,
-    })),
+    steps: steps.map((s) => {
+      const base = {
+        left_file: s.leftFile,
+        right_file: s.rightFile,
+        join_type: s.joinType,
+      };
+      // Omit the key arrays entirely on a cross join; the other four 422 with
+      // keys_missing without them.
+      if (s.joinType === 'cross') return base;
+      const filled = (s.keyPairs || []).filter((p) => p.left && p.right);
+      return {
+        ...base,
+        left_key: filled.map((p) => p.left),
+        right_key: filled.map((p) => p.right),
+      };
+    }),
     target_grain: targetGrain,
+    // Only sent when the user typed one; otherwise the API applies its own
+    // grain-based default. A name without .csv gets the extension server-side.
+    ...(draft.ardName.trim() ? { output: draft.ardName.trim() } : {}),
   });
 
   // Re-runs the whole pipeline (dry run) for a given steps array and turns
@@ -156,19 +202,20 @@ function Datastitching() {
   // and final row/column counts always reflect what's really configured.
   const rebuildCardsFromSteps = async (steps) => {
     if (steps.length === 0) {
-      setDraft({ steps: [], joinCards: [], finalRowCount: null, finalColumnCount: null, activePreview: null });
+      setDraft({ steps: [], joinCards: [], finalRowCount: null, finalColumnCount: null, activePreview: null, generatedArd: null });
       return true;
     }
     setDraft({ isSavingPipeline: true, pipelineError: null });
     try {
       const data = await v2BuildArd(workflowId, payloadFor(steps), { dryRun: true });
-      const cards = (data.lineage?.steps_executed || []).map((s, i) => ({
+      const cards = (data.lineage?.steps_executed || []).map((s) => ({
         step: s.step,
         left: s.left,
         right: s.right,
         join: s.join,
-        leftIdKey: steps[i]?.leftIdKey,
-        rightIdKey: steps[i]?.rightIdKey,
+        // The lineage already reports the resolved key names, which is the
+        // authoritative answer once the server has matched them case-insensitively.
+        keys: s.keys || [],
         rows_in: s.rows_in ?? 0,
         rows_out: s.rows_out ?? 0,
       }));
@@ -179,6 +226,8 @@ function Datastitching() {
         finalColumnCount: data.columns?.length ?? 0,
         isSavingPipeline: false,
         activePreview: null,
+        // The steps changed, so the last build no longer describes them.
+        generatedArd: null,
       });
       return true;
     } catch (err) {
@@ -249,10 +298,13 @@ function Datastitching() {
   };
 
   const handleGenerate = async () => {
-    setDraft({ generateError: null, isGenerating: true });
+    setDraft({ generateError: null, isGenerating: true, generatedArd: null, activePreview: null });
     try {
-      await v2BuildArd(workflowId, payloadFor(draft.steps), { dryRun: false });
-      setDraft(makeDefaultDraft());
+      const built = await v2BuildArd(workflowId, payloadFor(draft.steps), { dryRun: false });
+      // Keep the steps and cards rather than resetting the draft: the user
+      // needs to see what produced this ARD, and may want to adjust and
+      // rebuild. The preview panel picks `built` up via shownPreview.
+      setDraft({ generatedArd: built });
     } catch (err) {
       setDraft({
         isGenerating: false,
@@ -267,6 +319,37 @@ function Datastitching() {
   };
 
   const previewedCard = draft.activePreview ? draft.joinCards[draft.activePreview.cardIndex] : null;
+
+  // The panel shows an explicitly requested step preview when one is open,
+  // otherwise the ARD just generated. Same table either way.
+  const shownPreview = draft.activePreview
+    ? {
+        heading: previewedCard
+          ? `Step ${previewedCard.step} result — ${previewedCard.left} + ${previewedCard.right}`
+          : null,
+        isLoading: draft.activePreview.isLoading,
+        error: draft.activePreview.error,
+        data: draft.activePreview.data,
+      }
+    : draft.generatedArd
+    ? {
+        heading: `Generated ${draft.generatedArd.filename}` +
+          (draft.generatedArd.version ? ` — version ${draft.generatedArd.version}` : ''),
+        isLoading: false,
+        error: null,
+        data: draft.generatedArd,
+        isGenerated: true,
+      }
+    : null;
+
+  // problem+json errors carry a 1-based `step`; use it to mark the card that
+  // failed instead of leaving the user to match a banner against a list.
+  const failedSteps = new Set(
+    (draft.pipelineError?.errors || [])
+      .concat(draft.generateError?.errors || [])
+      .map((e) => e.step)
+      .filter((n) => typeof n === 'number')
+  );
 
   return (
     <div className="stitching-page">
@@ -358,14 +441,24 @@ function Datastitching() {
 
           {/* ---- Current Joins ---- */}
           <div className="current-joins-card">
-            <p className="section-heading">
-              Current Joins
-              {draft.joinCards.length > 0 && (
-                <span className="heading-note" style={{ marginLeft: '0.6rem' }}>
-                  {(draft.finalRowCount ?? 0).toLocaleString()} rows · {draft.finalColumnCount ?? 0} columns
-                </span>
-              )}
-            </p>
+            <div className="current-joins-header">
+              <p className="section-heading">
+                Current Joins
+                {draft.joinCards.length > 0 && (
+                  <span className="heading-note" style={{ marginLeft: '0.6rem' }}>
+                    {(draft.finalRowCount ?? 0).toLocaleString()} rows · {draft.finalColumnCount ?? 0} columns
+                  </span>
+                )}
+              </p>
+              <button
+                className="add-step-btn"
+                onClick={openAddJoinModal}
+                disabled={draft.selectedFiles.size === 0}
+                title={draft.selectedFiles.size === 0 ? 'Select at least one source file above first' : undefined}
+              >
+                + Add Join
+              </button>
+            </div>
 
             {draft.pipelineError && (
               <div className="stitching-error-banner">
@@ -376,21 +469,41 @@ function Datastitching() {
 
             {draft.joinCards.length === 0 ? (
               <p className="stitching-empty">
-                No joins configured yet click "Configure Join Pipeline" below to get started.
+                {draft.selectedFiles.size === 0
+                  ? 'Select at least one source file above, then click "+ Add Join".'
+                  : 'No joins configured yet click "+ Add Join" above to get started.'}
               </p>
             ) : (
               draft.joinCards.map((card, i) => (
-                <div key={i} className={`join-summary-card${draft.activePreview?.cardIndex === i ? ' active' : ''}`}>
+                <div
+                  key={i}
+                  className={`join-summary-card${draft.activePreview?.cardIndex === i ? ' active' : ''}${failedSteps.has(card.step) ? ' has-error' : ''}`}
+                >
                   <div className="join-summary-header">
-                    <span className="step-card-title">Join {card.step} {card.join === 'left' ? 'Left Join' : 'Inner Join'}</span>
+                    <span className="step-card-title">Join {card.step} {JOIN_LABELS[card.join] || card.join}</span>
                     <span className="join-summary-rows">
                       {card.rows_in.toLocaleString()} → {' '}
                       <span className={card.rows_out < card.rows_in ? 'rows-dropped' : ''}>{card.rows_out.toLocaleString()}</span> rows
                     </span>
                   </div>
                   <p className="join-summary-desc">
-                    Joining <strong>{card.left}</strong> on <code>{card.leftIdKey}</code> with{' '}
-                    <strong>{card.right}</strong> on <code>{card.rightIdKey}</code>
+                    {card.join === 'cross' ? (
+                      <>
+                        Every combination of <strong>{card.left}</strong> and{' '}
+                        <strong>{card.right}</strong> — no keys
+                      </>
+                    ) : (
+                      <>
+                        Joining <strong>{card.left}</strong> with{' '}
+                        <strong>{card.right}</strong> on{' '}
+                        {(card.keys || []).map((k, ki) => (
+                          <span key={k}>
+                            {ki > 0 && ' + '}
+                            <code>{k}</code>
+                          </span>
+                        ))}
+                      </>
+                    )}
                   </p>
                   <div className="join-summary-actions">
                     <button className="preview-btn" onClick={() => handleCardPreview(i)}>
@@ -414,24 +527,10 @@ function Datastitching() {
             </div>
           )}
 
-          {/* ---- Two-column: action buttons (left) | preview panel (right) ---- */}
-          <div className="stitch-two-part">
-            <div className="stitch-part-actions">
-              <button className="add-step-btn" onClick={openAddJoinModal}>
-                {draft.joinCards.length > 0 ? '+ Add New Join' : '+ Configure Join Pipeline'}
-              </button>
-              <button
-                className="execute-btn"
-                onClick={handleGenerate}
-                disabled={draft.joinCards.length === 0 || draft.isGenerating}
-                title={draft.joinCards.length === 0 ? 'Add at least one join first' : undefined}
-              >
-                {draft.isGenerating ? 'Generating...' : `Generate ${grainLabel} ARD`}
-              </button>
-            </div>
-
+          {/* ---- Preview, then the generate action beneath it ---- */}
+          <div className="stitch-result">
             <div className="preview-panel">
-              {!draft.activePreview ? (
+              {!shownPreview ? (
                 <div className="preview-placeholder">
                   <p className="preview-placeholder-title">No Preview Yet</p>
                   <p className="preview-placeholder-desc">
@@ -440,24 +539,24 @@ function Datastitching() {
                 </div>
               ) : (
                 <>
-                  {previewedCard && (
-                    <p className="preview-panel-heading">
-                      Step {previewedCard.step} result — {previewedCard.left} + {previewedCard.right}
+                  {shownPreview.heading && (
+                    <p className={`preview-panel-heading${shownPreview.isGenerated ? ' is-generated' : ''}`}>
+                      {shownPreview.heading}
                     </p>
                   )}
-                  {draft.activePreview.isLoading && <p className="stitching-empty">Loading preview...</p>}
-                  {draft.activePreview.error && <p className="step-error-text">{draft.activePreview.error}</p>}
-                  {draft.activePreview.data && (
+                  {shownPreview.isLoading && <p className="stitching-empty">Loading preview...</p>}
+                  {shownPreview.error && <p className="step-error-text">{shownPreview.error}</p>}
+                  {shownPreview.data && (
                     <>
                       <div className="sample-table-scroll">
                         <table className="sample-table">
                           <thead>
-                            <tr>{(draft.activePreview.data.columns || []).map((c) => <th key={c}>{c}</th>)}</tr>
+                            <tr>{(shownPreview.data.columns || []).map((c) => <th key={c}>{c}</th>)}</tr>
                           </thead>
                           <tbody>
-                            {(draft.activePreview.data.preview || []).slice(0, 15).map((row, ri) => (
+                            {(shownPreview.data.preview || []).slice(0, 15).map((row, ri) => (
                               <tr key={ri}>
-                                {(draft.activePreview.data.columns || []).map((c) => (
+                                {(shownPreview.data.columns || []).map((c) => (
                                   <td key={c}>{row[c] === null || row[c] === undefined ? '—' : row[c]}</td>
                                 ))}
                               </tr>
@@ -466,12 +565,36 @@ function Datastitching() {
                         </table>
                       </div>
                       <p className="sample-count-line">
-                        {(draft.activePreview.data.row_count ?? 0).toLocaleString()} rows · {(draft.activePreview.data.columns || []).length} columns
+                        {(shownPreview.data.row_count ?? 0).toLocaleString()} rows · {(shownPreview.data.columns || []).length} columns
                       </p>
                     </>
                   )}
                 </>
               )}
+            </div>
+
+            <div className="stitch-generate-actions">
+              <div className="ard-name-field">
+                <label className="step-field-label" htmlFor="ard-name">
+                  Resulting ARD Dataset Name
+                </label>
+                <input
+                  id="ard-name"
+                  type="text"
+                  className="step-input"
+                  value={draft.ardName}
+                  onChange={(e) => setDraft({ ardName: e.target.value })}
+                  placeholder={defaultArdName}
+                />
+              </div>
+              <button
+                className="execute-btn"
+                onClick={handleGenerate}
+                disabled={draft.joinCards.length === 0 || draft.isGenerating}
+                title={draft.joinCards.length === 0 ? 'Add at least one join first' : undefined}
+              >
+                {draft.isGenerating ? 'Generating...' : 'Generate ARD'}
+              </button>
             </div>
           </div>
         </div>
@@ -524,6 +647,30 @@ function SingleJoinModal({ files, selectedFileList, grainLabel, mode, stepIndex,
   const leftCols = columnsForDataset(step.leftFile);
   const rightCols = columnsForDataset(step.rightFile);
 
+  const keyPairs = step.keyPairs || [{ left: '', right: '' }];
+
+  const onChangeKeyPair = (pairIndex, patch) => {
+    onChange({
+      keyPairs: keyPairs.map((p, i) => (i === pairIndex ? { ...p, ...patch } : p)),
+    });
+  };
+
+  const onAddKeyPair = () => {
+    // Suggest the next unused left column, and the same name on the right when
+    // it exists, so the common case needs no further clicks.
+    const taken = keyPairs.map((p) => p.left);
+    const nextLeft = (leftCols || []).find((c) => !taken.includes(c)) || '';
+    const nextRight = (rightCols || []).find(
+      (c) => c.toLowerCase() === String(nextLeft).toLowerCase()
+    ) || '';
+    onChange({ keyPairs: [...keyPairs, { left: nextLeft, right: nextRight }] });
+  };
+
+  const onRemoveKeyPair = (pairIndex) => {
+    if (keyPairs.length <= 1) return; // one pair is the minimum
+    onChange({ keyPairs: keyPairs.filter((_, i) => i !== pairIndex) });
+  };
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="create-ard-modal" onClick={(e) => e.stopPropagation()}>
@@ -544,14 +691,14 @@ function SingleJoinModal({ files, selectedFileList, grainLabel, mode, stepIndex,
             <div className="step-grid-2">
               <div>
                 <p className="step-field-label">Left Dataset</p>
-                <select className="step-select" value={step.leftFile} onChange={(e) => onChange({ leftFile: e.target.value, leftIdKey: '', leftDateKey: '' })}>
+                <select className="step-select" value={step.leftFile} onChange={(e) => onChange({ leftFile: e.target.value, keyPairs: [{ left: '', right: '' }] })}>
                   <option value="">Select...</option>
                   {datasetOptions('left').map((n) => <option key={n} value={n}>{n}</option>)}
                 </select>
               </div>
               <div>
                 <p className="step-field-label">Right Dataset</p>
-                <select className="step-select" value={step.rightFile} onChange={(e) => onChange({ rightFile: e.target.value, rightIdKey: '', rightDateKey: '' })}>
+                <select className="step-select" value={step.rightFile} onChange={(e) => onChange({ rightFile: e.target.value, keyPairs: (step.keyPairs || []).map((p) => ({ ...p, right: '' })) })}>
                   <option value="">Select...</option>
                   {datasetOptions('right').map((n) => <option key={n} value={n}>{n}</option>)}
                 </select>
@@ -561,54 +708,80 @@ function SingleJoinModal({ files, selectedFileList, grainLabel, mode, stepIndex,
             <div style={{ marginBottom: '0.6rem' }}>
               <p className="step-field-label">Join Strategy</p>
               <select className="step-select" value={step.joinType} onChange={(e) => onChange({ joinType: e.target.value })}>
-                <option value="left">Left Join (Keep all {step.leftFile || 'left dataset'} rows)</option>
-                <option value="inner">Inner Join (Keep only matching rows)</option>
+                {JOIN_TYPES.map((j) => <option key={j.value} value={j.value}>{j.label}</option>)}
               </select>
             </div>
 
-            <div className="step-grid-2">
-              <div className="step-key-block">
-                <p className="step-field-label">1. ID Key {step.leftFile && `(${step.leftFile})`}</p>
-                {leftCols ? (
-                  <select className="step-select" value={step.leftIdKey} onChange={(e) => onChange({ leftIdKey: e.target.value })}>
-                    <option value="">Select column...</option>
-                    {leftCols.map((c) => <option key={c} value={c}>{c}</option>)}
-                  </select>
-                ) : (
-                  <input type="text" className="step-input" placeholder="e.g. npi" value={step.leftIdKey} onChange={(e) => onChange({ leftIdKey: e.target.value })} />
-                )}
-                <p className="step-field-label" style={{ marginTop: '0.5rem' }}>2. Date Key</p>
-                {leftCols ? (
-                  <select className="step-select" value={step.leftDateKey} onChange={(e) => onChange({ leftDateKey: e.target.value })}>
-                    <option value="">Select Date (Optional)</option>
-                    {leftCols.map((c) => <option key={c} value={c}>{c}</option>)}
-                  </select>
-                ) : (
-                  <input type="text" className="step-input" placeholder="Select Date (Optional)" value={step.leftDateKey} onChange={(e) => onChange({ leftDateKey: e.target.value })} />
-                )}
-              </div>
+            {step.joinType === 'cross' ? (
+              <p className="step-hint-text">
+                A cross join pairs every left row with every right row, so it takes no keys.
+              </p>
+            ) : (
+              <>
+                {/* Keys are positional pairs: the Nth left key joins to the Nth
+                    right key. A date key is just another pair, so a crosswalk
+                    that joins on the ID alone simply has one. */}
+                {(step.keyPairs || []).map((pair, pairIndex) => (
+                  <div className="step-grid-2" key={pairIndex}>
+                    <div className="step-key-block">
+                      <p className="step-field-label">
+                        {pairIndex + 1}. Key {step.leftFile && `(${step.leftFile})`}
+                      </p>
+                      {leftCols ? (
+                        <select
+                          className="step-select"
+                          value={pair.left}
+                          onChange={(e) => onChangeKeyPair(pairIndex, { left: e.target.value })}
+                        >
+                          <option value="">Select column...</option>
+                          {leftCols.map((c) => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      ) : (
+                        <input
+                          type="text" className="step-input" placeholder="e.g. npi"
+                          value={pair.left}
+                          onChange={(e) => onChangeKeyPair(pairIndex, { left: e.target.value })}
+                        />
+                      )}
+                    </div>
 
-              <div className="step-key-block">
-                <p className="step-field-label">1. ID Key {step.rightFile && `(${step.rightFile})`}</p>
-                {rightCols ? (
-                  <select className="step-select" value={step.rightIdKey} onChange={(e) => onChange({ rightIdKey: e.target.value })}>
-                    <option value="">Select column...</option>
-                    {rightCols.map((c) => <option key={c} value={c}>{c}</option>)}
-                  </select>
-                ) : (
-                  <input type="text" className="step-input" placeholder="e.g. npi_id" value={step.rightIdKey} onChange={(e) => onChange({ rightIdKey: e.target.value })} />
-                )}
-                <p className="step-field-label" style={{ marginTop: '0.5rem' }}>2. Date Key</p>
-                {rightCols ? (
-                  <select className="step-select" value={step.rightDateKey} onChange={(e) => onChange({ rightDateKey: e.target.value })}>
-                    <option value="">Select Date (Optional)</option>
-                    {rightCols.map((c) => <option key={c} value={c}>{c}</option>)}
-                  </select>
-                ) : (
-                  <input type="text" className="step-input" placeholder="Select Date (Optional)" value={step.rightDateKey} onChange={(e) => onChange({ rightDateKey: e.target.value })} />
-                )}
-              </div>
-            </div>
+                    <div className="step-key-block">
+                      <p className="step-field-label">
+                        {pairIndex + 1}. Key {step.rightFile && `(${step.rightFile})`}
+                        {(step.keyPairs || []).length > 1 && (
+                          <button
+                            type="button"
+                            className="step-key-remove"
+                            onClick={() => onRemoveKeyPair(pairIndex)}
+                            aria-label={`Remove key pair ${pairIndex + 1}`}
+                          >&#10005;</button>
+                        )}
+                      </p>
+                      {rightCols ? (
+                        <select
+                          className="step-select"
+                          value={pair.right}
+                          onChange={(e) => onChangeKeyPair(pairIndex, { right: e.target.value })}
+                        >
+                          <option value="">Select column...</option>
+                          {rightCols.map((c) => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      ) : (
+                        <input
+                          type="text" className="step-input" placeholder="e.g. npi_id"
+                          value={pair.right}
+                          onChange={(e) => onChangeKeyPair(pairIndex, { right: e.target.value })}
+                        />
+                      )}
+                    </div>
+                  </div>
+                ))}
+
+                <button type="button" className="step-key-add" onClick={onAddKeyPair}>
+                  + Add key pair
+                </button>
+              </>
+            )}
           </div>
 
           {error && (

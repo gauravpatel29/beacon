@@ -113,22 +113,87 @@ export function buildLiveUpdates(file) {
   return { column_drops, date_formats, dtype_changes, column_renames };
 }
 
-/** Build `filters` from the Filter tab. Columns are post-rename. */
+/**
+ * Is this an NPI column?
+ *
+ * The Luhn check is specific to 10-digit US NPI numbers - run against anything
+ * else it does not validate, it just deletes rows - so it is offered, and sent,
+ * only where it means something. Matched on the name against both the original
+ * and the renamed form, so a rename in either direction cannot leave a Luhn
+ * filter stranded on a column that is no longer an NPI.
+ *
+ * Lives here rather than in the page so the control that offers it and the
+ * builder that sends it can never disagree.
+ */
+export function looksLikeNpi(file, column) {
+  return [column, renamedName(file, column)].some((name) =>
+    /(^|[^a-z])npi([^a-z]|$)/i.test(String(name || '')));
+}
+
+/**
+ * An empty rule for one column. `kind` decides which fields are meaningful and
+ * which control the Filter tab renders; the rest stay inert so switching a
+ * column's type never silently drops what the user typed.
+ */
+export function emptyRule(kind = 'string') {
+  return { kind, min: '', max: '', start: '', end: '', values: [], luhn: false, notNull: false };
+}
+
+/**
+ * Does this rule actually constrain anything?
+ *
+ * A column picked in the dropdown but left blank is a browse, not a filter -
+ * sending it would be a no-op the API still has to validate, and `range` with
+ * neither bound is a 422.
+ */
+export function ruleIsSet(rule) {
+  if (!rule) return false;
+  if (rule.luhn || rule.notNull) return true;
+  if (rule.kind === 'number') return rule.min !== '' || rule.max !== '';
+  if (rule.kind === 'date') return Boolean(rule.start || rule.end);
+  return (rule.values || []).length > 0;
+}
+
+/**
+ * Build `filters` from the Filter tab. Columns are post-rename, because
+ * filters run after `live_updates`.
+ *
+ * Every configured rule is sent, not just the one currently selected in the
+ * dropdown: the dropdown chooses what you are *editing*, and a filter you set
+ * on another column is still a filter you asked for.
+ */
 export function buildFilters(file) {
   const cfg = file.filterConfig || {};
+  const rules = cfg.rules || {};
   const filters = [];
 
-  if (cfg.useLuhn && cfg.npiCol) {
-    filters.push({ type: 'npi_luhn', column: renamedName(file, cfg.npiCol) });
-  }
+  for (const col of Object.keys(rules)) {
+    const rule = rules[col];
+    if (!ruleIsSet(rule)) continue;
+    const column = renamedName(file, col);
 
-  const start = toIsoDate(cfg.startDate);
-  const end = toIsoDate(cfg.endDate);
-  if (cfg.dateCol && (start || end)) {
-    const f = { type: 'date_range', column: renamedName(file, cfg.dateCol) };
-    if (start) f.start = start;
-    if (end) f.end = end;
-    filters.push(f);
+    if (rule.notNull) filters.push({ type: 'not_null', column });
+    // Guarded, not just hidden in the UI: a column renamed away from NPI after
+    // the box was ticked would otherwise still be Luhn-filtered.
+    if (rule.luhn && looksLikeNpi(file, col)) filters.push({ type: 'npi_luhn', column });
+
+    if (rule.kind === 'number' && (rule.min !== '' || rule.max !== '')) {
+      const f = { type: 'range', column };
+      if (rule.min !== '') f.min = Number(rule.min);
+      if (rule.max !== '') f.max = Number(rule.max);
+      filters.push(f);
+    } else if (rule.kind === 'date') {
+      const start = toIsoDate(rule.start);
+      const end = toIsoDate(rule.end);
+      if (start || end) {
+        const f = { type: 'date_range', column };
+        if (start) f.start = start;
+        if (end) f.end = end;
+        filters.push(f);
+      }
+    } else if ((rule.values || []).length) {
+      filters.push({ type: 'value_in', column, values: rule.values });
+    }
   }
 
   return filters;

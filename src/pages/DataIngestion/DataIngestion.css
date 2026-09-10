@@ -753,3 +753,275 @@
   font-size: 0.82rem;
   font-weight: var(--font-weight-medium);
 }
+
+
+/* ─── Control totals ribbon (Assign Category) ───────────────────────────── */
+
+.control-totals {
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--spacing-md);
+  overflow: hidden;
+}
+
+.control-totals-bar {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+  padding: 0.7rem 0.9rem;
+  background-color: #f7f9fc;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.control-totals-bar:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.control-totals-kpis {
+  display: flex;
+  gap: 2rem;
+}
+
+.control-kpi {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.control-kpi-label {
+  font-size: 0.72rem;
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.control-kpi-value {
+  font-size: 1.05rem;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+}
+
+/* A non-zero duplicate count is worth a second look, not an alarm. */
+.control-kpi-value.is-warn {
+  color: #b4690e;
+}
+
+.control-totals-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.control-totals-caret {
+  display: inline-block;
+  transition: transform 0.15s ease;
+}
+
+.control-totals-caret.is-open {
+  transform: rotate(180deg);
+}
+
+.control-totals-error {
+  padding: 0.6rem 0.9rem;
+  font-size: var(--font-size-small);
+  color: var(--color-text-secondary);
+}
+
+.control-totals-panel {
+  padding: 0.6rem 0.9rem;
+  border-top: 1px solid var(--color-border-light);
+}
+
+/* Past five columns the list scrolls instead of pushing the preview table
+   off screen. ~2.1rem per row. */
+.control-totals-panel.is-scrollable {
+  max-height: 11.5rem;
+  overflow-y: auto;
+}
+
+.null-row {
+  display: grid;
+  grid-template-columns: minmax(6rem, 12rem) 1fr 3rem 5rem;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.28rem 0;
+}
+
+.null-row-name {
+  font-size: var(--font-size-small);
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.null-row-track {
+  height: 0.5rem;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.null-row-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.2s ease;
+}
+
+.null-row-pct {
+  font-size: 0.78rem;
+  font-weight: var(--font-weight-semibold);
+  text-align: right;
+}
+
+.null-row-count {
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  text-align: right;
+}
+
+/* ─── Filter: column picker and type-aware controls ─────────────────────── */
+
+.filter-picker {
+  margin-bottom: var(--spacing-md);
+}
+
+.filter-rule {
+  padding: 0.9rem;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  background-color: #fbfcfe;
+  margin-bottom: var(--spacing-md);
+}
+
+.filter-bounds-hint {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  margin: -0.4rem 0 0.7rem;
+}
+
+.value-picker {
+  margin-bottom: 0.7rem;
+}
+
+.value-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.55rem 0;
+}
+
+.value-chip {
+  border: 1px solid var(--color-border);
+  background-color: #eef4ff;
+  border-radius: 999px;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.75rem;
+}
+
+.value-chip.is-clear {
+  background-color: transparent;
+  color: var(--color-text-secondary);
+}
+
+.value-options {
+  max-height: 11rem;
+  overflow-y: auto;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  margin-top: 0.5rem;
+}
+
+.value-option {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.4rem 0.6rem;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--color-border-light);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-small);
+  text-align: left;
+}
+
+.value-option:last-child {
+  border-bottom: none;
+}
+
+.value-option:hover {
+  background-color: #f4f7fc;
+}
+
+.value-option.is-selected {
+  background-color: #eef4ff;
+  font-weight: var(--font-weight-semibold);
+}
+
+.value-option-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.value-option-count {
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+}
+
+.value-hint {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  padding: 0.4rem 0.1rem;
+}
+
+.filter-active {
+  margin-bottom: var(--spacing-md);
+}
+
+.filter-active-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.filter-active-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background-color: #eef4ff;
+  overflow: hidden;
+}
+
+.filter-active-name,
+.filter-active-remove {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.75rem;
+  padding: 0.2rem 0.55rem;
+}
+
+.filter-active-remove {
+  color: var(--color-text-secondary);
+  padding-left: 0.15rem;
+}

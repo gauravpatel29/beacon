@@ -8,7 +8,9 @@ import {
   ensureWorkflow,
   forgetWorkflow,
   getFile,
+  getColumnValues,
   getProfile,
+  getStats,
   listFiles,
   previewSpec,
   storedWorkflowId,
@@ -19,12 +21,16 @@ import {
   buildLiveUpdates,
   buildSpec,
   clampDtype,
+  emptyRule,
+  looksLikeNpi,
+  ruleIsSet,
   humanFormat,
   localProblems,
   localWarnings,
   numericColumns,
   renamedName,
 } from '../../services/manifest.js';
+import { nullPctColor } from '../../services/nullscale.js';
 import './DataIngestion.css';
 
 // ─── Category model ──────────────────────────────────────────────────────
@@ -108,6 +114,199 @@ function suggestCategory(filename) {
   return null;
 }
 
+// ─── Control totals ribbon ────────────────────────────────────────────────
+// Collapsed it answers "is this the file I think it is?" - row count and
+// duplicates. Expanded it answers "can I trust these columns?" - null share
+// per column, which is the thing that actually sinks a model downstream.
+
+// Rows past this many scroll rather than pushing the preview table off screen.
+const NULL_ROWS_BEFORE_SCROLL = 5;
+
+function ControlTotalsRibbon({ stats, isOpen, onToggle }) {
+  const { data, isLoading, error } = stats || {};
+  const columns = data?.columns || [];
+  const rowCount = data?.row_count ?? 0;
+  const duplicates = data?.duplicate_rows ?? 0;
+
+  return (
+    <div className="control-totals">
+      <button
+        type="button"
+        className="control-totals-bar"
+        onClick={onToggle}
+        aria-expanded={isOpen}
+        disabled={!data}
+      >
+        <span className="control-totals-kpis">
+          <span className="control-kpi">
+            <span className="control-kpi-label">Total Row Count</span>
+            <span className="control-kpi-value">
+              {isLoading ? '…' : rowCount.toLocaleString()}
+            </span>
+          </span>
+          <span className="control-kpi">
+            <span className="control-kpi-label">Duplicate Rows</span>
+            <span className={`control-kpi-value${duplicates > 0 ? ' is-warn' : ''}`}>
+              {isLoading ? '…' : duplicates.toLocaleString()}
+            </span>
+          </span>
+        </span>
+        <span className="control-totals-toggle">
+          {error ? 'Unavailable' : isLoading ? 'Loading…' : isOpen ? 'Hide null %' : 'Show null %'}
+          {!error && !isLoading && (
+            <span className={`control-totals-caret${isOpen ? ' is-open' : ''}`} aria-hidden="true">▾</span>
+          )}
+        </span>
+      </button>
+
+      {error && <p className="control-totals-error">{error}</p>}
+
+      {isOpen && data && (
+        <div
+          className={`control-totals-panel${columns.length > NULL_ROWS_BEFORE_SCROLL ? ' is-scrollable' : ''}`}
+        >
+          {columns.map((col) => {
+            const { bar, tint } = nullPctColor(col.null_pct);
+            return (
+              <div className="null-row" key={col.column}>
+                <span className="null-row-name" title={col.column}>{col.column}</span>
+                <span className="null-row-track" style={{ backgroundColor: tint }}>
+                  <span
+                    className="null-row-fill"
+                    style={{ width: `${Math.max(0, Math.min(100, col.null_pct))}%`, backgroundColor: bar }}
+                  />
+                </span>
+                <span className="null-row-pct" style={{ color: bar }}>
+                  {col.null_pct}%
+                </span>
+                <span className="null-row-count">
+                  {col.null_count.toLocaleString()} null
+                </span>
+              </div>
+            );
+          })}
+          {!columns.length && <p className="control-totals-error">No columns to report.</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Filter: one column at a time, control chosen by that column's type ───
+// The type comes from /stats, which reads it off the committed manifest. A
+// column the user has not typed yet is a string, and gets the value picker -
+// which is the honest default, since an unconfirmed profile guess is not a
+// fact about the data.
+
+/** Debounced server-side search over one column's distinct values. */
+function ValuePicker({ workflowId, filename, column, selected, onChange }) {
+  const [query, setQuery] = useState('');
+  const [options, setOptions] = useState([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!column) return undefined;
+    let cancelled = false;
+    // Debounced: typing "california" should not be nine round trips. The
+    // searching flag is set inside the timer, not synchronously here.
+    const timer = setTimeout(() => {
+      setIsSearching(true);
+      getColumnValues(workflowId, filename, column, query, 50)
+        .then((data) => {
+          if (cancelled) return;
+          setOptions(data.values || []);
+          setResult(data);
+          setError(null);
+        })
+        .catch((err) => {
+          if (cancelled) return;
+          setOptions([]);
+          // Most often this is a rename that has not been applied yet: /values
+          // reads the resolved dataset, so it only knows the committed name.
+          setError(err instanceof ApiError ? err.text : 'Could not read this column.');
+        })
+        .finally(() => { if (!cancelled) setIsSearching(false); });
+    }, 250);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [workflowId, filename, column, query]);
+
+  const toggle = (value) => {
+    onChange(selected.includes(value)
+      ? selected.filter((v) => v !== value)
+      : [...selected, value]);
+  };
+
+  return (
+    <div className="value-picker">
+      <input
+        type="text"
+        className="filter-input"
+        placeholder="Type to search values…"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+      />
+
+      {selected.length > 0 && (
+        <div className="value-chips">
+          {selected.map((v) => (
+            <button type="button" className="value-chip" key={v} onClick={() => toggle(v)}>
+              {v}<span aria-hidden="true"> ×</span>
+            </button>
+          ))}
+          <button type="button" className="value-chip is-clear" onClick={() => onChange([])}>
+            Clear all
+          </button>
+        </div>
+      )}
+
+      <div className="value-options">
+        {isSearching && <p className="value-hint">Searching…</p>}
+        {!isSearching && error && <p className="value-hint">{error}</p>}
+        {!isSearching && !error && !options.length && (
+          <p className="value-hint">{query ? `No value matches "${query}".` : 'No values in this column.'}</p>
+        )}
+        {!isSearching && options.map((opt) => (
+          <button
+            type="button"
+            key={opt.value}
+            className={`value-option${selected.includes(opt.value) ? ' is-selected' : ''}`}
+            onClick={() => toggle(opt.value)}
+          >
+            <span className="value-option-text">{opt.value}</span>
+            <span className="value-option-count">{opt.count.toLocaleString()}</span>
+          </button>
+        ))}
+      </div>
+
+      {result?.truncated && (
+        <p className="value-hint">
+          Showing {options.length} of {result.match_count.toLocaleString()} matching values. Keep typing to narrow.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Which control a column gets.
+ *
+ * Server first: /stats reports the type off the committed manifest, which is
+ * what the filter will actually run against. Before anything is committed
+ * there is no manifest to read, so fall back to what the user has chosen on
+ * the Standardize tab - that is their stated intent even if unsaved.
+ */
+function filterKindOf(file, stats, column) {
+  const entry = (stats?.data?.columns || []).find((c) => c.column === renamedName(file, column));
+  if (entry && entry.kind !== 'string') return entry.kind;
+
+  const cast = file.typeCastMap?.[column];
+  if (cast === 'integer' || cast === 'bigint' || cast === 'float' || cast === 'decimal') return 'number';
+  if (cast === 'date' || cast === 'timestamp') return 'date';
+  return entry?.kind || 'string';
+}
+
 let fileIdCounter = 0;
 
 function DataIngestion() {
@@ -129,6 +328,14 @@ function DataIngestion() {
   const [deletingFileId, setDeletingFileId] = useState(null);
   const [applyMessage, setApplyMessage] = useState('');
   const [previewResult, setPreviewResult] = useState(null);
+  // Only RESOLVED control totals: { filename, data, error }. "Loading" is
+  // derived during render from whether this holds the selected file yet, which
+  // keeps the effect free of synchronous setState. Keyed by filename so a slow
+  // response for a file the user has switched away from is never shown against
+  // the wrong file.
+  const [stats, setStats] = useState(null);
+  const [statsOpen, setStatsOpen] = useState(false);
+  const [statsVersion, setStatsVersion] = useState(0);
   const fileInputRef = useRef(null);
 
   const unmappedCount = useMemo(
@@ -199,7 +406,9 @@ function DataIngestion() {
               ? Object.fromEntries(updates.date_formats.map((item) => [item.column, item.from]))
               : Object.fromEntries(profile.filter((p) => p.suggested_date_from)
                   .map((p) => [p.column, p.suggested_date_from])),
-            filterConfig: { npiCol: '', dateCol: '', useLuhn: false, startDate: '', endDate: '' },
+            // The Filter tab edits one column at a time (`activeColumn`) but keeps a
+          // rule per column, so switching the dropdown never discards a filter.
+          filterConfig: { activeColumn: '', rules: {} },
             granularityConfig: { dateCol: '', geoCol: '', detected: null, target: '', numOps: {} },
           };
         }));
@@ -247,7 +456,9 @@ function DataIngestion() {
             .map((p) => ({ col: p.column, format: '%Y-%m-%d' })),
           dateSourceFormats: Object.fromEntries(profile.filter((p) => p.suggested_date_from)
             .map((p) => [p.column, p.suggested_date_from])),
-          filterConfig: { npiCol: '', dateCol: '', useLuhn: false, startDate: '', endDate: '' },
+          // The Filter tab edits one column at a time (`activeColumn`) but keeps a
+          // rule per column, so switching the dropdown never discards a filter.
+          filterConfig: { activeColumn: '', rules: {} },
           granularityConfig: { dateCol: '', geoCol: '', detected: null, target: '', numOps: {} },
         };
       }));
@@ -347,11 +558,31 @@ function DataIngestion() {
       dateConfigs: file.dateConfigs.map((d) => (d.col === col ? { ...d, format } : d)),
     });
 
-  // Filter tab
-  const setFilterField = (file, key, value) =>
+  // Filter tab. One rule per column; the dropdown only chooses which one is
+  // being edited, so switching columns never discards a filter.
+  const setActiveFilterColumn = (file, column) =>
     updateFileConfig(file.id, {
-      filterConfig: { ...file.filterConfig, [key]: value },
+      filterConfig: { ...file.filterConfig, activeColumn: column },
     });
+
+  const setFilterRuleField = (file, key, value) => {
+    const column = file.filterConfig.activeColumn;
+    if (!column) return;
+    const kind = filterKindOf(file, statsFor, column);
+    const current = file.filterConfig.rules?.[column] || emptyRule(kind);
+    updateFileConfig(file.id, {
+      filterConfig: {
+        ...file.filterConfig,
+        rules: { ...file.filterConfig.rules, [column]: { ...current, kind, [key]: value } },
+      },
+    });
+  };
+
+  const clearFilterRule = (file, column) => {
+    const rules = { ...file.filterConfig.rules };
+    delete rules[column];
+    updateFileConfig(file.id, { filterConfig: { ...file.filterConfig, rules } });
+  };
 
   // Granularity tab
   const setGranularityField = (file, key, value) =>
@@ -398,6 +629,9 @@ function DataIngestion() {
         previewColumns: committed.columns || file.columns,
         totalRows: committed.row_count,
       });
+      // The resolved frame just changed, so the control totals describe the
+      // previous version until they are re-read.
+      setStatsVersion((v) => v + 1);
       setApplyMessage(['Configuration applied successfully. The preview now shows the transformed dataset.', ...localWarnings(file)].join(' '));
     } catch (err) {
       setApplyMessage(err instanceof ApiError ? err.text : 'Configuration could not be applied.');
@@ -484,6 +718,59 @@ function DataIngestion() {
   };
 
   const selectedFile = uploadedFiles.find((f) => f.id === selectedFileId);
+
+  // Control totals for whichever file is selected. Read from the server rather
+  // than computed from `previewRows`, because the preview is only the first
+  // 100 rows - a null percentage derived from it would look authoritative and
+  // be wrong.
+  const statsKey = selectedFile ? `${selectedFile.workflowId}/${selectedFile.filename}` : null;
+  useEffect(() => {
+    if (!selectedFile?.workflowId) return undefined;
+    let cancelled = false;
+    const { workflowId, filename } = selectedFile;
+    getStats(workflowId, filename)
+      .then((data) => { if (!cancelled) setStats({ filename, data, error: null }); })
+      .catch((err) => {
+        if (cancelled) return;
+        setStats({ filename, data: null,
+                   error: err instanceof ApiError ? err.text : 'Could not read control totals.' });
+      });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line
+  }, [statsKey, statsVersion]);
+
+  // Anything not yet resolved for THIS file reads as loading, including the
+  // window between selecting a file and its request coming back.
+  const statsFor = selectedFile
+    ? (stats && stats.filename === selectedFile.filename
+        ? { ...stats, isLoading: false }
+        : { filename: selectedFile.filename, data: null, error: null, isLoading: true })
+    : null;
+
+  // Post-rename column -> stats entry, because /stats describes the resolved
+  // frame while the tab still works in original column names.
+  const statsByColumn = Object.fromEntries((statsFor?.data?.columns || []).map((c) => [c.column, c]));
+  const filterKinds = selectedFile
+    ? Object.fromEntries(selectedFile.selectedCols.map((c) => [c, filterKindOf(selectedFile, statsFor, c)]))
+    : {};
+
+  const activeFilterColumn = selectedFile?.filterConfig?.activeColumn || '';
+  const activeFilterKind = activeFilterColumn ? filterKinds[activeFilterColumn] : null;
+  const activeFilterRule =
+    (activeFilterColumn && selectedFile.filterConfig.rules?.[activeFilterColumn]) ||
+    emptyRule(activeFilterKind || 'string');
+  const activeFilterIsNpi = Boolean(activeFilterColumn) && looksLikeNpi(selectedFile, activeFilterColumn);
+  const activeFilterBounds = activeFilterColumn
+    ? statsByColumn[renamedName(selectedFile, activeFilterColumn)] || null
+    : null;
+
+  // Which columns currently carry a real constraint - what Apply will send.
+  const activeFilterSummary = selectedFile
+    ? Object.keys(selectedFile.filterConfig.rules || {})
+        .filter((c) => ruleIsSet(selectedFile.filterConfig.rules[c]))
+        .map((c) => ({ column: c, label: renamedName(selectedFile, c) }))
+    : [];
+
   const previewColumns = selectedFile?.previewColumns || selectedFile?.columns || [];
   const hasFiles = uploadedFiles.length > 0;
   // Only numeric, kept columns can be aggregated, and never the two grouping
@@ -799,66 +1086,157 @@ function DataIngestion() {
 
                 {activeTab === 'filter' && (
                   <>
-                    <div className="filter-grid">
-                      <div>
-                        <p className="filter-field-label">NPI</p>
-                        <select
-                          className="filter-select"
-                          value={selectedFile.filterConfig.npiCol}
-                          onChange={(e) => setFilterField(selectedFile, 'npiCol', e.target.value)}
-                        >
-                          <option value="">Select column (optional)</option>
-                          {selectedFile.columns.map((c) => (
-                            <option key={c} value={c}>{c}</option>
-                          ))}
-                        </select>
-                      </div>
-                      <div>
-                        <p className="filter-field-label">Date</p>
-                        <select
-                          className="filter-select"
-                          value={selectedFile.filterConfig.dateCol}
-                          onChange={(e) => setFilterField(selectedFile, 'dateCol', e.target.value)}
-                        >
-                          <option value="">Select column (optional)</option>
-                          {selectedFile.columns.map((c) => (
-                            <option key={c} value={c}>{c}</option>
-                          ))}
-                        </select>
-                      </div>
+                    <div className="filter-picker">
+                      <p className="filter-field-label">Column</p>
+                      <select
+                        className="filter-select"
+                        value={activeFilterColumn}
+                        onChange={(e) => setActiveFilterColumn(selectedFile, e.target.value)}
+                      >
+                        <option value="">Select a column to filter</option>
+                        {selectedFile.selectedCols.map((c) => (
+                          <option key={c} value={c}>
+                            {renamedName(selectedFile, c)}
+                            {ruleIsSet(selectedFile.filterConfig.rules?.[c]) ? '  •' : ''}
+                          </option>
+                        ))}
+                      </select>
                     </div>
 
-                    <label className="filter-checkbox-row">
-                      <input
-                        type="checkbox"
-                        checked={selectedFile.filterConfig.useLuhn}
-                        onChange={(e) => setFilterField(selectedFile, 'useLuhn', e.target.checked)}
-                      />
-                      Apply Luhn algorithm validation to NPI (checks 10-digit US NPI numbers)
-                    </label>
+                    {!activeFilterColumn && (
+                      <p className="tab-placeholder-note">
+                        Pick a column above. The controls shown depend on its type: a range for
+                        numbers, a start and end for dates, and a searchable value list for text.
+                      </p>
+                    )}
 
-                    <div className="filter-grid">
-                      <div>
-                        <p className="filter-field-label">Start Date</p>
-                        <input
-                          type="text"
-                          className="filter-input"
-                          placeholder="e.g. 01/01/2026"
-                          value={selectedFile.filterConfig.startDate}
-                          onChange={(e) => setFilterField(selectedFile, 'startDate', e.target.value)}
-                        />
+                    {activeFilterColumn && (
+                      <div className="filter-rule">
+                        {activeFilterKind === 'number' && (
+                          <>
+                            <div className="filter-grid">
+                              <div>
+                                <p className="filter-field-label">Minimum</p>
+                                <input
+                                  type="number"
+                                  className="filter-input"
+                                  placeholder={activeFilterBounds?.min ?? 'No lower bound'}
+                                  value={activeFilterRule.min}
+                                  onChange={(e) => setFilterRuleField(selectedFile, 'min', e.target.value)}
+                                />
+                              </div>
+                              <div>
+                                <p className="filter-field-label">Maximum</p>
+                                <input
+                                  type="number"
+                                  className="filter-input"
+                                  placeholder={activeFilterBounds?.max ?? 'No upper bound'}
+                                  value={activeFilterRule.max}
+                                  onChange={(e) => setFilterRuleField(selectedFile, 'max', e.target.value)}
+                                />
+                              </div>
+                            </div>
+                            {activeFilterBounds && activeFilterBounds.min !== null && activeFilterBounds.max !== null && (
+                              <p className="filter-bounds-hint">
+                                This column runs {Number(activeFilterBounds.min).toLocaleString()} to{' '}
+                                {Number(activeFilterBounds.max).toLocaleString()}. Leave a box empty for no bound.
+                              </p>
+                            )}
+                          </>
+                        )}
+
+                        {activeFilterKind === 'date' && (
+                          <>
+                            <div className="filter-grid">
+                              <div>
+                                <p className="filter-field-label">Start Date</p>
+                                <input
+                                  type="date"
+                                  className="filter-input"
+                                  value={activeFilterRule.start}
+                                  onChange={(e) => setFilterRuleField(selectedFile, 'start', e.target.value)}
+                                />
+                              </div>
+                              <div>
+                                <p className="filter-field-label">End Date</p>
+                                <input
+                                  type="date"
+                                  className="filter-input"
+                                  value={activeFilterRule.end}
+                                  onChange={(e) => setFilterRuleField(selectedFile, 'end', e.target.value)}
+                                />
+                              </div>
+                            </div>
+                            {activeFilterBounds && activeFilterBounds.min && activeFilterBounds.max && (
+                              <p className="filter-bounds-hint">
+                                This column runs {activeFilterBounds.min} to {activeFilterBounds.max}.
+                                Both bounds are inclusive.
+                              </p>
+                            )}
+                          </>
+                        )}
+
+                        {activeFilterKind === 'string' && (
+                          <ValuePicker
+                            workflowId={selectedFile.workflowId}
+                            filename={selectedFile.filename}
+                            column={renamedName(selectedFile, activeFilterColumn)}
+                            selected={activeFilterRule.values}
+                            onChange={(values) => setFilterRuleField(selectedFile, 'values', values)}
+                          />
+                        )}
+
+                        <label className="filter-checkbox-row">
+                          <input
+                            type="checkbox"
+                            checked={activeFilterRule.notNull}
+                            onChange={(e) => setFilterRuleField(selectedFile, 'notNull', e.target.checked)}
+                          />
+                          Drop rows where this column is empty
+                        </label>
+
+                        {activeFilterIsNpi && (
+                          <label className="filter-checkbox-row">
+                            <input
+                              type="checkbox"
+                              checked={activeFilterRule.luhn}
+                              onChange={(e) => setFilterRuleField(selectedFile, 'luhn', e.target.checked)}
+                            />
+                            Apply Luhn algorithm validation (checks 10-digit US NPI numbers)
+                          </label>
+                        )}
                       </div>
-                      <div>
-                        <p className="filter-field-label">End Date</p>
-                        <input
-                          type="text"
-                          className="filter-input"
-                          placeholder="e.g. 31/12/2026"
-                          value={selectedFile.filterConfig.endDate}
-                          onChange={(e) => setFilterField(selectedFile, 'endDate', e.target.value)}
-                        />
+                    )}
+
+                    {/* Every configured rule is sent on Apply, not just the one on
+                        screen, so the ones out of view have to stay visible somewhere. */}
+                    {activeFilterSummary.length > 0 && (
+                      <div className="filter-active">
+                        <p className="filter-field-label">Active filters</p>
+                        <div className="filter-active-list">
+                          {activeFilterSummary.map((item) => (
+                            <span className="filter-active-chip" key={item.column}>
+                              <button
+                                type="button"
+                                className="filter-active-name"
+                                onClick={() => setActiveFilterColumn(selectedFile, item.column)}
+                              >
+                                {item.label}
+                              </button>
+                              <button
+                                type="button"
+                                className="filter-active-remove"
+                                aria-label={`Remove filter on ${item.label}`}
+                                onClick={() => clearFilterRule(selectedFile, item.column)}
+                              >
+                                ×
+                              </button>
+                            </span>
+                          ))}
+                        </div>
                       </div>
-                    </div>
+                    )}
+
                     <div className="filter-actions">
                       {previewResult?.fileId === selectedFile.id && previewResult.applied.filters_applied > 0 && (
                         <p className="preview-filter-result" role="status">
@@ -997,6 +1375,17 @@ function DataIngestion() {
 
                 <div className="mapping-preview-section">
                   <p className="mapping-section-label">Preview</p>
+
+                  {/* Control totals sit directly above the table they describe,
+                      on Assign Category only - that is where the user is still
+                      deciding whether the file is the right one. */}
+                  {activeTab === 'mapping' && statsFor && (
+                    <ControlTotalsRibbon
+                      stats={statsFor}
+                      isOpen={statsOpen}
+                      onToggle={() => setStatsOpen((open) => !open)}
+                    />
+                  )}
 
                   {isPreviewing && (
                     <p className="mapping-config-subtitle" role="status">

@@ -125,6 +125,29 @@ export const getFile = (workflowId, filename, previewRows = 100) =>
 export const getProfile = (workflowId, filename) =>
   request(`/v2/workflows/${workflowId}/files/${encodeURIComponent(filename)}/profile`);
 
+/**
+ * Control totals and per-column filter bounds, over the WHOLE resolved frame.
+ * GET /v2/workflows/{workflow_id}/files/{filename}/stats
+ * -> { row_count, duplicate_rows, columns: [{ column, kind, null_count,
+ *      null_pct, distinct_count, min, max }] }
+ * `kind` is 'number' | 'date' | 'string', taken from the committed spec -
+ * a column the user has not typed yet reads as 'string'.
+ */
+export const getStats = (workflowId, filename) =>
+  request(`/v2/workflows/${workflowId}/files/${encodeURIComponent(filename)}/stats`);
+
+/**
+ * Distinct values of one column, for the categorical filter's type-ahead.
+ * GET /v2/workflows/{workflow_id}/files/{filename}/values?column=&q=&limit=
+ * The search runs server-side, so an ID column with a million distinct values
+ * is never shipped to the browser to be filtered here.
+ */
+export const getColumnValues = (workflowId, filename, column, q = '', limit = 50) =>
+  request(
+    `/v2/workflows/${workflowId}/files/${encodeURIComponent(filename)}/values` +
+      `?column=${encodeURIComponent(column)}&q=${encodeURIComponent(q)}&limit=${limit}`
+  );
+
 /** Dry run: applies the manifest to the stored bytes and stores nothing. */
 export const previewSpec = (workflowId, filename, spec) =>
   request(
