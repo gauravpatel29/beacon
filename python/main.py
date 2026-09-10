@@ -12,6 +12,7 @@ from routers import (
     v1_workflows,
     v1_storage,
     v2_files,
+    v2_ard,
     ingestion,
     correlation,
     eda,
@@ -58,6 +59,7 @@ app.include_router(v1_storage.router, prefix="/v1/workflows", tags=["Beacon V1 S
 
 # Beacon v2 - manifest-driven ingestion on Neon Postgres + Object Storage
 app.include_router(v2_files.router, prefix="/v2/workflows", tags=["Beacon V2 Datasets"])
+app.include_router(v2_ard.router, prefix="/v2/workflows", tags=["Beacon V2 Stitching & ARD"])
 
 # MMM Modeling Routes
 app.include_router(workflows.router, prefix="/api/workflows", tags=["Workflows Management"])

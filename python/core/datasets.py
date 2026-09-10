@@ -296,10 +296,20 @@ async def reapply(
     }, expect_version=expect_version)
 
 
-async def store_merged(
-    workflow_id: str, filename: str, df: pd.DataFrame, inputs: List[str], how: str, on: List[str]
+async def store_derived(
+    workflow_id: str,
+    filename: str,
+    df: pd.DataFrame,
+    kind: str,
+    derived_from: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Persist a merge output as a first-class dataset in its own right."""
+    """Persist a computed frame (a merge, an ARD) as a dataset in its own right.
+
+    Such a dataset has no uploaded source of its own: its "raw" object is the
+    computed result, and `derived_from` records what produced it. Storing it
+    like any other dataset means preview, download, the CSV handoff and
+    `resolve_frame` all work on it without special cases downstream.
+    """
     body = transform.write_table(filename, df)
     rkey = store.raw_key(workflow_id, filename)
     dkey = store.derived_key(workflow_id, filename)
@@ -307,8 +317,6 @@ async def store_merged(
 
     written: List[str] = []
     try:
-        # A merge output's "raw" is the merge result: re-deriving it means
-        # re-running the merge, which the `derived_from` record describes.
         store.put_bytes(rkey, body, ctype)
         written.append(rkey)
         store.put_bytes(dkey, body, ctype)
@@ -326,12 +334,22 @@ async def store_merged(
             "columns": [str(c) for c in df.columns],
             "applied": {"rows_out": int(len(df))},
             "spec": {},
-            "derived_from": {"inputs": inputs, "how": how, "on": on},
-            "kind": "merge",
+            "derived_from": derived_from,
+            "kind": kind,
         })
     except Exception:
         store.delete_keys(written)
         raise
+
+
+async def store_merged(
+    workflow_id: str, filename: str, df: pd.DataFrame, inputs: List[str], how: str, on: List[str]
+) -> Dict[str, Any]:
+    """Persist a merge output. Thin wrapper over `store_derived`."""
+    return await store_derived(
+        workflow_id, filename, df, "merge",
+        {"inputs": inputs, "how": how, "on": on},
+    )
 
 
 async def delete_dataset(workflow_id: str, filename: str) -> None:
