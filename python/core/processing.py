@@ -1516,7 +1516,7 @@ def create_response_curve(channel_name, impactable_sales_nation, beta_coeff, spe
     return pd.DataFrame(rows)
 
 # ---------------------------------------------------------------------------
-# ARD Pipeline Multi-Step Stitching Engine
+# Universal ARD Pipeline Multi-Step Stitching Engine (Includes Cross Join)
 # ---------------------------------------------------------------------------
 def _parse_csv_resilient(content: str) -> pd.DataFrame:
     if not content or not str(content).strip():
@@ -1572,6 +1572,14 @@ def execute_ard_pipeline(
     files_map: Dict[str, str],
     target_grain: str = "hcp",
 ) -> Dict[str, Any]:
+    """
+    Universal multi-table join engine supporting:
+    - Left Outer Join ('left')
+    - Inner Join ('inner')
+    - Right Outer Join ('right')
+    - Full Outer Join ('outer')
+    - Cross Join ('cross')
+    """
     if not files_map:
         raise ValueError("No source datasets provided in files_map.")
 
@@ -1592,12 +1600,20 @@ def execute_ard_pipeline(
     for idx, step in enumerate(steps):
         l_name = str(step.get("left_file", "")).strip()
         r_name = str(step.get("right_file", "")).strip()
-        join_type = "inner" if "inner" in str(step.get("join_type", "")).lower() else "left"
 
-        l_raw_keys = _clean_key_list(step.get("left_key"))
-        r_raw_keys = _clean_key_list(step.get("right_key"))
+        # Parse join strategy (left, right, inner, outer, cross)
+        strategy_input = str(step.get("join_type", "left")).lower()
+        if "cross" in strategy_input:
+            join_type = "cross"
+        elif "inner" in strategy_input:
+            join_type = "inner"
+        elif "right" in strategy_input:
+            join_type = "right"
+        elif "outer" in strategy_input:
+            join_type = "outer"
+        else:
+            join_type = "left"
 
-        # Explicit lookup without using 'or' on DataFrames
         left_df = dataset_registry.get(l_name)
         if left_df is None:
             left_df = dataset_registry.get(l_name.lower())
@@ -1613,66 +1629,86 @@ def execute_ard_pipeline(
 
         left_df = left_df.copy()
         right_df = right_df.copy()
+        suffix_tag = f"_step{idx+1}"
 
-        l_keys = []
-        r_keys = []
-        for lk, rk in zip(l_raw_keys, r_raw_keys):
-            real_lk = _find_col_case_insensitive(left_df, lk)
-            real_rk = _find_col_case_insensitive(right_df, rk)
-            if not real_lk:
-                raise ValueError(f"Step {idx + 1}: Key '{lk}' missing in Left dataset '{l_name}'. Columns: {list(left_df.columns)}")
-            if not real_rk:
-                raise ValueError(f"Step {idx + 1}: Key '{rk}' missing in Right dataset '{r_name}'. Columns: {list(right_df.columns)}")
-            l_keys.append(real_lk)
-            r_keys.append(real_rk)
+        # ─── CASE A: CROSS JOIN (No join keys needed) ──────────────────────
+        if join_type == "cross":
+            current_df = pd.merge(
+                left_df,
+                right_df,
+                how="cross",
+                suffixes=("", suffix_tag)
+            )
+            lineage_keys = ["(Cross / Cartesian Product)"]
 
-        if len(l_keys) != len(r_keys) or len(l_keys) == 0:
-            raise ValueError(f"Step {idx + 1}: Please select both HCP ID Key and Date Key for both datasets.")
-
-        # Standardize join key formats
-        for lk, rk in zip(l_keys, r_keys):
-            is_date = any(t in lk.lower() for t in ["date", "week", "month", "time", "period"])
-            left_df[lk] = _standardize_column(left_df[lk], is_date=is_date)
-            right_df[rk] = _standardize_column(right_df[rk], is_date=is_date)
-
-        # Pre-aggregate numeric metrics on join keys in Right Dataset
-        non_key_cols = [c for c in right_df.columns if c not in r_keys]
-        agg_dict = {}
-        for c in non_key_cols:
-            num_series = pd.to_numeric(right_df[c], errors="coerce")
-            if num_series.notna().sum() > 0:
-                right_df[c] = num_series.fillna(0)
-                agg_dict[c] = "sum"
-            else:
-                agg_dict[c] = "first"
-
-        if agg_dict and len(right_df) > 0:
-            right_df = right_df.groupby(r_keys, as_index=False).agg(agg_dict)
+        # ─── CASE B: KEY-BASED JOINS (left, inner, right, outer) ───────────
         else:
-            right_df = right_df.drop_duplicates(subset=r_keys)
+            l_raw_keys = _clean_key_list(step.get("left_key"))
+            r_raw_keys = _clean_key_list(step.get("right_key"))
 
-        rename_map = {rk: lk for lk, rk in zip(l_keys, r_keys) if lk != rk and rk in right_df.columns}
-        if rename_map:
-            for target_k in rename_map.values():
-                if target_k in right_df.columns:
-                    right_df = right_df.drop(columns=[target_k])
-            right_df = right_df.rename(columns=rename_map)
+            l_keys = []
+            r_keys = []
+            for lk, rk in zip(l_raw_keys, r_raw_keys):
+                real_lk = _find_col_case_insensitive(left_df, lk)
+                real_rk = _find_col_case_insensitive(right_df, rk)
+                if not real_lk:
+                    raise ValueError(f"Step {idx + 1}: Key '{lk}' not found in '{l_name}'. Columns: {list(left_df.columns)}")
+                if not real_rk:
+                    raise ValueError(f"Step {idx + 1}: Key '{rk}' not found in '{r_name}'. Columns: {list(right_df.columns)}")
+                l_keys.append(real_lk)
+                r_keys.append(real_rk)
 
-        # Merge
-        current_df = pd.merge(
-            left_df,
-            right_df,
-            on=l_keys,
-            how=join_type,
-            suffixes=("", f"_step{idx+1}")
-        )
+            if len(l_keys) != len(r_keys) or len(l_keys) == 0:
+                raise ValueError(f"Step {idx + 1}: Please select matching join keys for both datasets.")
 
-        for col in right_df.columns:
-            if col not in l_keys and col in current_df.columns and pd.api.types.is_numeric_dtype(current_df[col]):
+            # Standardize ID and Date formats across both datasets
+            for lk, rk in zip(l_keys, r_keys):
+                is_date = any(t in lk.lower() for t in ["date", "week", "month", "time", "period"])
+                left_df[lk] = _standardize_column(left_df[lk], is_date=is_date)
+                right_df[rk] = _standardize_column(right_df[rk], is_date=is_date)
+
+            # Pre-aggregate numeric metrics on Right Dataset (prevents Cartesian explosion on duplicates)
+            non_key_cols = [c for c in right_df.columns if c not in r_keys]
+            agg_dict = {}
+            for c in non_key_cols:
+                num_series = pd.to_numeric(right_df[c], errors="coerce")
+                if num_series.notna().sum() > 0:
+                    right_df[c] = num_series.fillna(0)
+                    agg_dict[c] = "sum"
+                else:
+                    agg_dict[c] = "first"
+
+            if agg_dict and len(right_df) > 0:
+                right_df = right_df.groupby(r_keys, as_index=False).agg(agg_dict)
+            else:
+                right_df = right_df.drop_duplicates(subset=r_keys)
+
+            # Align Right key names to Left key names
+            rename_map = {rk: lk for lk, rk in zip(l_keys, r_keys) if lk != rk and rk in right_df.columns}
+            if rename_map:
+                for target_k in rename_map.values():
+                    if target_k in right_df.columns:
+                        right_df = right_df.drop(columns=[target_k])
+                right_df = right_df.rename(columns=rename_map)
+
+            # Perform Merge
+            current_df = pd.merge(
+                left_df,
+                right_df,
+                on=l_keys,
+                how=join_type,
+                suffixes=("", suffix_tag)
+            )
+            lineage_keys = l_keys
+
+        # Clean up and fill numeric nulls
+        for col in current_df.columns:
+            if pd.api.types.is_numeric_dtype(current_df[col]):
                 current_df[col] = current_df[col].fillna(0)
 
         current_df = current_df.loc[:, ~current_df.columns.duplicated()]
 
+        # Register output for subsequent steps
         dataset_registry[f"Step {idx + 1} Result"] = current_df.copy()
         dataset_registry[f"step {idx + 1} result"] = current_df.copy()
 
@@ -1680,12 +1716,12 @@ def execute_ard_pipeline(
             "step": idx + 1,
             "left": l_name,
             "right": r_name,
-            "join": join_type,
-            "keys": l_keys,
+            "join": f"{join_type.upper()} JOIN",
+            "keys": lineage_keys,
         })
 
     if current_df is None or current_df.empty:
-        raise ValueError("Pipeline generated 0 rows. Verify that key values overlap across files.")
+        raise ValueError("Join completed with 0 rows. Verify that selected keys have matching values.")
 
     current_df = current_df.replace({np.nan: None})
     csv_out = current_df.to_csv(index=False)

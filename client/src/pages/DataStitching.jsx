@@ -25,12 +25,11 @@ export default function DataStitching() {
   }, [ingestedFiles]);
 
   // ─── 1. Tab Selection (HCP, DMA, Custom) ──────────────────────────────────
-  const [activeTab, setActiveTab] = useState("hcp"); // 'hcp' | 'dma' | 'custom'
+  const [activeTab, setActiveTab] = useState("hcp");
 
-  // ─── 2. Source Files Checklist per Tab ────────────────────────────────────
+  // ─── 2. Source Files Checklist ────────────────────────────────────────────
   const [selectedSourceFiles, setSelectedSourceFiles] = useState(() => fileNames);
 
-  // Auto-filter suggested source files when switching tabs
   useEffect(() => {
     if (!fileNames.length) return;
     if (activeTab === "hcp") {
@@ -89,8 +88,8 @@ export default function DataStitching() {
     );
   }, [activeTab]);
 
-  // ─── 4. Sequential Pipeline State ─────────────────────────────────────────
-  const getSuggestedKeys = (lFile, rFile) => {
+  // ─── 4. Helper to get default single primary key pair ─────────────────────
+  const getSingleDefaultKeyPair = (lFile, rFile) => {
     const lCols = datasetColumns[lFile] || allKnownCols;
     const rCols = datasetColumns[rFile] || allKnownCols;
 
@@ -104,51 +103,34 @@ export default function DataStitching() {
       rCols[0] ||
       "";
 
-    const autoLDate =
-      lCols.find((c) => c.toLowerCase().includes("date") || c.toLowerCase().includes("week") || c.toLowerCase().includes("month") || c.toLowerCase().includes("period")) ||
-      "";
-    const autoRDate =
-      rCols.find((c) => c.toLowerCase() === autoLDate.toLowerCase()) ||
-      rCols.find((c) => c.toLowerCase().includes("date") || c.toLowerCase().includes("week") || c.toLowerCase().includes("month") || c.toLowerCase().includes("period")) ||
-      "";
-
-    return { autoLKey, autoRKey, autoLDate, autoRDate };
+    return [{ left_key: autoLKey, right_key: autoRKey }];
   };
 
+  // ─── 5. Steps State ───────────────────────────────────────────────────────
   const [steps, setSteps] = useState(() => {
     const s1Left = selectedSourceFiles[0] || fileNames[0] || "";
     const s1Right = selectedSourceFiles[1] || fileNames[1] || "";
-    const { autoLKey, autoRKey, autoLDate, autoRDate } = getSuggestedKeys(s1Left, s1Right);
-
     return [
       {
         left_file: s1Left,
         right_file: s1Right,
         join_type: "left",
-        left_key: autoLKey,
-        right_key: autoRKey,
-        left_date_key: autoLDate,
-        right_date_key: autoRDate,
+        key_pairs: getSingleDefaultKeyPair(s1Left, s1Right),
       },
     ];
   });
 
-  // Re-sync initial step if selectedSourceFiles change
   useEffect(() => {
     if (selectedSourceFiles.length >= 2 && (!steps[0]?.left_file || !selectedSourceFiles.includes(steps[0]?.left_file))) {
       const s1Left = selectedSourceFiles[0];
       const s1Right = selectedSourceFiles[1];
-      const { autoLKey, autoRKey, autoLDate, autoRDate } = getSuggestedKeys(s1Left, s1Right);
 
       setSteps([
         {
           left_file: s1Left,
           right_file: s1Right,
           join_type: "left",
-          left_key: autoLKey,
-          right_key: autoRKey,
-          left_date_key: autoLDate,
-          right_date_key: autoRDate,
+          key_pairs: getSingleDefaultKeyPair(s1Left, s1Right),
         },
       ]);
     }
@@ -165,16 +147,14 @@ export default function DataStitching() {
     return [...selectedSourceFiles, ...prevSteps];
   };
 
+  // ─── Step Operations ──────────────────────────────────────────────────────
   const addJoinStep = () => {
     const prevResultName = `Step ${steps.length} Result`;
-    // Find next unused source file
     const usedRights = steps.map((s) => s.right_file);
     const defaultRight =
       selectedSourceFiles.find((f) => f !== steps[0]?.left_file && !usedRights.includes(f)) ||
       selectedSourceFiles[0] ||
       "";
-
-    const { autoLKey, autoRKey, autoLDate, autoRDate } = getSuggestedKeys(steps[0]?.left_file, defaultRight);
 
     setSteps((prev) => [
       ...prev,
@@ -182,45 +162,105 @@ export default function DataStitching() {
         left_file: prevResultName,
         right_file: defaultRight,
         join_type: "left",
-        left_key: steps[0]?.left_key || autoLKey,
-        right_key: autoRKey,
-        left_date_key: steps[0]?.left_date_key || autoLDate,
-        right_date_key: autoRDate,
+        key_pairs: getSingleDefaultKeyPair(steps[0]?.left_file, defaultRight),
       },
     ]);
   };
 
   const updateStep = (index, field, value) => {
-    setSteps((prev) => {
-      const updated = [...prev];
-      updated[index] = { ...updated[index], [field]: value };
-
-      if (field === "right_file") {
-        const { autoRKey, autoRDate } = getSuggestedKeys(updated[index].left_file, value);
-        updated[index].right_key = autoRKey;
-        updated[index].right_date_key = autoRDate;
-      }
-      return updated;
-    });
+    setSteps((prev) =>
+      prev.map((step, idx) => {
+        if (idx !== index) return step;
+        const updated = { ...step, [field]: value };
+        if (field === "left_file" || field === "right_file") {
+          updated.key_pairs = getSingleDefaultKeyPair(
+            field === "left_file" ? value : updated.left_file,
+            field === "right_file" ? value : updated.right_file
+          );
+        }
+        return updated;
+      })
+    );
   };
 
   const removeStep = (index) => {
     setSteps((prev) => prev.filter((_, i) => i !== index));
   };
 
-  // ─── 5. Execution Pipeline ────────────────────────────────────────────────
+  // ─── Pure Immutable Key Pair Operations (Adds Exactly 1 Pair) ─────────────
+  const addKeyPair = (stepIndex) => {
+    setSteps((prev) =>
+      prev.map((step, idx) => {
+        if (idx !== stepIndex) return step;
+        const lCols = datasetColumns[step.left_file] || allKnownCols;
+        const rCols = datasetColumns[step.right_file] || allKnownCols;
+
+        const currentLeftKeys = (step.key_pairs || []).map((kp) => kp.left_key);
+        const nextLeftKey = lCols.find((c) => !currentLeftKeys.includes(c)) || lCols[0] || "";
+        const nextRightKey =
+          rCols.find((c) => c.toLowerCase() === nextLeftKey.toLowerCase()) ||
+          rCols[0] ||
+          "";
+
+        return {
+          ...step,
+          key_pairs: [...(step.key_pairs || []), { left_key: nextLeftKey, right_key: nextRightKey }],
+        };
+      })
+    );
+  };
+
+  const updateKeyPair = (stepIndex, pairIndex, side, value) => {
+    setSteps((prev) =>
+      prev.map((step, idx) => {
+        if (idx !== stepIndex) return step;
+        const updatedPairs = step.key_pairs.map((pair, pIdx) => {
+          if (pIdx !== pairIndex) return pair;
+          return { ...pair, [side]: value };
+        });
+        return { ...step, key_pairs: updatedPairs };
+      })
+    );
+  };
+
+  const removeKeyPair = (stepIndex, pairIndex) => {
+    setSteps((prev) =>
+      prev.map((step, idx) => {
+        if (idx !== stepIndex) return step;
+        if (step.key_pairs.length <= 1) {
+          toast.error("At least one key pair is required.");
+          return step;
+        }
+        return {
+          ...step,
+          key_pairs: step.key_pairs.filter((_, pIdx) => pIdx !== pairIndex),
+        };
+      })
+    );
+  };
+
+  // ─── 6. Execution Pipeline ────────────────────────────────────────────────
   const handleExecutePipeline = async () => {
     if (!selectedSourceFiles.length) {
       return toast.error("Please select at least one source file.");
     }
 
+    // Client-side Validation
     for (let i = 0; i < steps.length; i++) {
       const s = steps[i];
       if (!s.left_file || !s.right_file) {
-        return toast.error(`Step ${i + 1}: Please select both Left and Right datasets.`);
+        return toast.error(`Step ${i + 1}: Select both Left and Right datasets.`);
       }
-      if (!s.left_key || !s.right_key) {
-        return toast.error(`Step ${i + 1}: Primary ID Key is missing on ${s.left_file} or ${s.right_file}.`);
+      if (s.join_type !== "cross") {
+        if (!s.key_pairs || s.key_pairs.length === 0) {
+          return toast.error(`Step ${i + 1}: Add at least one join key pair.`);
+        }
+        for (let k = 0; k < s.key_pairs.length; k++) {
+          const kp = s.key_pairs[k];
+          if (!kp.left_key || !kp.right_key) {
+            return toast.error(`Step ${i + 1} (Key Pair #${k + 1}): Please select both Left and Right column keys.`);
+          }
+        }
       }
     }
 
@@ -234,8 +274,8 @@ export default function DataStitching() {
       });
 
       const formattedSteps = steps.map((s) => {
-        const lKeys = [s.left_key, s.left_date_key].filter(Boolean);
-        const rKeys = [s.right_key, s.right_date_key].filter(Boolean);
+        const lKeys = s.join_type === "cross" ? [] : s.key_pairs.map((kp) => kp.left_key).filter(Boolean);
+        const rKeys = s.join_type === "cross" ? [] : s.key_pairs.map((kp) => kp.right_key).filter(Boolean);
         return {
           left_file: s.left_file,
           right_file: s.right_file,
@@ -255,7 +295,6 @@ export default function DataStitching() {
       const res = await API.post("/ard/build-ard-pipeline", payload).then((r) => r.data);
       setArdResult(res);
 
-      // Store in AppContext state for future modules (EDA, Transformation, Modelling)
       if (activeTab === "hcp" || activeTab === "custom") {
         setField("granularCsvData", res.csv_data);
         setField("mergedCsvData", res.csv_data);
@@ -263,7 +302,7 @@ export default function DataStitching() {
         setField("filteredCsvData", res.csv_data);
       }
 
-      toast.success(`Generated ${ardDatasetName} with ${res.rows.toLocaleString()} rows!`);
+      toast.success(`Generated ${ardDatasetName} (${res.rows.toLocaleString()} rows)`);
     } catch (err) {
       console.error(err);
       const msg = err.response?.data?.error || err.response?.data?.detail || err.message || "Pipeline join failed";
@@ -292,7 +331,7 @@ export default function DataStitching() {
         icon="🧬"
       />
 
-      {/* Top Segmented Navigation Tabs */}
+      {/* Top Navigation Tabs */}
       <div className="bg-slate-200/70 p-1.5 rounded-2xl flex items-center gap-1 shadow-inner border border-slate-200">
         {[
           { id: "hcp", label: "HCP-Level ARD", icon: "🩺" },
@@ -318,7 +357,7 @@ export default function DataStitching() {
       {/* Section 1: Source Files Checklist */}
       <Card title="Source Files">
         <p className="text-xs text-slate-500 mb-3">
-          Select the mapped source files to include in this <strong>{activeTab.toUpperCase()} ARD</strong> pipeline:
+          Select the source files to include in this <strong>{activeTab.toUpperCase()} ARD</strong> pipeline:
         </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
@@ -339,7 +378,7 @@ export default function DataStitching() {
                 <input
                   type="checkbox"
                   checked={isChecked}
-                  onChange={() => {}} // Handled by container
+                  onChange={() => {}}
                   className="mt-0.5 rounded text-brand-600 focus:ring-brand-500 cursor-pointer"
                 />
                 <div className="flex-1 min-w-0">
@@ -360,16 +399,17 @@ export default function DataStitching() {
       {/* Section 2: Sequential Join Pipeline */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         {/* Left: Sequential Pipeline Builder */}
-        <div className="lg:col-span-5 space-y-4">
+        <div className="lg:col-span-6 space-y-4">
           <Card title="Sequential Join Pipeline Sequence">
             <p className="text-xs text-slate-500 mb-4">
               Build your dataset step-by-step. Each step outputs an intermediate dataset (e.g. <em>Step 1 Result</em>) that can be paired with subsequent source files.
             </p>
 
-            <div className="space-y-4 max-h-[560px] overflow-y-auto pr-1">
+            <div className="space-y-4 max-h-[580px] overflow-y-auto pr-1">
               {steps.map((step, idx) => {
                 const leftCols = datasetColumns[step.left_file] || allKnownCols;
                 const rightCols = datasetColumns[step.right_file] || allKnownCols;
+                const isCrossJoin = step.join_type === "cross";
 
                 return (
                   <div key={idx} className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3 relative shadow-sm">
@@ -381,9 +421,9 @@ export default function DataStitching() {
                         <button
                           type="button"
                           onClick={() => removeStep(idx)}
-                          className="text-red-400 hover:text-red-600 text-xs font-bold px-1.5 py-0.5 rounded"
+                          className="text-red-400 hover:text-red-600 text-xs font-bold px-1.5 py-0.5 rounded hover:bg-red-50"
                         >
-                          ✕ Remove
+                          ✕ Remove Step
                         </button>
                       )}
                     </div>
@@ -404,57 +444,85 @@ export default function DataStitching() {
                       />
                     </div>
 
+                    {/* Join Strategy Dropdown with Cross Join */}
                     <Select
                       label="Join Strategy"
                       value={step.join_type}
                       onChange={(v) => updateStep(idx, "join_type", v)}
                       options={[
                         { value: "left", label: `Left Join (Keep all ${step.left_file || "left"} rows)` },
-                        { value: "inner", label: "Inner Join (Match only)" },
+                        { value: "inner", label: "Inner Join (Match only — keep common rows)" },
+                        { value: "right", label: `Right Join (Keep all ${step.right_file || "right"} rows)` },
+                        { value: "outer", label: "Full Outer Join (Keep all rows from both)" },
+                        { value: "cross", label: "Cross Join (Cartesian Product — all combinations)" },
                       ]}
                     />
 
-                    {/* 1. Primary ID Key Selectors */}
-                    <div className="grid grid-cols-2 gap-2">
-                      <Select
-                        label={`1. ID Key (${step.left_file || "Left"})`}
-                        value={step.left_key}
-                        onChange={(v) => updateStep(idx, "left_key", v)}
-                        options={leftCols}
-                        placeholder="Select ID Key"
-                      />
-                      <Select
-                        label={`1. ID Key (${step.right_file || "Right"})`}
-                        value={step.right_key}
-                        onChange={(v) => updateStep(idx, "right_key", v)}
-                        options={rightCols}
-                        placeholder="Select ID Key"
-                      />
-                    </div>
+                    {/* ─── DYNAMIC MULTIPLE KEY PAIRS BLOCK ─────────────────────── */}
+                    {isCrossJoin ? (
+                      <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-xs text-blue-800">
+                        ℹ️ <strong>Cross Join active:</strong> Combines every row from <strong>{step.left_file || "Left"}</strong> with every row from <strong>{step.right_file || "Right"}</strong> (no join keys needed).
+                      </div>
+                    ) : (
+                      <div className="bg-white rounded-xl p-3 border border-slate-200 space-y-2.5">
+                        <div className="flex justify-between items-center">
+                          <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider">
+                            Join Key Pairs (Composite Keys)
+                          </span>
+                          <span className="text-[10px] text-slate-400 font-mono">
+                            {step.key_pairs?.length || 1} key(s) mapped
+                          </span>
+                        </div>
 
-                    {/* 2. Date / Period Key Selectors */}
-                    <div className="grid grid-cols-2 gap-2 bg-white p-2.5 rounded-xl border border-slate-200">
-                      <Select
-                        label={`2. Date Key (${step.left_file || "Left"})`}
-                        value={step.left_date_key}
-                        onChange={(v) => updateStep(idx, "left_date_key", v)}
-                        options={["", ...leftCols]}
-                        placeholder="Select Date (Optional)"
-                      />
-                      <Select
-                        label={`2. Date Key (${step.right_file || "Right"})`}
-                        value={step.right_date_key}
-                        onChange={(v) => updateStep(idx, "right_date_key", v)}
-                        options={["", ...rightCols]}
-                        placeholder="Select Date (Optional)"
-                      />
-                    </div>
+                        {step.key_pairs?.map((pair, kIdx) => (
+                          <div key={kIdx} className="flex items-center gap-2">
+                            <div className="grid grid-cols-2 gap-2 flex-1">
+                              <Select
+                                label={kIdx === 0 ? `Key (${step.left_file || "Left"})` : ""}
+                                value={pair.left_key}
+                                onChange={(v) => updateKeyPair(idx, kIdx, "left_key", v)}
+                                options={leftCols}
+                                placeholder="Select Column"
+                              />
+                              <Select
+                                label={kIdx === 0 ? `Key (${step.right_file || "Right"})` : ""}
+                                value={pair.right_key}
+                                onChange={(v) => updateKeyPair(idx, kIdx, "right_key", v)}
+                                options={rightCols}
+                                placeholder="Select Column"
+                              />
+                            </div>
+
+                            {step.key_pairs.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => removeKeyPair(idx, kIdx)}
+                                className="text-slate-400 hover:text-red-500 font-bold text-xs p-1 mt-auto mb-2 rounded hover:bg-red-50"
+                                title="Remove this key pair"
+                              >
+                                ✕
+                              </button>
+                            )}
+                          </div>
+                        ))}
+
+                        <div className="pt-1">
+                          <button
+                            type="button"
+                            onClick={() => addKeyPair(idx)}
+                            className="text-[11px] font-bold text-brand-600 hover:text-brand-700 flex items-center gap-1 hover:underline"
+                          >
+                            <span>+ Add Another Key Pair</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })}
             </div>
 
-            {/* Pipeline Action Controls */}
+            {/* Pipeline Controls */}
             <div className="pt-2 space-y-3">
               <Btn variant="outline" onClick={addJoinStep} className="w-full justify-center text-xs">
                 + Add Next Join Step
@@ -485,15 +553,15 @@ export default function DataStitching() {
         </div>
 
         {/* Right: Live Stitched Preview & Lineage */}
-        <div className="lg:col-span-7 space-y-4">
-          {loading && <Spinner label="Executing composite join pipeline..." />}
+        <div className="lg:col-span-6 space-y-4">
+          {loading && <Spinner label="Executing multi-step join pipeline..." />}
 
           {!ardResult && !loading && (
             <Card className="text-center py-24 text-slate-400">
               <span className="text-5xl block mb-3">🧬</span>
               <h3 className="text-base font-bold text-slate-700">No ARD Generated Yet</h3>
               <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
-                Configure your source files and join keys on the left panel, then click <strong>Execute & Generate ARD</strong> to create your analytic dataset.
+                Select your join strategy, configure key pairs, and click <strong>Execute & Generate ARD</strong>.
               </p>
             </Card>
           )}
@@ -523,7 +591,7 @@ export default function DataStitching() {
                   <span className="font-bold text-slate-700 block">🔍 Join Lineage Audit Trail</span>
                   {ardResult.lineage.steps_executed.map((st, i) => (
                     <p key={i} className="text-slate-500 text-[11px]">
-                      Step {st.step}: <strong className="text-slate-700">{st.left}</strong> ({st.join} join) +{" "}
+                      Step {st.step}: <strong className="text-slate-700">{st.left}</strong> ({st.join}) +{" "}
                       <strong className="text-slate-700">{st.right}</strong> on{" "}
                       <code className="bg-slate-100 px-1 rounded text-slate-800 font-mono">
                         {Array.isArray(st.keys) ? st.keys.join(", ") : st.keys}
@@ -567,4 +635,3 @@ export default function DataStitching() {
     </div>
   );
 }
-
