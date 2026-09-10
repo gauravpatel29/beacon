@@ -60,9 +60,18 @@ export function Select({ label, value, onChange, options = [], placeholder = "Se
         className="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent"
       >
         <option value="">{placeholder}</option>
-        {options.map((o) => (
-          <option key={o} value={o}>{o}</option>
-        ))}
+        {/* Options may be plain strings, or { value, label } when the text
+            shown differs from the value submitted. Rendering the object
+            directly is what React reports as "Objects are not valid as a
+            React child". */}
+        {options.map((o) => {
+          const isPair = o !== null && typeof o === "object";
+          const val = isPair ? o.value : o;
+          const lbl = isPair ? o.label : o;
+          return (
+            <option key={val} value={val}>{lbl}</option>
+          );
+        })}
       </select>
     </div>
   );
