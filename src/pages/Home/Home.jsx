@@ -32,53 +32,53 @@ const pipelineCards = [
   },
   {
     id: 'integrated-analytics',
-    title: 'Integrated Analytics',
+    title: 'Data Stitching & ARD Creation',
     icon: chart,
     description:
-      'Join multiple channel datasets on geo and date keys into a unified analytics database.',
+      'Join mapped source files on shared keys to build HCP or DMA-level analytic record datasets.',
   },
   {
-    id: 'correlation-analysis',
-    title: 'Correlation Analysis',
+    id: 'data-review',
+    title: 'Data Review',
     icon: dot,
     description:
-      'Detect multicollinearity with heatmaps, VIF scores, and PCA decomposition.',
-  },
-  {
-    id: 'exploratory-data-analysis',
-    title: 'Exploratory Data Analysis',
-    icon: graph,
-    description:
-      'Visualize sales trends, geo distributions, histograms, and scatter plots.',
+      'Inspect column profiles, detect multicollinearity, and validate data quality before modelling.',
   },
   {
     id: 'data-transformation',
     title: 'Data Transformation',
-    icon: data,
+    icon: graph,
     description:
       'Apply Adstock decay, saturation functions (Log/Power), and lag transformations.',
   },
   {
-    id: 'mmm-modelling',
-    title: 'MMM Modelling',
+    id: 'model-configuration',
+    title: 'Model Configuration ',
+    icon: data,
+    description:
+      'Select channels, dependent variables, and date ranges to configure your MMM model.',
+  },
+  {
+    id: 'model-output',
+    title: 'Model Output',
     icon: data_lifecycle,
     description:
       'Run OLS regression with impactable % attribution, ROI, and Long Term ROI calculations.',
     active: true,
   },
   {
-    id: 'response-curves',
-    title: 'Response Curves',
-    icon: bar_graph,
-    description:
-      'Generate channel-level response curves showing ROI and mROI vs spend.',
-  },
-  {
     id: 'optimization',
     title: 'Optimization',
     icon: aim,
     description:
-      'Budget and sales goal optimization across channels using marginal ROI logic.',
+    'Budget and sales goal optimization across channels using marginal ROI logic.',
+  },
+  {
+    id: 'ai-integration',
+    title: 'AI Integration',
+    icon: bar_graph,
+    description:
+      'Surface AI-powered insights and recommendations throughout your MMM workflow.',
   },
 ];
 
@@ -132,6 +132,7 @@ function Home() {
   const [editingWorkflowId, setEditingWorkflowId] = useState(null);
   const [editingWorkflowName, setEditingWorkflowName] = useState('');
   const [workflowActionId, setWorkflowActionId] = useState(null);
+  const [onlyCreateForm, setOnlyCreateForm] = useState(false);
 
   const loadWorkflows = async () => {
     setLoading(true);
@@ -147,9 +148,10 @@ function Home() {
 
   useEffect(() => { loadWorkflows(); }, []);
 
-  const closeWorkflowDialog = () => {
+   const closeWorkflowDialog = () => {
     setShowWorkflowDialog(false);
     setIsCreatingWorkflow(false);
+    setOnlyCreateForm(false);
     setWorkflowName('');
     setEditingWorkflowId(null);
     setEditingWorkflowName('');
@@ -167,6 +169,16 @@ function Home() {
     setWorkflowQuery('');
     setWorkflowStage('all');
     loadWorkflows();
+  };
+
+  const startNewWorkflowFlow = () => {
+    setShowWorkflowDialog(true);
+    setIsCreatingWorkflow(true);
+    setOnlyCreateForm(true);
+    setWorkflowQuery('');
+    setWorkflowStage('all');
+    // No loadWorkflows() call — the list is never shown in this mode, so
+    // there's no need to fetch it.
   };
 
   const startWorkflow = async (event) => {
@@ -251,7 +263,7 @@ function Home() {
                 </div>
             <div className="logo-divider" />
               <span className="logo-wordmark">
-                Proc<span>Timize</span>
+                Beacon
                 {/* --add beacon logo */}
                 {/* <div className="logo-placeholder">
                     <img src={beacon_logo} alt="Beacon Logo" />
@@ -270,10 +282,11 @@ function Home() {
 
             {/* CTAs */}
             <div className="hero-cta-group">
-              <button className="btn btn-primary" onClick={openWorkflowDialog}>
+              <button className="btn btn-primary" onClick={startNewWorkflowFlow}>
                 Get Started <span aria-hidden="true">→</span>
               </button>
               <button className="btn btn-secondary" onClick={openWorkflowDialog}>Continue Workflow</button>
+              <button className="btn btn-tertiary" >AI Integration</button>
             </div>
           </div>
 
@@ -358,8 +371,10 @@ function Home() {
                 <h2 id="workflow-dialog-title">Workflows</h2>
                 <p>View, resume, or start a new marketing mix modeling workflow.</p>
               </div>
-              <div className="workflow-header-actions">
-                <button type="button" className="workflow-new-btn" aria-expanded={isCreatingWorkflow} onClick={() => { setIsCreatingWorkflow((value) => !value); cancelRename(); }}>+ New Workflow</button>
+               <div className="workflow-header-actions">
+                {!onlyCreateForm && (
+                  <button type="button" className="workflow-new-btn" aria-expanded={isCreatingWorkflow} onClick={() => { setIsCreatingWorkflow((value) => !value); cancelRename(); }}>+ New Workflow</button>
+                )}
                 <button type="button" className="workflow-dialog-close" onClick={closeWorkflowDialog} aria-label="Close">×</button>
               </div>
             </div>
@@ -374,6 +389,8 @@ function Home() {
               </form>
             )}
 
+          {!onlyCreateForm && (
+          <>
             <div className="workflow-toolbar">
               <input value={workflowQuery} onChange={(event) => setWorkflowQuery(event.target.value)} placeholder="Search workflows by name..." aria-label="Search workflows" />
               <select value={workflowStage} onChange={(event) => setWorkflowStage(event.target.value)} aria-label="Filter by stage">
@@ -381,7 +398,6 @@ function Home() {
                 {WORKFLOW_STAGES.map((stage) => <option key={stage} value={stage}>{stage}</option>)}
               </select>
             </div>
-
             <div className="workflow-existing">
               {loading && workflows.length === 0 ? (
                 <p className="workflow-empty-state">Loading workflows…</p>
@@ -439,6 +455,8 @@ function Home() {
                 </div>
               )}
             </div>
+           </>
+          )}
           </section>
         </div>
       )}

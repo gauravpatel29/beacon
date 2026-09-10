@@ -15,11 +15,10 @@ const navItems = [
   { id: 'home',  icon: home, label: 'Home', path: '/' },
   { id: 'data-ingestion', icon: cloud, label: 'Data Ingestion', path: '/data-ingestion' },
   { id: 'integrated-analytics', icon: chart, label: 'Data Stiching & ARD', path: '/data-stiching' },
-  { id: 'correlation-analysis', icon: dots, label: 'Correlation Analysis', path: '/correlation-analysis' },
-  { id: 'exploratory-data-analysis', icon: graph, label: 'Exploratory Data Analysis', path: '/exploratory-data-analysis' },
-  { id: 'data-transformation', icon:data_lifecycle, label: 'Data Transformation', path: '/data-transformation' },
-  { id: 'mmm-modelling', icon:bar_graph, label: 'MMM Modelling', path: '/mmm-modelling' },
-  { id: 'response-curves', icon: database,label: 'Response Curves', path: '/response-curves' },
+  { id: 'data-review', icon: dots, label: 'Data Review', path: '/data-review' },
+  { id: 'data-transformation', icon: graph, label: 'Data Transformation', path: '/data-transformation' },
+  { id: 'model-configuration ', icon:bar_graph, label: 'Model Configuration', path: '/model-configuration' },
+  { id: 'model-output', icon:data_lifecycle, label: 'Model Output', path: '/model-output' },
   { id: 'optimization', icon: aim, label: 'Optimization', path: '/optimization' },
 ];
 
