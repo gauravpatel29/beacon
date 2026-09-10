@@ -89,6 +89,7 @@
   font-size: var(--font-size-body);
   font-weight: var(--font-weight-medium);
   transition: var(--transition-base);
+  white-space: nowrap;
 }
 
 .btn-primary {
@@ -110,6 +111,16 @@
 
 .btn-secondary:hover {
   background-color: var(--color-border-light);
+}
+
+.btn-tertiary {
+  background-color: #6b7280;
+  color: var(--color-white);
+  border: none;
+}
+
+.btn-tertiary:hover {
+  opacity: 0.9;
 }
 
 /* --- Hero graphic (right side) --- */

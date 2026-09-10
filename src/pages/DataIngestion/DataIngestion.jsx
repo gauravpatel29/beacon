@@ -102,6 +102,8 @@ const GRAN_OPTIONS = {
   Monthly: ['Yearly'],
 };
 
+const TAB_ORDER = ['mapping', 'standardize', 'filter', 'granularity'];
+
 // Guess a category from the filename the user can always override it
 // via the dropdown, this just saves them a click for the common cases.
 function suggestCategory(filename) {
@@ -318,6 +320,8 @@ function DataIngestion() {
   const [selectedFileId, setSelectedFileId] = useState(null);
   const [isDragging, setIsDragging] = useState(false);
   const [activeTab, setActiveTab] = useState('mapping'); // mapping | standardize | filter | granularity
+  const [visitedTabs, setVisitedTabs] = useState(new Set(['mapping']));
+  const [hasClickedNext, setHasClickedNext] = useState(false);
   const [isApplying, setIsApplying] = useState(false);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [isFiltering, setIsFiltering] = useState(false);
@@ -358,6 +362,22 @@ function DataIngestion() {
   }, [uploadedFiles]);
 
   const canProceed = unmappedCount === 0 && hasRequiredCategories && uploadedFiles.length > 0;
+
+  const hasVisitedAllTabs = TAB_ORDER.every((t) => visitedTabs.has(t));
+
+  const handleNext = () => {
+    setHasClickedNext(true);
+    const currentIndex = TAB_ORDER.indexOf(activeTab);
+    const nextTab = TAB_ORDER[Math.min(currentIndex + 1, TAB_ORDER.length - 1)];
+    setActiveTab(nextTab);
+    setVisitedTabs((prev) => new Set(prev).add(nextTab));
+  };
+
+  const handleBack = () => {
+    const currentIndex = TAB_ORDER.indexOf(activeTab);
+    const prevTab = TAB_ORDER[Math.max(currentIndex - 1, 0)];
+    setActiveTab(prevTab);
+  };
 
   // Resume the server-side datasets for the selected workflow. The browser
   // holds only metadata; bytes remain in object storage and are never
@@ -893,37 +913,63 @@ function DataIngestion() {
                   <div className="tab-group">
                     <button
                       className={`tab-btn${activeTab === 'mapping' ? ' active' : ''}`}
-                      onClick={() => setActiveTab('mapping')}
+                      onClick={() => {
+                        setActiveTab('mapping');
+                        setVisitedTabs((prev) => new Set(prev).add('mapping'));
+                      }}
                     >
                       Assign Category
                     </button>
                     <button
                       className={`tab-btn${activeTab === 'standardize' ? ' active' : ''}`}
-                      onClick={() => setActiveTab('standardize')}
+                      onClick={() => {
+                        setActiveTab('standardize');
+                        setVisitedTabs((prev) => new Set(prev).add('standardize'));
+                      }}
                     >
                       Standardize
                     </button>
                     <button
                       className={`tab-btn${activeTab === 'filter' ? ' active' : ''}`}
-                      onClick={() => setActiveTab('filter')}
+                      onClick={() => {
+                        setActiveTab('filter');
+                        setVisitedTabs((prev) => new Set(prev).add('filter'));
+                      }}
                     >
                       Filter
                     </button>
                     <button
                       className={`tab-btn${activeTab === 'granularity' ? ' active' : ''}`}
-                      onClick={() => setActiveTab('granularity')}
+                      onClick={() => {
+                        setActiveTab('granularity');
+                        setVisitedTabs((prev) => new Set(prev).add('granularity'));
+                      }}
                     >
                       Granularity
                     </button>
                   </div>
                   <div className="mapping-top-actions">
                     {applyMessage && <p className="apply-config-message" role="status">{applyMessage}</p>}
+
+                    {hasClickedNext && (
+                      <button className="mapping-btn secondary" onClick={handleBack}>
+                        Back
+                      </button>
+                    )}
+
                     <button className="mapping-btn secondary" disabled={!selectedFile || isApplying || isPreviewing || isFiltering} onClick={() => previewFile(selectedFile)}>
                       {isPreviewing ? 'Previewing changes…' : 'Preview changes'}
                     </button>
-                    <button className="mapping-btn primary" disabled={!selectedFile || isApplying || isPreviewing || isFiltering} onClick={() => applyFile(selectedFile)}>
-                      {isApplying ? 'Applying configurations…' : 'Apply configuration'}
-                    </button>
+
+                    {hasVisitedAllTabs ? (
+                      <button className="mapping-btn primary" disabled={!selectedFile || isApplying || isPreviewing || isFiltering} onClick={() => applyFile(selectedFile)}>
+                        {isApplying ? 'Applying configurations…' : 'Apply configuration'}
+                      </button>
+                    ) : (
+                      <button className="mapping-btn primary" onClick={handleNext}>
+                        Next
+                      </button>
+                    )}
                   </div>
                 </div>
 
