@@ -14,7 +14,7 @@ import aim from "../../assets/sidebar_icon/aim.png";
 const navItems = [
   { id: 'home',  icon: home, label: 'Home', path: '/' },
   { id: 'data-ingestion', icon: cloud, label: 'Data Ingestion', path: '/data-ingestion' },
-  { id: 'integrated-analytics', icon: chart, label: 'Integrated Analytics', path: '/integrated-analytics' },
+  { id: 'integrated-analytics', icon: chart, label: 'Data Stiching & ARD', path: '/data-stiching' },
   { id: 'correlation-analysis', icon: dots, label: 'Correlation Analysis', path: '/correlation-analysis' },
   { id: 'exploratory-data-analysis', icon: graph, label: 'Exploratory Data Analysis', path: '/exploratory-data-analysis' },
   { id: 'data-transformation', icon:data_lifecycle, label: 'Data Transformation', path: '/data-transformation' },

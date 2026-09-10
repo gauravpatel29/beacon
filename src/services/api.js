@@ -207,3 +207,78 @@ export async function ensureWorkflow() {
     throw err;
   }
 }
+
+
+// ─── Data Stitching & ARD (/v2/workflows/{id}/ard) ────────────────────────
+// For the Data Stitching & ARD Creation screen only. See
+// ARD_STITCHING_API.md for the full contract. Four calls, all scoped to the
+// current workflow. The screen sends step *definitions*, not data — the
+// server loads named datasets from storage itself.
+ 
+/**
+ * On page load — fill the source-file dropdowns.
+ * GET /v2/workflows/{workflow_id}/files
+ * Returns { items: [{ filename, columns, row_count, kind }] }.
+ * Callers should filter out kind === 'ard' so a previously built ARD can't
+ * be joined into itself.
+ */
+export const v2ListFiles = (workflowId) =>
+  request(`/v2/workflows/${workflowId}/files`);
+ 
+/**
+ * Run the stitching pipeline.
+ * POST /v2/workflows/{workflow_id}/ard/build
+ * Pass { dryRun: true } to preview the result without saving
+ * (adds ?dry_run=true).
+ *
+ * payload shape:
+ *   {
+ *     steps: [{ left_file, right_file, left_key, right_key, join_type }],
+ *     target_grain: 'hcp' | 'dma' | 'geo' | 'zip' | 'national',
+ *     output?: string,
+ *   }
+ *
+ * left_file/right_file: a dataset filename, or "Step N Result" to chain off
+ * an earlier step. left_key/right_key: array (or comma-separated string) —
+ * both sides must have the same count. join_type: 'left' | 'inner'.
+ *
+ * Resolves to the built/dry-run ARD:
+ *   { filename, kind: 'ard', version, row_count, columns, preview,
+ *     lineage: { steps_executed: [{ step, left, right, join, rows_in,
+ *     rows_out, rows_matched }] }, derived_from: { grain, inputs } }
+ */
+export const v2BuildArd = (workflowId, payload, { dryRun = false } = {}) =>
+  request(
+    `/v2/workflows/${workflowId}/ard/build${dryRun ? '?dry_run=true' : ''}`,
+    { method: 'POST', ...json(payload) }
+  );
+ 
+/**
+ * List previously built ARDs for this workflow, newest first.
+ * GET /v2/workflows/{workflow_id}/ard
+ * Returns { items: [...] }, each item shaped like a v2BuildArd response
+ * (plus a `grain` field).
+ */
+export const v2ListArds = (workflowId) =>
+  request(`/v2/workflows/${workflowId}/ard`);
+ 
+/**
+ * Hand off a built ARD to the next screen (EDA, etc.) as CSV text.
+ * GET /v2/workflows/{workflow_id}/files/{filename}/csv
+ * Call this once, right after a successful build, and pass the result
+ * along — don't put it in localStorage.
+ */
+export const v2GetCsv = (workflowId, filename) =>
+  request(`/v2/workflows/${workflowId}/files/${encodeURIComponent(filename)}/csv`, {
+    raw: true,
+  });
+ 
+/**
+ * Turn a caught error into a single string suitable for a toast.
+ * ApiError already carries this as `.text`; this helper also copes with a
+ * plain Error (e.g. something that didn't come from `request()`).
+ */
+export function problemMessage(err, fallback = 'Something went wrong.') {
+  if (err instanceof ApiError) return err.text;
+  return err?.message || fallback;
+}
