@@ -30,6 +30,29 @@ from core.processing import _parse_dates_robust
 # join key, so "1/2/2026" on one side matches "2026-01-02" on the other.
 DATE_KEY_HINTS = ("date", "week", "month", "time", "period", "day", "quarter")
 
+JOIN_TYPES = ("left", "inner", "right", "outer", "cross")
+
+# Substring order for descriptive input. "cross" is checked LAST on purpose: a
+# join label carries the file name ("Left Join (keep all crosswalk.csv rows)"),
+# and a crosswalk is exactly the kind of file this pipeline joins. Matching
+# "cross" first would turn that left join into a Cartesian product silently.
+_SUBSTRING_ORDER = ("inner", "outer", "right", "left", "cross")
+
+
+def parse_join_type(value: Any) -> str:
+    """Resolve a join type from either an exact value or descriptive text.
+
+    Unrecognised input falls back to "left" - the safest of the five, since it
+    preserves the left dataset's row count.
+    """
+    text = str(value or "").strip().lower()
+    if text in JOIN_TYPES:
+        return text
+    for candidate in _SUBSTRING_ORDER:
+        if candidate in text:
+            return candidate
+    return "left"
+
 
 class StitchError(Exception):
     """A step could not run. Carries the structured detail the UI renders."""
@@ -158,7 +181,7 @@ def execute_pipeline(
     for idx, step in enumerate(steps, start=1):
         left_name = str(step.get("left_file", "")).strip()
         right_name = str(step.get("right_file", "")).strip()
-        join_type = "inner" if "inner" in str(step.get("join_type", "")).lower() else "left"
+        join_type = parse_join_type(step.get("join_type"))
 
         left = lookup(left_name)
         right = lookup(right_name)
@@ -174,56 +197,73 @@ def execute_pipeline(
         left = left.copy()
         right = right.copy()
 
-        left_wanted = clean_key_list(step.get("left_key"))
-        right_wanted = clean_key_list(step.get("right_key"))
-        if not left_wanted or not right_wanted:
-            raise StitchError(idx, "keys_missing",
-                              f"Step {idx}: choose a join key on both sides.")
-        if len(left_wanted) != len(right_wanted):
-            raise StitchError(
-                idx, "key_count_mismatch",
-                f"Step {idx}: {len(left_wanted)} key(s) on the left but "
-                f"{len(right_wanted)} on the right. They must pair up.",
-            )
-
-        left_keys: List[str] = []
-        right_keys: List[str] = []
-        for lk, rk in zip(left_wanted, right_wanted):
-            real_l = find_column(left, lk)
-            real_r = find_column(right, rk)
-            if not real_l:
-                raise StitchError(idx, "left_key_not_found",
-                                  f'Step {idx}: "{lk}" is not a column of "{left_name}".',
-                                  column=lk, columns=[str(c) for c in left.columns])
-            if not real_r:
-                raise StitchError(idx, "right_key_not_found",
-                                  f'Step {idx}: "{rk}" is not a column of "{right_name}".',
-                                  column=rk, columns=[str(c) for c in right.columns])
-            left_keys.append(real_l)
-            right_keys.append(real_r)
-
-        for lk, rk in zip(left_keys, right_keys):
-            is_date = looks_like_date_key(lk) or looks_like_date_key(rk)
-            left[lk] = normalize_key(left[lk], is_date)
-            right[rk] = normalize_key(right[rk], is_date)
-
-        right = _aggregate_right(right, right_keys)
-
-        # Line the right key names up with the left ones, dropping any column
-        # already carrying the target name so the rename cannot collide.
-        renames = {rk: lk for lk, rk in zip(left_keys, right_keys) if lk != rk}
-        if renames:
-            clashes = [t for t in renames.values() if t in right.columns and t not in renames]
-            if clashes:
-                right = right.drop(columns=clashes)
-            right = right.rename(columns=renames)
-
         before = len(left)
-        current = pd.merge(left, right, on=left_keys, how=join_type,
-                           suffixes=("", f"_step{idx}"))
+        suffix = f"_step{idx}"
 
-        # An unmatched left row leaves NaN in the right side's metrics. Zero is
-        # the meaningful value for spend/calls, so fill only the numerics.
+        if join_type == "cross":
+            # Every row against every row, so there are no keys to resolve,
+            # normalise or aggregate.
+            left_keys = []
+            current = pd.merge(left, right, how="cross", suffixes=("", suffix))
+            lineage_keys = ["(cross join - no keys)"]
+        else:
+            left_wanted = clean_key_list(step.get("left_key"))
+            right_wanted = clean_key_list(step.get("right_key"))
+            if not left_wanted or not right_wanted:
+                raise StitchError(idx, "keys_missing",
+                                  f"Step {idx}: choose a join key on both sides.")
+            if len(left_wanted) != len(right_wanted):
+                raise StitchError(
+                    idx, "key_count_mismatch",
+                    f"Step {idx}: {len(left_wanted)} key(s) on the left but "
+                    f"{len(right_wanted)} on the right. They must pair up.",
+                )
+
+            left_keys = []
+            right_keys: List[str] = []
+            for lk, rk in zip(left_wanted, right_wanted):
+                real_l = find_column(left, lk)
+                real_r = find_column(right, rk)
+                if not real_l:
+                    raise StitchError(idx, "left_key_not_found",
+                                      f'Step {idx}: "{lk}" is not a column of "{left_name}".',
+                                      column=lk, columns=[str(c) for c in left.columns])
+                if not real_r:
+                    raise StitchError(idx, "right_key_not_found",
+                                      f'Step {idx}: "{rk}" is not a column of "{right_name}".',
+                                      column=rk, columns=[str(c) for c in right.columns])
+                left_keys.append(real_l)
+                right_keys.append(real_r)
+
+            for lk, rk in zip(left_keys, right_keys):
+                is_date = looks_like_date_key(lk) or looks_like_date_key(rk)
+                left[lk] = normalize_key(left[lk], is_date)
+                right[rk] = normalize_key(right[rk], is_date)
+
+            right = _aggregate_right(right, right_keys)
+
+            # Line the right key names up with the left ones, dropping any
+            # column already carrying the target name so the rename cannot
+            # collide.
+            renames = {rk: lk for lk, rk in zip(left_keys, right_keys) if lk != rk}
+            if renames:
+                clashes = [t for t in renames.values() if t in right.columns and t not in renames]
+                if clashes:
+                    right = right.drop(columns=clashes)
+                right = right.rename(columns=renames)
+
+            current = pd.merge(left, right, on=left_keys, how=join_type,
+                               suffixes=("", suffix))
+            lineage_keys = left_keys
+
+        # An unmatched row leaves NaN in the other side's metrics. Zero is the
+        # meaningful value for spend/calls, so fill those numerics.
+        #
+        # Deliberately limited to the columns this step brought in from the
+        # right: filling every numeric in the frame would also overwrite values
+        # that were genuinely missing in the left dataset, and a full outer join
+        # creates exactly those. "No data" and "measured zero" have to stay
+        # distinguishable for anything feeding a model.
         for col in right.columns:
             if col in left_keys or col not in current.columns:
                 continue
@@ -232,18 +272,15 @@ def execute_pipeline(
 
         current = current.loc[:, ~current.columns.duplicated()]
 
-        matched = int(current[left_keys[0]].notna().sum()) if left_keys else len(current)
         register(f"Step {idx} Result", current.copy())
         lineage.append({
             "step": idx,
             "left": left_name,
             "right": right_name,
             "join": join_type,
-            "left_keys": left_keys,
-            "right_keys": right_keys,
+            "keys": lineage_keys,
             "rows_in": before,
             "rows_out": int(len(current)),
-            "rows_matched": matched,
         })
 
     if current is None or current.empty:

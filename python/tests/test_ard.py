@@ -82,7 +82,9 @@ def main() -> int:
         # sales `month` is 04-01-2026 day-first; calls `Month` is 2026-01-04 ISO.
         # Under dayfirst inference the ISO side reads as %Y-%d-%m, turning
         # 2026-01-04 into 04 Jan vs 01 Apr - and the rows stop matching.
-        check("all 3 sales rows survive the join", d["rows"] == 3, d["rows"])
+        check("all 3 sales rows survive the join", d["row_count"] == 3, d["row_count"])
+        check("dry run reports the same fields as a commit",
+              {"filename", "row_count", "columns", "preview", "lineage"} <= set(d), sorted(d))
         rows = {(r_["npi"], r_["month"]): r_ for r_ in d["preview"]}
         check("day-first and ISO dates matched",
               all(r_.get("calls") not in (None, 0) for r_ in d["preview"]),

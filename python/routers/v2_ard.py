@@ -67,9 +67,13 @@ class StitchStep(BaseModel):
 
     left_file: str = Field(min_length=1)
     right_file: str = Field(min_length=1)
-    # Accepts a list or a comma-separated string; `clean_key_list` normalises it.
-    left_key: Any
-    right_key: Any
+    # Accepts a list or a comma-separated string; `clean_key_list` normalises
+    # it. Optional because a cross join pairs every row with every row and so
+    # has no keys at all.
+    left_key: Any = None
+    right_key: Any = None
+    # left | inner | right | outer | cross. Matched by substring, so the UI can
+    # send its own label text; anything unrecognised falls back to left.
     join_type: str = Field(default="left")
 
 
@@ -142,9 +146,11 @@ async def build_ard(request: Request, workflow_id: str, body: BuildArdBody,
                        kind=f"{PROBLEM_BASE}/stitching-failed", errors=[exc.as_error()])
 
     if dry_run:
+        # Same field names as the committed response, so the UI reads one shape
+        # whichever it called.
         return {
             "workflow_id": workflow_id, "dry_run": True, "grain": grain,
-            "output": output, "rows": result["rows"], "cols": result["cols"],
+            "filename": output, "row_count": result["rows"],
             "columns": result["columns"], "preview": result["preview"],
             "lineage": result["lineage"],
         }
