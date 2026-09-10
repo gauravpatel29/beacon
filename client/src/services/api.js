@@ -204,3 +204,14 @@ export const v2GetProfile = (workflowId, filename) =>
 export const v2DetectGranularity = (workflowId, filename, payload) =>
   V2.post(`/workflows/${workflowId}/files/${encodeURIComponent(filename)}/detect-granularity`, payload)
     .then((r) => r.data);
+
+// ─── Data Stitching / ARD ─────────────────────────────────────────────────────
+/** Run the join pipeline. Steps name datasets; the server resolves the bytes,
+ *  so no CSV is uploaded to build an ARD. `dryRun` stores nothing. */
+export const v2BuildArd = (workflowId, payload, { dryRun = false } = {}) =>
+  V2.post(`/workflows/${workflowId}/ard/build`, payload, { params: { dry_run: dryRun } })
+    .then((r) => r.data);
+
+/** Every ARD built for this workflow, newest first. */
+export const v2ListArds = (workflowId) =>
+  V2.get(`/workflows/${workflowId}/ard`).then((r) => r.data);

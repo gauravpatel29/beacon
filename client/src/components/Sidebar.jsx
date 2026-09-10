@@ -4,6 +4,7 @@ import { NavLink } from "react-router-dom";
 const NAV_ITEMS = [
   { path: "/", label: "Home", icon: "🏠" },
   { path: "/ingestion", label: "Data Ingestion", icon: "📂" },
+  { path: "/ard-stitching", label: "Data Stitching & ARD", icon: "🧬" },
   { path: "/eda", label: "Exploratory Data Analysis", icon: "🔍" },
   { path: "/transformation", label: "Data Transformation", icon: "⚙️" },
   { path: "/modelling", label: "Modelling", icon: "🤖" },

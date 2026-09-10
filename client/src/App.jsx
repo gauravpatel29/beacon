@@ -7,6 +7,7 @@ import Sidebar from "./components/Sidebar";
 
 import Home from "./pages/Home";
 import DataIngestion from "./pages/DataIngestion";
+import DataStitching from "./pages/DataStitching";
 import EDA from "./pages/EDA";
 import DataTransformation from "./pages/DataTransformation";
 import Modelling from "./pages/Modelling";
@@ -33,6 +34,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/ingestion" element={<Layout><DataIngestion /></Layout>} />
+          <Route path="/ard-stitching" element={<Layout><DataStitching /></Layout>} />
           <Route path="/eda" element={<Layout><EDA /></Layout>} />
           <Route path="/transformation" element={<Layout><DataTransformation /></Layout>} />
           <Route path="/modelling" element={<Layout><Modelling /></Layout>} />
