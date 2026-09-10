@@ -1,0 +1,29 @@
+# Node
+node_modules/
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Environment files
+.env
+
+# IDE
+.vscode/
+
+# Build
+build/
+dist/
+
+# Test
+.pytest_cache/
+coverage/
+
+# Generated exports
+codebase_export*.txt
+
+# Local utility scripts
+content_read.py
+path_read.py
