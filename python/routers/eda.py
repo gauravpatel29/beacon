@@ -1,59 +1,57 @@
 import io
 import json
-import pandas as pd
-import polars as pl
 import numpy as np
+import pandas as pd
+from typing import Optional, List
 from fastapi import APIRouter, HTTPException
-from core.processing import compute_eda_stats
+from core.processing import (
+    compute_eda_stats,
+    compute_sparsity_stats,
+    compute_poor_mans_curve_data,
+    detect_outliers_engine,
+    remove_outliers_engine,
+    compute_trend_rollup,
+)
 
 router = APIRouter()
 
 
-def _parse_csv_to_polars(content: bytes) -> pl.DataFrame:
+def _parse_csv(csv_data: str) -> pd.DataFrame:
     try:
-        return pl.read_csv(io.BytesIO(content), infer_schema_length=10000, ignore_errors=True)
+        return pd.read_csv(io.StringIO(csv_data), low_memory=False)
     except Exception:
-        pdf = pd.read_csv(io.BytesIO(content), encoding="latin-1", on_bad_lines="skip")
-        return pl.from_pandas(pdf)
+        return pd.read_csv(io.BytesIO(csv_data.encode("latin-1")), low_memory=False)
 
 
 @router.post("/stats")
 async def eda_stats_route(payload: dict):
-    """
-    Computes full comprehensive stats (summary table with 75th/95th, multi-series trends, geo breakdown).
-    payload: { csv_data, date_column, geo_column, dependent_variable }
-    """
     try:
-        df = _parse_csv_to_polars(payload["csv_data"].encode("latin-1")).to_pandas()
+        df = _parse_csv(payload["csv_data"])
         date_col = payload["date_column"]
         geo_col = payload["geo_column"]
         dep_var = payload["dependent_variable"]
-
-        result = compute_eda_stats(df, date_col, geo_col, dep_var)
-        return result
+        return compute_eda_stats(df, date_col, geo_col, dep_var)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/histogram")
-async def histogram_route(payload: dict):
-    """Return histogram bins, counts, mean and median for a column with smart integer binning."""
+async def eda_histogram_route(payload: dict):
     try:
-        df = _parse_csv_to_polars(payload["csv_data"].encode("latin-1"))
+        df = _parse_csv(payload["csv_data"])
         col = payload["column"]
         if col not in df.columns:
             raise HTTPException(status_code=400, detail=f"Column '{col}' not found")
 
-        vals = pd.to_numeric(df.get_column(col).to_pandas(), errors="coerce").dropna()
+        vals = pd.to_numeric(df[col], errors="coerce").dropna()
         if len(vals) == 0:
-            return {"counts": [], "bin_edges": [], "bin_labels": [], "mean": 0, "median": 0, "column": col}
+            return {"counts": [], "bin_edges": [], "bin_labels": [], "mean": 0, "median": 0, "min": 0, "max": 0, "column": col}
 
         min_val = float(vals.min())
         max_val = float(vals.max())
         is_integer = (vals % 1 == 0).all()
         val_range = max_val - min_val
 
-        # If discrete whole numbers with small span, use exact integer bins
         if is_integer and 0 < val_range <= 25:
             bin_edges = np.arange(min_val, max_val + 2) - 0.5
             counts, _ = np.histogram(vals, bins=bin_edges)
@@ -78,16 +76,12 @@ async def histogram_route(payload: dict):
 
 
 @router.post("/scatter")
-async def scatter_route(payload: dict):
-    """Return x/y data and Pearson r with two-point linear regression trendline."""
+async def eda_scatter_route(payload: dict):
     try:
-        df = _parse_csv_to_polars(payload["csv_data"].encode("latin-1"))
+        df = _parse_csv(payload["csv_data"])
         x_col, y_col = payload["x_column"], payload["y_column"]
 
-        if x_col not in df.columns or y_col not in df.columns:
-            raise HTTPException(status_code=400, detail=f"Columns '{x_col}' or '{y_col}' not found")
-
-        sub = df.select([pl.col(x_col), pl.col(y_col)]).to_pandas().dropna().copy()
+        sub = df[[x_col, y_col]].dropna().copy()
         sub[x_col] = pd.to_numeric(sub[x_col], errors="coerce")
         sub[y_col] = pd.to_numeric(sub[y_col], errors="coerce")
         sub = sub.dropna()
@@ -96,8 +90,6 @@ async def scatter_route(payload: dict):
             return {"x": [], "y": [], "r": 0, "trendline": [], "x_column": x_col, "y_column": y_col, "slope": 0, "intercept": 0}
 
         r_val = float(sub[x_col].corr(sub[y_col]))
-
-        # Best-fit linear trendline y = mx + c
         x_vals = sub[x_col].values
         y_vals = sub[y_col].values
         m, c = np.polyfit(x_vals, y_vals, 1)
@@ -109,7 +101,6 @@ async def scatter_route(payload: dict):
             {"x": max_x, "y": float(m * max_x + c)},
         ]
 
-        # Sample for responsive rendering
         if len(sub) > 600:
             sub = sub.sample(600, random_state=42).sort_values(x_col)
 
@@ -123,5 +114,63 @@ async def scatter_route(payload: dict):
             "x_column": x_col,
             "y_column": y_col,
         }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/sparsity")
+async def eda_sparsity_route(payload: dict):
+    try:
+        df = _parse_csv(payload["csv_data"])
+        metrics = payload.get("metric_columns")
+        return {"sparsity_table": compute_sparsity_stats(df, metrics)}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/poor-mans-curve")
+async def poor_mans_curve_route(payload: dict):
+    try:
+        df = _parse_csv(payload["csv_data"])
+        x_col = payload["x_column"]
+        y_col = payload["y_column"]
+        n_bins = int(payload.get("n_bins", 12))
+        return compute_poor_mans_curve_data(df, x_col, y_col, n_bins)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/detect-outliers")
+async def detect_outliers_route(payload: dict):
+    try:
+        df = _parse_csv(payload["csv_data"])
+        col = payload["column"]
+        method = payload.get("method", "iqr")
+        threshold = float(payload.get("threshold", 1.5))
+        return detect_outliers_engine(df, col, method, threshold)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/remove-outliers")
+async def remove_outliers_route(payload: dict):
+    try:
+        df = _parse_csv(payload["csv_data"])
+        col = payload["column"]
+        method = payload.get("method", "iqr")
+        threshold = float(payload.get("threshold", 1.5))
+        return remove_outliers_engine(df, col, method, threshold)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/trend-rollup")
+async def trend_rollup_route(payload: dict):
+    try:
+        df = _parse_csv(payload["csv_data"])
+        date_col = payload["date_column"]
+        metrics = payload.get("metric_columns", [])
+        period = payload.get("period", "week")
+        return {"trend_data": compute_trend_rollup(df, date_col, metrics, period)}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

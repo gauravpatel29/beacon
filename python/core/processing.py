@@ -368,13 +368,11 @@ def compute_eda_stats(
 ) -> dict:
     df = df.copy()
     total_rows = len(df)
-
     summary_stats = []
     metric_cols = []
 
     for col in df.columns:
         raw_s = df[col]
-
         s_str = raw_s.astype(str).str.strip()
         is_missing = raw_s.isna() | s_str.isin(["", "nan", "None", "NaT", "<NA>", "null"])
         missing_count = int(is_missing.sum())
@@ -383,19 +381,19 @@ def compute_eda_stats(
         valid_raw = raw_s[~is_missing]
         unique_count = int(valid_raw.nunique())
 
-        col_type = infer_column_semantic_type(
-            raw_s, col, date_column, geo_column, dependent_variable
-        )
+        col_type = infer_column_semantic_type(raw_s, col, date_column, geo_column, dependent_variable)
 
         if col_type == "Metric":
             metric_cols.append(col)
             valid_nums = pd.to_numeric(valid_raw, errors="coerce").dropna()
             if len(valid_nums) > 0:
+                control_total = round(float(valid_nums.sum()), 2)
                 summary_stats.append({
                     "variable": col,
                     "type": "Metric",
                     "is_numeric": True,
                     "unique_count": unique_count,
+                    "control_total": control_total,
                     "min": round(float(valid_nums.min()), 2),
                     "max": round(float(valid_nums.max()), 2),
                     "mean": round(float(valid_nums.mean()), 2),
@@ -409,17 +407,13 @@ def compute_eda_stats(
             else:
                 summary_stats.append({
                     "variable": col, "type": "Metric", "is_numeric": True,
-                    "unique_count": unique_count, "min": None, "max": None,
+                    "unique_count": unique_count, "control_total": "—", "min": "—", "max": "—",
                     "mean": None, "median": None, "std": None, "p75": None, "p95": None,
                     "missing_count": missing_count, "missing_pct": missing_pct,
                 })
 
         elif col_type == "Date":
             parsed_d = pd.to_datetime(valid_raw, errors="coerce", dayfirst=True)
-            if parsed_d.isna().sum() > 0:
-                parsed_d0 = pd.to_datetime(valid_raw, errors="coerce", dayfirst=False)
-                parsed_d = parsed_d.fillna(parsed_d0)
-
             min_d = str(parsed_d.min().date()) if parsed_d.notna().any() else "—"
             max_d = str(parsed_d.max().date()) if parsed_d.notna().any() else "—"
 
@@ -428,6 +422,7 @@ def compute_eda_stats(
                 "type": "Date",
                 "is_numeric": False,
                 "unique_count": unique_count,
+                "control_total": "—",
                 "min": min_d,
                 "max": max_d,
                 "mean": None,
@@ -439,17 +434,15 @@ def compute_eda_stats(
                 "missing_pct": missing_pct,
             })
 
-        else:
-            min_val = str(valid_raw.min()) if len(valid_raw) > 0 else "—"
-            max_val = str(valid_raw.max()) if len(valid_raw) > 0 else "—"
-
+        else:  # Dimension / ID
             summary_stats.append({
                 "variable": col,
                 "type": "Dimension",
                 "is_numeric": False,
                 "unique_count": unique_count,
-                "min": min_val,
-                "max": max_val,
+                "control_total": "—",
+                "min": "—",
+                "max": "—",
                 "mean": None,
                 "median": None,
                 "std": None,
@@ -462,13 +455,8 @@ def compute_eda_stats(
     trend_data = []
     if date_column in df.columns and len(metric_cols) > 0:
         parsed_date_series = pd.to_datetime(df[date_column], dayfirst=True, errors="coerce")
-        if parsed_date_series.isna().sum() > 0:
-            parsed_d0 = pd.to_datetime(df[date_column], dayfirst=True, errors="coerce")
-            parsed_date_series = parsed_date_series.fillna(parsed_d0)
-
         df["_parsed_date_str"] = parsed_date_series.dt.strftime("%Y-%m-%d")
         valid_trend_df = df[df["_parsed_date_str"].notna()]
-
         if len(valid_trend_df) > 0:
             trend_agg = (
                 valid_trend_df.groupby("_parsed_date_str")[metric_cols]
@@ -609,37 +597,56 @@ def remove_correlated_features(
 
 
 def find_corr_clusters(df: pd.DataFrame, feature_cols: List[str], threshold: float) -> List[List[str]]:
+    """
+    Finds distinct, tightly correlated feature pairs/groups exceeding the threshold.
+    Avoids chained transitive mega-clusters by prioritizing highest pairwise correlations.
+    """
     feature_cols = [c for c in feature_cols if c in df.columns]
     if len(feature_cols) < 2:
         return []
 
     sub = df[feature_cols].apply(pd.to_numeric, errors='coerce').dropna()
     corr_matrix = sub.corr().abs().fillna(0)
-    adj = {f: set() for f in feature_cols}
+
+    # Collect all qualifying pairwise correlations
+    pairs = []
     for i in range(len(feature_cols)):
         for j in range(i + 1, len(feature_cols)):
             f1, f2 = feature_cols[i], feature_cols[j]
-            if f1 in corr_matrix.index and f2 in corr_matrix.columns:
-                if corr_matrix.loc[f1, f2] >= threshold:
-                    adj[f1].add(f2)
-                    adj[f2].add(f1)
+            r_val = float(corr_matrix.loc[f1, f2])
+            if r_val >= threshold and not np.isnan(r_val):
+                pairs.append((f1, f2, r_val))
 
-    visited = set()
+    # Sort descending by correlation strength
+    pairs.sort(key=lambda x: x[2], reverse=True)
+
+    # Greedily group closely correlated pairs
+    used_features = set()
     clusters = []
-    for f in feature_cols:
-        if f not in visited and adj[f]:
-            stack = [f]
-            cluster = set()
-            while stack:
-                node = stack.pop()
-                if node not in visited:
-                    visited.add(node)
-                    cluster.add(node)
-                    stack.extend(list(adj[node] - visited))
-            if len(cluster) > 1:
-                clusters.append(sorted(list(cluster)))
-    return clusters
 
+    for f1, f2, r_val in pairs:
+        # If neither feature has been grouped yet, create a clean pair cluster
+        if f1 not in used_features and f2 not in used_features:
+            clusters.append([f1, f2])
+            used_features.add(f1)
+            used_features.add(f2)
+        # If one is already grouped, check if it correlates strongly (>= threshold) with ALL cluster members
+        elif f1 in used_features and f2 not in used_features:
+            for cluster in clusters:
+                if f1 in cluster:
+                    if all(corr_matrix.loc[f2, member] >= threshold for member in cluster):
+                        cluster.append(f2)
+                        used_features.add(f2)
+                    break
+        elif f2 in used_features and f1 not in used_features:
+            for cluster in clusters:
+                if f2 in cluster:
+                    if all(corr_matrix.loc[f1, member] >= threshold for member in cluster):
+                        cluster.append(f1)
+                        used_features.add(f1)
+                    break
+
+    return clusters
 
 def preview_combination_details(
     df: pd.DataFrame,
@@ -1735,3 +1742,211 @@ def execute_ard_pipeline(
         "preview": current_df.head(100).to_dict(orient="records"),
         "lineage": {"steps_executed": lineage_sources},
     }
+# ---------------------------------------------------------------------------
+# Module 4: EDA Core Diagnostic Engines
+# ---------------------------------------------------------------------------
+def compute_sparsity_stats(df: pd.DataFrame, metric_cols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """Calculates non-zero percentage and zero-inflation health per tactic."""
+    cols = metric_cols or df.select_dtypes(include=[np.number]).columns.tolist()
+    total_rows = len(df)
+    results = []
+
+    for col in cols:
+        if col not in df.columns:
+            continue
+        series = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        non_zero_count = int((series != 0).sum())
+        zero_count = total_rows - non_zero_count
+        non_zero_pct = round((non_zero_count / total_rows) * 100, 2) if total_rows > 0 else 0.0
+        zero_pct = round((zero_count / total_rows) * 100, 2) if total_rows > 0 else 0.0
+
+        if non_zero_pct < 10.0:
+            risk = "High Sparsity (<10% active)"
+            status = "critical"
+        elif non_zero_pct < 30.0:
+            risk = "Moderate Sparsity (10-30%)"
+            status = "warning"
+        else:
+            risk = "Healthy (>30% active)"
+            status = "healthy"
+
+        results.append({
+            "tactic": col,
+            "total_rows": total_rows,
+            "non_zero_count": non_zero_count,
+            "zero_count": zero_count,
+            "non_zero_pct": non_zero_pct,
+            "zero_pct": zero_pct,
+            "risk_label": risk,
+            "status": status,
+        })
+
+    results.sort(key=lambda x: x["non_zero_pct"], reverse=True)
+    return results
+
+
+def compute_poor_mans_curve_data(df: pd.DataFrame, x_col: str, y_col: str, n_bins: int = 12) -> Dict[str, Any]:
+    """Computes binned-average response curve of X vs Y to reveal response shape."""
+    sub = df[[x_col, y_col]].dropna().copy()
+    sub[x_col] = pd.to_numeric(sub[x_col], errors="coerce")
+    sub[y_col] = pd.to_numeric(sub[y_col], errors="coerce")
+    sub = sub.dropna()
+
+    if len(sub) < 5:
+        return {"binned_curve": [], "scatter_sample": [], "shape_indicator": "Insufficient Data", "x_col": x_col, "y_col": y_col}
+
+    sub = sub.sort_values(x_col)
+    
+    # Stratified quantile binning
+    try:
+        sub["bin"] = pd.qcut(sub[x_col], q=n_bins, duplicates="drop")
+    except Exception:
+        sub["bin"] = pd.cut(sub[x_col], bins=n_bins)
+
+    binned = (
+        sub.groupby("bin", observed=True)
+        .agg(
+            mean_x=(x_col, "mean"),
+            mean_y=(y_col, "mean"),
+            median_y=(y_col, "median"),
+            min_x=(x_col, "min"),
+            max_x=(x_col, "max"),
+            count=(y_col, "count"),
+        )
+        .reset_index()
+        .dropna()
+    )
+
+    binned_curve = []
+    for _, r in binned.iterrows():
+        binned_curve.append({
+            "bin_label": f"{r['min_x']:.1f} - {r['max_x']:.1f}",
+            "spend_x": round(float(r["mean_x"]), 2),
+            "response_y": round(float(r["mean_y"]), 2),
+            "median_y": round(float(r["median_y"]), 2),
+            "record_count": int(r["count"]),
+        })
+
+    # Curvature assessment (Log / Diminishing Returns vs Linear)
+    shape_indicator = "Linear"
+    if len(binned_curve) >= 3:
+        slopes = []
+        for i in range(1, len(binned_curve)):
+            dx = binned_curve[i]["spend_x"] - binned_curve[i - 1]["spend_x"]
+            dy = binned_curve[i]["response_y"] - binned_curve[i - 1]["response_y"]
+            if dx > 0:
+                slopes.append(dy / dx)
+        if len(slopes) >= 2:
+            if slopes[-1] < slopes[0] * 0.6:
+                shape_indicator = "Diminishing Returns (Log / Saturated)"
+            elif slopes[-1] > slopes[0] * 1.4:
+                shape_indicator = "Accelerating / Convex (Power)"
+
+    # Sample scatter points
+    scatter_sample = sub.sample(min(400, len(sub)), random_state=42)[[x_col, y_col]].to_dict(orient="records")
+
+    return {
+        "binned_curve": binned_curve,
+        "scatter_sample": [{"x": r[x_col], "y": r[y_col]} for r in scatter_sample],
+        "shape_indicator": shape_indicator,
+        "x_col": x_col,
+        "y_col": y_col,
+    }
+
+
+def detect_outliers_engine(
+    df: pd.DataFrame,
+    column: str,
+    method: str = "iqr",
+    threshold: float = 1.5,
+) -> Dict[str, Any]:
+    """Detects outliers in a column via IQR or Z-score."""
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not in dataset.")
+
+    series = pd.to_numeric(df[column], errors="coerce")
+    valid_idx = series.dropna().index
+    vals = series.dropna()
+
+    if method.lower() == "zscore":
+        mean_v = vals.mean()
+        std_v = vals.std() if vals.std() != 0 else 1.0
+        z_scores = (vals - mean_v).abs() / std_v
+        outlier_mask = z_scores > threshold
+        lower_bound = float(mean_v - threshold * std_v)
+        upper_bound = float(mean_v + threshold * std_v)
+    else:  # IQR
+        q25 = float(vals.quantile(0.25))
+        q75 = float(vals.quantile(0.75))
+        iqr = q75 - q25
+        lower_bound = float(q25 - threshold * iqr)
+        upper_bound = float(q75 + threshold * iqr)
+        outlier_mask = (vals < lower_bound) | (vals > upper_bound)
+
+    outlier_indices = valid_idx[outlier_mask].tolist()
+    outlier_rows = df.loc[outlier_indices].head(50).to_dict(orient="records")
+
+    return {
+        "column": column,
+        "method": method.upper(),
+        "threshold": threshold,
+        "total_rows": len(df),
+        "outlier_count": len(outlier_indices),
+        "outlier_pct": round((len(outlier_indices) / len(df)) * 100, 2) if len(df) > 0 else 0.0,
+        "lower_bound": round(lower_bound, 2),
+        "upper_bound": round(upper_bound, 2),
+        "preview_flagged_rows": outlier_rows,
+        "outlier_indices": outlier_indices,
+    }
+
+
+def remove_outliers_engine(
+    df: pd.DataFrame,
+    column: str,
+    method: str = "iqr",
+    threshold: float = 1.5,
+) -> Dict[str, Any]:
+    """Excludes flagged outliers and returns clean dataset."""
+    detection = detect_outliers_engine(df, column, method, threshold)
+    indices_to_drop = set(detection["outlier_indices"])
+    clean_df = df.drop(index=list(indices_to_drop)).reset_index(drop=True)
+
+    return {
+        "clean_csv": clean_df.to_csv(index=False),
+        "original_rows": len(df),
+        "dropped_rows": len(indices_to_drop),
+        "remaining_rows": len(clean_df),
+        "column": column,
+    }
+
+
+def compute_trend_rollup(
+    df: pd.DataFrame,
+    date_col: str,
+    metric_cols: List[str],
+    period: str = "week",
+) -> List[Dict[str, Any]]:
+    """Aggregates multi-metric trends by Week (WoW) or Month (MoM)."""
+    if date_col not in df.columns:
+        return []
+
+    df = df.copy()
+    parsed_dates = pd.to_datetime(df[date_col], dayfirst=True, errors="coerce")
+    if parsed_dates.isna().sum() > 0:
+        parsed_dates = parsed_dates.fillna(pd.to_datetime(df[date_col], dayfirst=False, errors="coerce"))
+
+    df["_date_parsed"] = parsed_dates
+    df = df.dropna(subset=["_date_parsed"])
+
+    if period == "month":
+        df["_period_str"] = df["_date_parsed"].dt.strftime("%Y-%m")
+    else:  # week
+        df["_period_str"] = df["_date_parsed"].dt.to_period("W").dt.start_time.dt.strftime("%Y-%m-%d")
+
+    valid_metrics = [c for c in metric_cols if c in df.columns]
+    for c in valid_metrics:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+    agg = df.groupby("_period_str", as_index=False)[valid_metrics].sum().sort_values("_period_str")
+    agg.rename(columns={"_period_str": "date"}, inplace=True)
+    return agg.to_dict(orient="records")

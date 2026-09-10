@@ -295,6 +295,25 @@ export default function DataStitching() {
       const res = await API.post("/ard/build-ard-pipeline", payload).then((r) => r.data);
       setArdResult(res);
 
+      // Register the generated ARD into savedArds for downstream selection
+      const newArdEntry = {
+        id: `ard_${Date.now()}`,
+        name: ardDatasetName.trim() || `${activeTab.toUpperCase()}_ARD_v${res.version}`,
+        grain: activeTab,
+        version: res.version,
+        rows: res.rows,
+        cols: res.cols,
+        columns: res.columns,
+        csv_data: res.csv_data,
+        createdAt: new Date().toISOString(),
+      };
+
+      const existingArds = (state.savedArds || []).filter((a) => a.name !== newArdEntry.name);
+      const updatedArds = [...existingArds, newArdEntry];
+
+      setField("savedArds", updatedArds);
+
+      // Update active working datasets for downstream modules
       if (activeTab === "hcp" || activeTab === "custom") {
         setField("granularCsvData", res.csv_data);
         setField("mergedCsvData", res.csv_data);
@@ -302,7 +321,7 @@ export default function DataStitching() {
         setField("filteredCsvData", res.csv_data);
       }
 
-      toast.success(`Generated ${ardDatasetName} (${res.rows.toLocaleString()} rows)`);
+      toast.success(`Generated & Saved "${newArdEntry.name}" (${res.rows.toLocaleString()} rows)`);
     } catch (err) {
       console.error(err);
       const msg = err.response?.data?.error || err.response?.data?.detail || err.message || "Pipeline join failed";

@@ -11,6 +11,9 @@ const initialState = {
   // Multi-file Ingestion Store
   ingestedFiles: [],
 
+  // Saved ARD Datasets Registry (HCP, DMA, Custom with user names)
+  savedArds: [],
+
   // Active Datasets
   fileData: [],
   mergedCsvData: null,
@@ -71,7 +74,6 @@ export function AppProvider({ children }) {
     }
   });
 
-  // Keep local storage in sync
   useEffect(() => {
     try {
       localStorage.setItem("proctimize_active_state", JSON.stringify(state));
@@ -82,7 +84,6 @@ export function AppProvider({ children }) {
     setState((prev) => ({ ...prev, [key]: value }));
   }, []);
 
-  // Re-hydrate state from backend workflow entity snapshot
   const loadWorkflowState = useCallback((workflow) => {
     const savedState = workflow.state_data || {};
     const hydrated = {
@@ -96,11 +97,10 @@ export function AppProvider({ children }) {
     localStorage.setItem("proctimize_active_state", JSON.stringify(hydrated));
   }, []);
 
-  // Auto-save snapshot of current state to backend (Neon DB)
   const saveWorkflowSnapshot = useCallback(
     async (stageName, routePath, moduleStatusUpdates = {}) => {
       if (!state.workflowId) return;
-      
+
       const updatedModuleStatus = {
         ...(state.moduleStatus || {}),
         ...moduleStatusUpdates,

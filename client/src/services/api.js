@@ -49,8 +49,24 @@ export const buildARD = (payload) =>
   API.post("/ard/build-ard", payload).then((r) => r.data);
 
 // ─── EDA & Relationships ──────────────────────────────────────────────────────
+// ─── EDA & Relationships ──────────────────────────────────────────────────────
 export const edaStats = (payload) =>
   API.post("/eda/stats", payload).then((r) => r.data);
+
+export const edaSparsity = (payload) =>
+  API.post("/eda/sparsity", payload).then((r) => r.data);
+
+export const edaPoorMansCurve = (payload) =>
+  API.post("/eda/poor-mans-curve", payload).then((r) => r.data);
+
+export const edaDetectOutliers = (payload) =>
+  API.post("/eda/detect-outliers", payload).then((r) => r.data);
+
+export const edaRemoveOutliers = (payload) =>
+  API.post("/eda/remove-outliers", payload).then((r) => r.data);
+
+export const edaTrendRollup = (payload) =>
+  API.post("/eda/trend-rollup", payload).then((r) => r.data);
 
 export const edaHistogram = (payload) =>
   API.post("/eda/histogram", payload).then((r) => r.data);
