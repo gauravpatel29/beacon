@@ -34,7 +34,14 @@ Nothing here means the user hasn't uploaded on the Ingestion screen yet.
 
 `POST /v2/workflows/{workflow_id}/ard/build`
 
-Add `?dry_run=true` to see the result without saving.
+Add **`?dry_run=true`** to preview the join without saving. It runs the whole
+pipeline on the real data through the same code path as a commit, so what you
+see is what you would get — and it returns the same field names, so the UI
+reads one shape either way. Nothing is written and no dataset appears in the
+list.
+
+It does the full join work, so on large files a preview costs what a build
+costs. That is the trade that makes it trustworthy rather than an estimate.
 
 ```json
 {
@@ -54,17 +61,39 @@ Add `?dry_run=true` to see the result without saving.
 | Field | Notes |
 |---|---|
 | `left_file` / `right_file` | A dataset filename, or `"Step N Result"` to chain off an earlier step |
-| `left_key` / `right_key` | Array (or comma-separated string). **Both sides must have the same count** |
-| `join_type` | `left` or `inner` |
+| `left_key` / `right_key` | Array (or comma-separated string). **Both sides must have the same count.** Omit for `cross` |
+| `join_type` | `left` · `inner` · `right` · `outer` · `cross` |
 | `target_grain` | `hcp` · `dma` · `geo` · `zip` · `national` |
 | `output` | Optional. Defaults to `__ard_<grain>__.csv` |
 
 Key names are matched **case-insensitively**, so `npi` finds `NPI`.
 
-**A date key is optional.** Pair it only when both sides have one — a crosswalk
-joins on the ID alone. Sending 2 keys on one side and 1 on the other is a 422.
+### Join types
 
-**201** (or **200** for `dry_run`)
+| `join_type` | Keeps |
+|---|---|
+| `left` | every left row (default) |
+| `inner` | only rows matching on both sides |
+| `right` | every right row |
+| `outer` | every row from both sides |
+| `cross` | every combination — no keys, no matching |
+
+`cross` is the only one that takes no keys; the other four return **422**
+`keys_missing` without them.
+
+> Send the plain value (`"left"`), not the dropdown's label text. Labels are
+> tolerated, but a label containing a file name is ambiguous — `"Left Join
+> (Keep all crosswalk.csv rows)"` reads as a *cross* join to anything matching
+> loosely. The value is unambiguous.
+
+### Keys
+
+Any number of key pairs, positionally matched: `left_key[0]` joins to
+`right_key[0]`, and so on. A date key is just another pair — pair it only when
+both sides have a date column, since a crosswalk joins on the ID alone. Sending
+2 keys on one side and 1 on the other is a **422**.
+
+**201** (or **200** for `dry_run` — same field names either way)
 
 ```json
 {
@@ -76,21 +105,46 @@ joins on the ID alone. Sending 2 keys on one side and 1 on the other is a 422.
   "preview": [ /* up to 100 rows */ ],
   "lineage": { "steps_executed": [
     { "step": 1, "left": "sales.csv", "right": "calls.csv", "join": "left",
-      "rows_in": 3, "rows_out": 3, "rows_matched": 3 }
+      "keys": ["npi","month"], "rows_in": 3, "rows_out": 3 },
+    { "step": 2, "left": "Step 1 Result", "right": "xwalk.csv", "join": "left",
+      "keys": ["npi"], "rows_in": 3, "rows_out": 3 }
   ] },
   "derived_from": { "grain": "hcp", "inputs": ["calls.csv","sales.csv"] }
 }
 ```
 
-`lineage.steps_executed[].rows_in` vs `rows_out` is worth showing — it's how a
-user spots a join that dropped or multiplied rows.
+On a cross join, `keys` reads `["(cross join - no keys)"]`.
 
-Two behaviours to know:
+`rows_in` vs `rows_out` per step is worth showing — it's how a user spots a
+join that dropped or multiplied rows.
+
+### Steps run in order, and the LAST one is the ARD
+
+Every step executes, in sequence. Each result is registered as `"Step N Result"`
+so the next step can build on it. **The ARD is whatever the final step
+produced** — not an accumulation of all of them.
+
+So a step whose `left_file` isn't `"Step N Result"` starts a fresh chain, and
+the earlier work is computed and then discarded:
+
+```
+chained      step 2 left = "Step 1 Result"  ->  columns: key, trx, calls, dma
+not chained  step 2 left = "a.csv"          ->  columns: key, trx, dma
+                                                          ("calls" is lost)
+```
+
+Both appear in `lineage` either way, so compare the final `columns` against
+what you expect if a column goes missing.
+
+### Two other behaviours
 
 - **Duplicate keys on the right are aggregated before joining** (numerics
   summed, everything else takes the first value), so the ARD can't fan out past
-  its own grain.
-- **Unmatched rows get `0`, not null,** for numeric columns from the right side.
+  its own grain. Skipped for `cross`.
+- **Unmatched rows get `0`** for numeric columns *brought in by that step from
+  the right*. Columns already on the left keep their own nulls — so on an
+  `outer` join, a right-only row shows `null` for the left's metrics rather
+  than a fabricated `0`.
 
 ---
 
