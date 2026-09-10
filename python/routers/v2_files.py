@@ -33,6 +33,7 @@ from core.datasets import DatasetError
 from core.manifest import Manifest, ResolvedSpec
 from core.processing import detect_date_granularity
 from core.profile import profile_frame
+from core.stats import frame_stats, search_values, VALUES_LIMIT
 from core.transform import TransformError
 
 router = APIRouter()
@@ -436,6 +437,63 @@ async def get_profile(request: Request, workflow_id: str, filename: str):
         "columns": [str(c) for c in df.columns],
         "profile": profile_frame(df),
     }
+
+
+@router.get("/{workflow_id}/files/{filename}/stats")
+async def get_stats(request: Request, workflow_id: str, filename: str):
+    """Control totals and per-column filter bounds, over the WHOLE frame.
+
+    Resolved, not raw: the ribbon and the filter controls describe the dataset
+    as the user currently has it configured, so a dropped column is absent and
+    a renamed one appears under its new name.
+
+    Sampled figures would be wrong here in a way that is hard to notice - see
+    the module docstring in `core.stats`.
+    """
+    if (guard := await _guard(request, workflow_id)) is not None:
+        return guard
+    try:
+        df = await datasets.resolve_frame(workflow_id, filename)
+        meta = await datasets.get_dataset(workflow_id, filename)
+    except TransformError as exc:
+        return _transform_problem(request, exc, stored=True)
+    except DatasetError as exc:
+        return _dataset_problem(request, exc)
+
+    spec_raw = meta.get("spec") or {}
+    spec = ResolvedSpec.model_validate(spec_raw) if spec_raw else None
+    return {"filename": filename, **frame_stats(df, spec)}
+
+
+@router.get("/{workflow_id}/files/{filename}/values")
+async def get_values(
+    request: Request, workflow_id: str, filename: str,
+    column: str = Query(..., min_length=1),
+    q: str = Query("", description="Case-insensitive substring match"),
+    limit: int = Query(VALUES_LIMIT, ge=1, le=500),
+):
+    """Distinct values of one column, for the categorical filter's type-ahead.
+
+    Searching server-side keeps an ID column with a million distinct values
+    from ever being shipped to the browser to be filtered there.
+    """
+    if (guard := await _guard(request, workflow_id)) is not None:
+        return guard
+    try:
+        df = await datasets.resolve_frame(workflow_id, filename)
+    except TransformError as exc:
+        return _transform_problem(request, exc, stored=True)
+    except DatasetError as exc:
+        return _dataset_problem(request, exc)
+
+    if column not in df.columns:
+        return problem(
+            request, 422, "Unknown column",
+            f'"{column}" is not a column of "{filename}".',
+            errors=[{"code": "column_not_found", "column": column,
+                     "message": f'"{column}" is not a column of "{filename}".'}],
+        )
+    return search_values(df, column, q, limit)
 
 
 @router.get("/{workflow_id}/files/{filename}/csv")

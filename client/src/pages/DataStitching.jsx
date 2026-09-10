@@ -470,10 +470,10 @@ export default function DataStitching() {
                       onChange={(v) => updateStep(idx, "join_type", v)}
                       options={[
                         { value: "left", label: `Left Join (Keep all ${step.left_file || "left"} rows)` },
-                        { value: "inner", label: "Inner Join (Match only — keep common rows)" },
+                        { value: "inner", label: "Inner Join (Match only | keep common rows)" },
                         { value: "right", label: `Right Join (Keep all ${step.right_file || "right"} rows)` },
                         { value: "outer", label: "Full Outer Join (Keep all rows from both)" },
-                        { value: "cross", label: "Cross Join (Cartesian Product — all combinations)" },
+                        { value: "cross", label: "Cross Join (Cartesian Product | all combinations)" },
                       ]}
                     />
 
