@@ -58,6 +58,20 @@ CANDIDATE_DATE_FORMATS = LEGACY_DATE_FORMATS + [
     "%m/%d/%Y %H:%M:%S",
 ]
 
+# Lower sorts earlier when two formats explain the data equally well. Only
+# the genuinely ambiguous layouts need an entry; everything else keeps its
+# position in CANDIDATE_DATE_FORMATS.
+TIE_BREAK_RANK = {
+    "%Y-%m-%d": 0,   # ISO
+    "%Y/%m/%d": 1,
+    "%d/%m/%Y": 2,   # the UI's own default for slash dates
+    "%d-%m-%Y": 3,
+    "%m/%d/%Y": 4,
+    "%m-%d-%Y": 5,
+    "%Y/%d/%m": 8,   # year-day-month: real, but rare
+    "%Y-%d-%m": 9,
+}
+
 DATE_MATCH_THRESHOLD = LEGACY_THRESHOLD
 NUMERIC_THRESHOLD = 0.90
 BOOL_THRESHOLD = 0.90
@@ -106,8 +120,13 @@ def _date_candidates(values: pd.Series) -> List[Dict[str, Any]]:
         rate = float(parsed.notna().sum()) / total
         if rate >= DATE_MATCH_THRESHOLD:
             out.append({"format": fmt, "match_rate": round(rate, 4)})
-    # Best first; ties keep CANDIDATE_DATE_FORMATS order, which is deliberate.
-    out.sort(key=lambda c: -c["match_rate"])
+
+    # Best first. On a tie, prefer the conventional reading of the layout:
+    # "2025-01-04" is ISO far more often than it is year-day-month, and
+    # CANDIDATE_DATE_FORMATS happens to list %Y-%d-%m first - which used to
+    # decide the winner and pre-fill a `from` that fails on the first
+    # day-of-month over 12 anywhere in the file.
+    out.sort(key=lambda c: (-c["match_rate"], TIE_BREAK_RANK.get(c["format"], 50)))
     return out
 
 
@@ -126,8 +145,18 @@ def _looks_integer(values: pd.Series) -> bool:
     return bool(np.all(np.equal(np.mod(nums, 1), 0)))
 
 
-def profile_column(name: str, series: pd.Series) -> Dict[str, Any]:
-    """Describe one column well enough for a form to pre-fill itself."""
+def profile_column(
+    name: str, series: pd.Series, full_series: Optional[pd.Series] = None
+) -> Dict[str, Any]:
+    """Describe one column well enough for a form to pre-fill itself.
+
+    `series` is the sample the legacy heuristics run on. `full_series`, when
+    given, is the whole column, and is used ONLY to choose the date format:
+    that choice has to hold for every row the transform will later parse, and a
+    200-row sample cannot establish it. A file with many rows per date can
+    easily open with 200 rows whose day-of-month never exceeds 12, which makes
+    %Y-%d-%m fit the sample perfectly and fail at the first later row.
+    """
     blank = _blank(series)
     values = series[~blank].astype(str).str.strip()
 
@@ -150,7 +179,18 @@ def profile_column(name: str, series: pd.Series) -> Dict[str, Any]:
     # Detection first, exactly as the original pipeline decided it. Only then is
     # a format suggested, so the two concerns stay separate.
     if _is_date_column(values):
-        candidates = _date_candidates(values)
+        # Detection stays on the sample - that is the original rule, and which
+        # columns are offered date controls must not change. Only the format
+        # choice widens to the whole column.
+        scope = values
+        if full_series is not None:
+            full_blank = _blank(full_series)
+            full_values = full_series[~full_blank].astype(str).str.strip()
+            # Distinct values only: a date column repeats heavily, so this is a
+            # few dozen strings even for a file of millions of rows.
+            if len(full_values):
+                scope = pd.Series(full_values.unique())
+        candidates = _date_candidates(scope)
         info["date_candidates"] = candidates
 
     if info["date_candidates"]:
@@ -188,9 +228,13 @@ def profile_column(name: str, series: pd.Series) -> Dict[str, Any]:
 
 
 def profile_frame(df: pd.DataFrame, sample_rows: int = SAMPLE_ROWS) -> List[Dict[str, Any]]:
-    """Profile every column from the first `sample_rows` rows."""
+    """Profile every column from the first `sample_rows` rows.
+
+    The full column goes through as well, for the date format alone - see
+    `profile_column`.
+    """
     head = df.head(sample_rows)
-    return [profile_column(str(col), head[col]) for col in head.columns]
+    return [profile_column(str(col), head[col], full_series=df[col]) for col in head.columns]
 
 
 def date_columns(profile: List[Dict[str, Any]]) -> List[str]:
