@@ -1,6 +1,3 @@
-"""
-Core processing utilities – pure Python/Polars/Pandas logic.
-"""
 import re
 import math
 from datetime import datetime, timedelta, date
@@ -23,11 +20,6 @@ RE_CMS_NPI = re.compile(r"^[12]\d{9}$")
 
 
 def luhn_valid_npi(npi) -> bool:
-    """
-    Official CMS (Centers for Medicare & Medicaid Services) NPI Validator.
-    1. Must be exactly 10 digits starting with 1 (individual) or 2 (organization).
-    2. Must satisfy ISO/IEC 7812 Luhn checksum with fixed prefix '80840'.
-    """
     if npi is None:
         return False
     npi_str = str(npi).strip().replace(".0", "")
@@ -36,11 +28,11 @@ def luhn_valid_npi(npi) -> bool:
 
     base = npi_str[:9]
     chk = ord(npi_str[9]) - 48
-    s = 24  # Pre-computed Luhn sum contribution for prefix '80840'
+    s = 24
 
     for i in range(9):
         d = ord(base[8 - i]) - 48
-        if i % 2 == 0:  # Even positions from right (weights of 2)
+        if i % 2 == 0:
             d *= 2
             if d > 9:
                 d -= 9
@@ -49,13 +41,6 @@ def luhn_valid_npi(npi) -> bool:
     return ((10 - (s % 10)) % 10) == chk
 
 
-# ---------------------------------------------------------------------------
-# Date formatting & parsing
-# ---------------------------------------------------------------------------
-# Candidate date formats in priority order: ISO first (unambiguous by
-# convention), then day-first, then month-first. "%Y-%d-%m" is deliberately
-# absent - it is not a real-world convention, and letting pandas infer it from
-# dayfirst=True is what silently transposes day and month on ISO input.
 _DATE_FORMATS = [
     "%Y-%m-%d", "%Y/%m/%d", "%Y%m%d",
     "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y",
@@ -67,19 +52,10 @@ _DATE_FORMATS = [
 
 
 def _parse_dates_robust(s_clean: pd.Series) -> pd.Series:
-    """
-    Parse a cleaned string Series into datetimes deterministically.
-
-    Picks an explicit format by how many values it parses (ties broken by the
-    priority order of _DATE_FORMATS) rather than relying on pandas' dayfirst
-    inference. Genuinely ambiguous columns (every day-of-month <= 12) resolve
-    day-first, matching the UI's default "%d/%m/%Y".
-    """
     non_empty = s_clean[s_clean != ""]
     if non_empty.empty:
         return pd.Series(pd.NaT, index=s_clean.index, dtype="datetime64[ns]")
 
-    # Score candidates against distinct values only - far cheaper on long columns.
     uniques = pd.Series(non_empty.unique())
     total = len(uniques)
 
@@ -96,7 +72,6 @@ def _parse_dates_robust(s_clean: pd.Series) -> pd.Series:
     else:
         parsed = pd.to_datetime(s_clean, format=best_fmt, errors="coerce")
 
-    # Mixed-format column: fill remaining gaps with the other candidates.
     if parsed.isna().any():
         for fmt in _DATE_FORMATS:
             if fmt == best_fmt:
@@ -105,7 +80,6 @@ def _parse_dates_robust(s_clean: pd.Series) -> pd.Series:
                 break
             parsed = parsed.fillna(pd.to_datetime(s_clean, format=fmt, errors="coerce"))
 
-    # Anything still unparsed is exotic (month names, offsets); let pandas try.
     if parsed.isna().any():
         leftover = s_clean.where(parsed.isna(), "")
         parsed = parsed.fillna(pd.to_datetime(leftover, errors="coerce", dayfirst=True))
@@ -195,7 +169,6 @@ def detect_date_columns_by_sampling(
     threshold: float = 0.8,
     formats: Optional[List[str]] = None,
 ) -> List[str]:
-
     if formats is None:
         formats = [
             "%d/%m/%Y", "%Y/%m/%d", "%Y/%d/%m", "%m/%d/%Y",
@@ -242,9 +215,6 @@ def detect_date_columns_by_sampling(
     return date_cols
 
 
-# ---------------------------------------------------------------------------
-# Robust Time Granularity Modification
-# ---------------------------------------------------------------------------
 def modify_granularity(
     df: pl.DataFrame,
     geo_column: str,
@@ -255,10 +225,6 @@ def modify_granularity(
     numerical_config_dict: Dict[str, str] = None,
     categorical_config_dict: Dict[str, str] = None,
 ) -> Tuple[pl.DataFrame, str]:
-    """
-    Safely rolls up granularity (Daily->Weekly, Daily->Monthly, Weekly->Monthly)
-    using Polars native month/week start dates.
-    """
     numerical_config_dict = numerical_config_dict or {}
     categorical_config_dict = categorical_config_dict or {}
 
@@ -267,7 +233,6 @@ def modify_granularity(
 
     exclude = {geo_column, date_column, "_group_date", "week_date", "month_date"}
 
-    # Build aggregation expressions
     agg_exprs = []
     seen = set()
     for col, op in numerical_config_dict.items():
@@ -285,13 +250,11 @@ def modify_granularity(
             if op == "count":            agg_exprs.append(pl.col(col).count().alias(col))
             elif op == "distinct count": agg_exprs.append(pl.col(col).n_unique().alias(col))
 
-    # Auto-aggregate numeric columns if none were explicitly supplied
     if not agg_exprs:
         for col, dtype in base.schema.items():
             if col not in exclude and dtype.is_numeric():
                 agg_exprs.append(pl.col(col).sum().alias(col))
 
-    # 1. Same granularity (e.g. Weekly -> Weekly, Monthly -> Monthly)
     if granularity_level_df == granularity_level_user_input:
         seen_cols = set()
         selected_cols = []
@@ -305,7 +268,6 @@ def modify_granularity(
                 selected_cols.append(col)
         return base.select(selected_cols), date_column
 
-    # 2. Daily -> Weekly
     if granularity_level_df == "Daily" and granularity_level_user_input == "Weekly":
         base = base.with_columns(
             (pl.col(date_column) - pl.duration(days=pl.col(date_column).dt.weekday())).alias("_group_date")
@@ -314,9 +276,7 @@ def modify_granularity(
         out = out.rename({"_group_date": date_column})
         return out, date_column
 
-    # 3. Weekly -> Monthly OR Daily -> Monthly
     if granularity_level_user_input == "Monthly":
-        # Group to the 1st of every month
         base = base.with_columns(
             pl.col(date_column).dt.month_start().alias("_group_date")
         )
@@ -327,9 +287,6 @@ def modify_granularity(
     return base, date_column
 
 
-# ---------------------------------------------------------------------------
-# Normalization
-# ---------------------------------------------------------------------------
 def normalize_columns_pl(df: pl.DataFrame, columns: List[str], method: str = "zscore") -> pl.DataFrame:
     out = df.clone()
     cols = [c for c in columns if c in out.columns and out.schema[c].is_numeric()]
@@ -358,9 +315,6 @@ def normalize_columns_pl(df: pl.DataFrame, columns: List[str], method: str = "zs
     return out
 
 
-# ---------------------------------------------------------------------------
-# Generic Column Semantic Inference & Comprehensive EDA Statistics
-# ---------------------------------------------------------------------------
 def infer_column_semantic_type(
     series: pd.Series,
     col_name: str,
@@ -481,7 +435,7 @@ def compute_eda_stats(
                 "missing_pct": missing_pct,
             })
 
-        else:  # Dimension / ID / Zip codes (No numerical Min/Max or Sum)
+        else:
             summary_stats.append({
                 "variable": col,
                 "type": "Dimension",
@@ -517,21 +471,22 @@ def compute_eda_stats(
     by_geo = []
     if geo_column in df.columns and dependent_variable in df.columns:
         valid_geo = df.dropna(subset=[geo_column, dependent_variable])
-        geo_agg = (
-            valid_geo.groupby(geo_column)[dependent_variable]
-            .sum()
-            .reset_index()
-            .rename(columns={geo_column: "geo", dependent_variable: "value"})
-            .sort_values("value", ascending=False)
-        )
-        by_geo = geo_agg.head(20).to_dict(orient="records")
+        if geo_column != dependent_variable:
+            geo_agg = (
+                valid_geo.groupby(geo_column)[dependent_variable]
+                .sum()
+                .reset_index()
+                .rename(columns={geo_column: "geo", dependent_variable: "value"})
+                .sort_values("value", ascending=False)
+            )
+            by_geo = geo_agg.head(20).to_dict(orient="records")
 
     return {
         "summary_stats": summary_stats,
         "trend_data": trend_data,
         "by_geo": by_geo,
         "numeric_cols": metric_cols,
-        "all_cols": df.columns.tolist(),
+        "all_cols": [c for c in df.columns if not c.startswith("_")],
         "total_rows": total_rows,
         "date_column": date_column,
         "geo_column": geo_column,
@@ -539,22 +494,19 @@ def compute_eda_stats(
     }
 
 
-
-# ---------------------------------------------------------------------------
-# Multicollinearity Analysis & Treatment
-# ---------------------------------------------------------------------------
 def compute_correlation_matrix(df: pd.DataFrame, columns: List[str], method: str = "pearson") -> dict:
-    sub = df[columns].apply(pd.to_numeric, errors='coerce').dropna()
+    cols = [c for c in list(dict.fromkeys(columns)) if c in df.columns]
+    sub = df[cols].apply(pd.to_numeric, errors='coerce')
     corr = sub.corr(method=method)
     return corr.fillna(0).to_dict()
 
 
 def compute_corr_pairs(df: pd.DataFrame, feature_cols: List[str], threshold: float) -> Tuple[List[Tuple], pd.DataFrame]:
-    feature_cols = [c for c in feature_cols if c in df.columns]
+    feature_cols = [c for c in list(dict.fromkeys(feature_cols)) if c in df.columns]
     if len(feature_cols) < 2:
         return [], pd.DataFrame()
 
-    sub = df[feature_cols].apply(pd.to_numeric, errors='coerce').dropna()
+    sub = df[feature_cols].apply(pd.to_numeric, errors='coerce')
     corr_matrix = sub.corr().abs().fillna(0)
     pairs = []
     for i in range(len(feature_cols)):
@@ -567,47 +519,6 @@ def compute_corr_pairs(df: pd.DataFrame, feature_cols: List[str], threshold: flo
     pairs.sort(key=lambda x: x[2], reverse=True)
     return pairs, corr_matrix
 
-def compute_cross_correlation_lags(
-    df: pd.DataFrame,
-    date_col: str,
-    x_col: str,
-    y_col: str,
-    max_lags: int = 6,
-) -> List[Dict[str, Any]]:
-    """Calculates cross-correlation across time lags (-max_lags to +max_lags)."""
-    if date_col not in df.columns or x_col not in df.columns or y_col not in df.columns:
-        return []
-
-    df_time = df[[date_col, x_col, y_col]].copy()
-    df_time[date_col] = pd.to_datetime(df_time[date_col], dayfirst=True, errors="coerce")
-    df_time = df_time.dropna().sort_values(date_col)
-
-    # Rollup to time series level
-    ts = df_time.groupby(date_col)[[x_col, y_col]].sum().reset_index()
-    s_x = pd.to_numeric(ts[x_col], errors="coerce").fillna(0)
-    s_y = pd.to_numeric(ts[y_col], errors="coerce").fillna(0)
-
-    lag_results = []
-    for lag in range(-max_lags, max_lags + 1):
-        if lag < 0:
-            shifted_x = s_x.shift(-lag)
-            r = shifted_x.corr(s_y)
-        elif lag > 0:
-            shifted_x = s_x.shift(lag)
-            r = shifted_x.corr(s_y)
-        else:
-            r = s_x.corr(s_y)
-
-        r_val = round(float(r), 3) if pd.notna(r) else 0.0
-        lag_label = f"Lag {lag:+d}w" if lag != 0 else "Same Week (Lag 0)"
-        lag_results.append({
-            "lag": lag,
-            "label": lag_label,
-            "correlation": r_val,
-        })
-
-    return lag_results
-
 
 def preview_removal_reasons(
     df: pd.DataFrame,
@@ -615,7 +526,7 @@ def preview_removal_reasons(
     dependent_variable: Optional[str],
     threshold: float,
 ) -> dict:
-    feature_cols = [c for c in feature_cols if c in df.columns]
+    feature_cols = [c for c in list(dict.fromkeys(feature_cols)) if c in df.columns]
     if len(feature_cols) < 2:
         return {
             "pairs": [], "dropped": [], "kept": feature_cols,
@@ -629,9 +540,14 @@ def preview_removal_reasons(
     target_corr = {}
     if dependent_variable and dependent_variable in df.columns:
         try:
-            sub = df[feature_cols + [dependent_variable]].apply(pd.to_numeric, errors='coerce')
-            t_corr = sub.corr()[dependent_variable].abs()
-            target_corr = t_corr.to_dict()
+            dep_series = pd.to_numeric(df[dependent_variable], errors='coerce')
+            for col in feature_cols:
+                if col == dependent_variable:
+                    target_corr[col] = 1.0
+                else:
+                    col_series = pd.to_numeric(df[col], errors='coerce')
+                    r = col_series.corr(dep_series)
+                    target_corr[col] = abs(float(r)) if pd.notna(r) else 0.0
         except Exception:
             target_corr = {}
 
@@ -681,17 +597,16 @@ def remove_correlated_features(
     threshold: float,
 ) -> Tuple[pd.DataFrame, List[str], List[str]]:
     preview = preview_removal_reasons(df, feature_cols, dependent_variable, threshold)
-    df_reduced = df.drop(columns=preview["dropped"])
+    df_reduced = df.drop(columns=[c for c in preview["dropped"] if c in df.columns])
     return df_reduced, preview["kept"], preview["dropped"]
 
 
 def find_corr_clusters(df: pd.DataFrame, feature_cols: List[str], threshold: float) -> List[List[str]]:
-    """Strictly returns 2-variable pairs with pairwise |r| >= threshold."""
-    feature_cols = [c for c in feature_cols if c in df.columns]
+    feature_cols = [c for c in list(dict.fromkeys(feature_cols)) if c in df.columns]
     if len(feature_cols) < 2:
         return []
 
-    sub = df[feature_cols].apply(pd.to_numeric, errors='coerce').dropna()
+    sub = df[feature_cols].apply(pd.to_numeric, errors='coerce')
     corr_matrix = sub.corr().abs().fillna(0)
 
     pairs = []
@@ -709,45 +624,6 @@ def find_corr_clusters(df: pd.DataFrame, feature_cols: List[str], threshold: flo
     pairs.sort(key=lambda x: x[2], reverse=True)
     return [[p[0], p[1]] for p in pairs]
 
-def preview_combination_details(
-    df: pd.DataFrame,
-    clusters: List[List[str]],
-    new_names: List[str],
-    method: str = "sum",
-    weights_per_cluster: Optional[List[Dict]] = None,
-) -> dict:
-    cluster_previews = []
-    for idx, cluster in enumerate(clusters):
-        c_name = new_names[idx] if idx < len(new_names) else f"COMBO_{idx + 1}"
-        formula = ""
-        if method == "mean":
-            series = df[cluster].mean(axis=1)
-            formula = f"{c_name} = Mean({', '.join(cluster)})"
-        elif method == "weighted_sum":
-            w_dict = weights_per_cluster[idx] if weights_per_cluster and idx < len(weights_per_cluster) else {}
-            series = pd.Series(0.0, index=df.index)
-            terms = []
-            for col in cluster:
-                w = float(w_dict.get(col, 1.0))
-                series += w * df[col]
-                terms.append(f"{w}×{col}")
-            formula = f"{c_name} = {' + '.join(terms)}"
-        else:
-            series = df[cluster].sum(axis=1)
-            formula = f"{c_name} = Sum({', '.join(cluster)})"
-
-        sample_table = pd.concat([df[cluster].head(5), series.head(5).rename(c_name)], axis=1)
-        cluster_previews.append({
-            "combo_name": c_name,
-            "features": cluster,
-            "formula": formula,
-            "sample_rows": sample_table.to_dict(orient="records"),
-        })
-
-    return {"clusters": cluster_previews}
-
-
-# python/core/processing.py
 
 def combine_clusters(
     df: pd.DataFrame,
@@ -767,8 +643,6 @@ def combine_clusters(
             continue
 
         user_col_name = new_names[idx] if idx < len(new_names) else f"COMBO_{idx + 1}"
-
-        # Coerce all cluster columns to numeric for calculation
         cluster_nums = df_combined[valid_cluster].apply(pd.to_numeric, errors='coerce').fillna(0)
 
         if method == "mean":
@@ -805,9 +679,15 @@ def apply_weighted_sum_columns(
     applied_info = []
     for cfg in configs:
         col_name = cfg["column_name"]
-        sel_cols = cfg["columns"]
+        sel_cols = [c for c in cfg["columns"] if c in df_out.columns]
         w_dict = cfg.get("weights", {})
-        series = sum(float(w_dict.get(c, 1.0)) * df_out[c] for c in sel_cols)
+        
+        series = pd.Series(0.0, index=df_out.index)
+        for c in sel_cols:
+            w = float(w_dict.get(c, 1.0))
+            num_c = pd.to_numeric(df_out[c], errors='coerce').fillna(0)
+            series += w * num_c
+
         df_out[col_name] = series
         weight_detail = ", ".join(f"{c}×{w_dict.get(c, 1.0):.2f}" for c in sel_cols)
         applied_info.append({
@@ -826,7 +706,9 @@ def apply_pca_treatment(
     feature_cols: List[str],
     variance_threshold: float = 0.9,
 ) -> dict:
-    X = df[feature_cols].values
+    feature_cols = [c for c in list(dict.fromkeys(feature_cols)) if c in df.columns]
+    X_df = df[feature_cols].apply(pd.to_numeric, errors='coerce').fillna(0)
+    X = X_df.values
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
@@ -896,21 +778,19 @@ def get_candidate_features(
 
 
 def run_pca(df: pd.DataFrame, columns: List[str], n_components: int = 2) -> dict:
-    sub = df[columns].dropna()
+    cols = [c for c in list(dict.fromkeys(columns)) if c in df.columns]
+    sub = df[cols].apply(pd.to_numeric, errors='coerce').dropna()
     scaler = StandardScaler()
     scaled = scaler.fit_transform(sub)
-    pca = PCA(n_components=n_components)
+    pca = PCA(n_components=min(n_components, len(cols)))
     components = pca.fit_transform(scaled)
     return {
         "explained_variance_ratio": pca.explained_variance_ratio_.tolist(),
         "components": components.tolist(),
-        "loadings": pd.DataFrame(pca.components_, columns=columns).to_dict(orient="records"),
+        "loadings": pd.DataFrame(pca.components_, columns=cols).to_dict(orient="records"),
     }
 
 
-# ---------------------------------------------------------------------------
-# Optuna, Transformations & Modelling
-# ---------------------------------------------------------------------------
 def _apply_adstock_simple(series, decay, lag):
     result = np.array(series, dtype=np.float64)
     arr = np.array(series, dtype=np.float64)
@@ -1596,15 +1476,7 @@ def create_response_curve(channel_name, impactable_sales_nation, beta_coeff, spe
     return pd.DataFrame(rows)
 
 
-# ---------------------------------------------------------------------------
-# Data Review (EDA) engines
-# ---------------------------------------------------------------------------
-# Ported from the aashika-new-backend branch. Correlation is deliberately not
-# part of this port.
-
-
 def compute_sparsity_stats(df: pd.DataFrame, metric_cols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-    """Calculates non-zero percentage and zero-inflation health per tactic."""
     cols = metric_cols or df.select_dtypes(include=[np.number]).columns.tolist()
     total_rows = len(df)
     results = []
@@ -1644,7 +1516,6 @@ def compute_sparsity_stats(df: pd.DataFrame, metric_cols: Optional[List[str]] = 
 
 
 def compute_poor_mans_curve_data(df: pd.DataFrame, x_col: str, y_col: str, n_bins: int = 12) -> Dict[str, Any]:
-    """Computes binned-average response curve of X vs Y to reveal response shape."""
     sub = df[[x_col, y_col]].dropna().copy()
     sub[x_col] = pd.to_numeric(sub[x_col], errors="coerce")
     sub[y_col] = pd.to_numeric(sub[y_col], errors="coerce")
@@ -1655,7 +1526,6 @@ def compute_poor_mans_curve_data(df: pd.DataFrame, x_col: str, y_col: str, n_bin
 
     sub = sub.sort_values(x_col)
     
-    # Stratified quantile binning
     try:
         sub["bin"] = pd.qcut(sub[x_col], q=n_bins, duplicates="drop")
     except Exception:
@@ -1685,7 +1555,6 @@ def compute_poor_mans_curve_data(df: pd.DataFrame, x_col: str, y_col: str, n_bin
             "record_count": int(r["count"]),
         })
 
-    # Curvature assessment (Log / Diminishing Returns vs Linear)
     shape_indicator = "Linear"
     if len(binned_curve) >= 3:
         slopes = []
@@ -1700,7 +1569,6 @@ def compute_poor_mans_curve_data(df: pd.DataFrame, x_col: str, y_col: str, n_bin
             elif slopes[-1] > slopes[0] * 1.4:
                 shape_indicator = "Accelerating / Convex (Power)"
 
-    # Sample scatter points
     scatter_sample = sub.sample(min(400, len(sub)), random_state=42)[[x_col, y_col]].to_dict(orient="records")
 
     return {
@@ -1718,7 +1586,6 @@ def detect_outliers_engine(
     method: str = "iqr",
     threshold: float = 1.5,
 ) -> Dict[str, Any]:
-    """Detects outliers in a column via IQR or Z-score."""
     if column not in df.columns:
         raise ValueError(f"Column '{column}' not in dataset.")
 
@@ -1733,7 +1600,7 @@ def detect_outliers_engine(
         outlier_mask = z_scores > threshold
         lower_bound = float(mean_v - threshold * std_v)
         upper_bound = float(mean_v + threshold * std_v)
-    else:  # IQR
+    else:
         q25 = float(vals.quantile(0.25))
         q75 = float(vals.quantile(0.75))
         iqr = q75 - q25
@@ -1764,7 +1631,6 @@ def remove_outliers_engine(
     method: str = "iqr",
     threshold: float = 1.5,
 ) -> Dict[str, Any]:
-    """Excludes flagged outliers and returns clean dataset."""
     detection = detect_outliers_engine(df, column, method, threshold)
     indices_to_drop = set(detection["outlier_indices"])
     clean_df = df.drop(index=list(indices_to_drop)).reset_index(drop=True)
@@ -1785,15 +1651,6 @@ def compute_trend_rollup(
     period: str = "week",
     date_format: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Aggregates multi-metric trends by Week (WoW) or Month (MoM).
-
-    `date_format` is the strftime pattern the column is actually written in.
-    The upstream version inferred it with `dayfirst=True`, which silently
-    transposes day and month for every day-of-month <= 12 - the same bug the
-    ingestion pipeline was fixed for. Callers that know the format (v2 does,
-    from the manifest) must pass it; inference remains only for the legacy
-    csv_data route, which has nothing better to go on.
-    """
     if date_col not in df.columns:
         return []
 
@@ -1801,11 +1658,6 @@ def compute_trend_rollup(
     if date_format:
         parsed_dates = pd.to_datetime(df[date_col], format=date_format, errors="coerce")
     else:
-        # One format for the whole column, chosen by coverage. Never
-        # `dayfirst=True` inference: on ISO input pandas infers %Y-%d-%m, which
-        # turns 2026-01-04 into 1 April and 2026-01-11 into 1 November while
-        # failing on 2026-01-18 - so the column comes back part correct, part
-        # transposed, and the rollup buckets are silently wrong.
         parsed_dates = _parse_dates_robust(df[date_col].astype(str).str.strip())
 
     df["_date_parsed"] = parsed_dates
@@ -1813,7 +1665,7 @@ def compute_trend_rollup(
 
     if period == "month":
         df["_period_str"] = df["_date_parsed"].dt.strftime("%Y-%m")
-    else:  # week
+    else:
         df["_period_str"] = df["_date_parsed"].dt.to_period("W").dt.start_time.dt.strftime("%Y-%m-%d")
 
     valid_metrics = [c for c in metric_cols if c in df.columns]
@@ -1823,3 +1675,5 @@ def compute_trend_rollup(
     agg = df.groupby("_period_str", as_index=False)[valid_metrics].sum().sort_values("_period_str")
     agg.rename(columns={"_period_str": "date"}, inplace=True)
     return agg.to_dict(orient="records")
+
+

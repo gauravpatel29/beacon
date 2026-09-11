@@ -1,4 +1,3 @@
-// client/src/pages/DataStitching.jsx
 import React, { useState, useMemo, useEffect } from "react";
 import toast from "react-hot-toast";
 import { useNavigate } from "react-router-dom";
@@ -24,7 +23,6 @@ export default function DataStitching() {
       })
       .catch((err) => toast.error(problemMessage(err, "Could not load datasets")));
 
-    // Also sync all existing ARDs into state
     v2ListArds(workflowId)
       .then((res) => {
         const ards = (res.items || []).map((a) => ({

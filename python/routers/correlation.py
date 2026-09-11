@@ -13,7 +13,6 @@ from core.processing import (
     preview_removal_reasons,
     remove_correlated_features,
     find_corr_clusters,
-    preview_combination_details,
     combine_clusters,
     apply_weighted_sum_columns,
     apply_pca_treatment,
@@ -45,7 +44,7 @@ async def correlation_matrix(payload: dict):
     try:
         df = _parse_csv_to_df(payload["csv_data"])
         cols = payload.get("columns") or df.select_dtypes(include="number").columns.tolist()
-        cols = [c for c in cols if c in df.columns]
+        cols = [c for c in list(dict.fromkeys(cols)) if c in df.columns]
         matrix = compute_correlation_matrix(df, cols, method=payload.get("method", "pearson"))
         return {"matrix": matrix, "columns": cols}
     except Exception as e:
@@ -59,7 +58,7 @@ async def compute_vif(payload: dict):
         raw_cols = payload.get("columns") or df.select_dtypes(include="number").columns.tolist()
 
         valid_cols = []
-        for c in raw_cols:
+        for c in list(dict.fromkeys(raw_cols)):
             if c in df.columns:
                 s = pd.to_numeric(df[c], errors="coerce").dropna()
                 if len(s) > 5 and s.std() > 0:
@@ -95,7 +94,7 @@ async def high_pairs(payload: dict):
     try:
         df = _parse_csv_to_df(payload["csv_data"])
         cols = payload.get("columns") or df.select_dtypes(include="number").columns.tolist()
-        cols = [c for c in cols if c in df.columns]
+        cols = [c for c in list(dict.fromkeys(cols)) if c in df.columns]
         threshold = float(payload.get("threshold", 0.7))
         pairs, _ = compute_corr_pairs(df, cols, threshold)
         return {"pairs": [{"feature1": p[0], "feature2": p[1], "corr": round(p[2], 4)} for p in pairs]}
@@ -108,7 +107,7 @@ async def preview_removal_route(payload: dict):
     try:
         df = _parse_csv_to_df(payload["csv_data"])
         feature_cols = payload.get("columns") or df.select_dtypes(include="number").columns.tolist()
-        feature_cols = [c for c in feature_cols if c in df.columns]
+        feature_cols = [c for c in list(dict.fromkeys(feature_cols)) if c in df.columns]
         threshold = float(payload.get("threshold", 0.75))
         dep = payload.get("dependent_variable")
         preview = preview_removal_reasons(df, feature_cols, dep, threshold)
@@ -122,6 +121,7 @@ async def apply_removal(payload: dict):
     try:
         df = _parse_csv_to_df(payload["csv_data"])
         feature_cols = payload.get("columns") or df.select_dtypes(include="number").columns.tolist()
+        feature_cols = [c for c in list(dict.fromkeys(feature_cols)) if c in df.columns]
         threshold = float(payload.get("threshold", 0.75))
         dep = payload.get("dependent_variable")
         drop_cols = payload.get("drop_cols")
@@ -145,15 +145,13 @@ async def find_clusters_route(payload: dict):
     try:
         df = _parse_csv_to_df(payload["csv_data"])
         cols = payload.get("columns") or df.select_dtypes(include="number").columns.tolist()
-        cols = [c for c in cols if c in df.columns]
+        cols = [c for c in list(dict.fromkeys(cols)) if c in df.columns]
         threshold = float(payload.get("threshold", 0.75))
         clusters = find_corr_clusters(df, cols, threshold)
         return {"clusters": clusters}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-
-# python/routers/correlation.py
 
 @router.post("/apply-combination")
 async def apply_combination(payload: dict):
@@ -176,3 +174,65 @@ async def apply_combination(payload: dict):
         return result
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Combination failed: {str(e)}")
+
+
+@router.post("/candidate-features")
+async def candidate_features(payload: dict):
+    try:
+        df = _parse_csv_to_df(payload["csv_data"])
+        candidate_cols, non_features = get_candidate_features(
+            df=df,
+            geo_column=payload.get("geo_column"),
+            date_column=payload.get("date_column"),
+            zip_column=payload.get("zip_column"),
+            dma_column=payload.get("dma_column"),
+            dependent_variable=payload.get("dependent_variable"),
+        )
+        return {"feature_cols": candidate_cols, "non_feature_cols": non_features}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/pca")
+async def pca_route(payload: dict):
+    try:
+        df = _parse_csv_to_df(payload["csv_data"])
+        cols = payload.get("columns") or df.select_dtypes(include="number").columns.tolist()
+        cols = [c for c in list(dict.fromkeys(cols)) if c in df.columns]
+        n_comp = int(payload.get("n_components", 2))
+        return run_pca(df, cols, n_comp)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/apply-weighted-sum")
+async def apply_weighted_sum_route(payload: dict):
+    try:
+        df = _parse_csv_to_df(payload["csv_data"])
+        configs = payload.get("configs", [])
+        drop_original = payload.get("drop_original", False)
+        df_out, applied_info = apply_weighted_sum_columns(df, configs, drop_original)
+        result = _csv_response(df_out)
+        result["applied_info"] = applied_info
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/apply-pca-treatment")
+async def apply_pca_treatment_route(payload: dict):
+    try:
+        df = _parse_csv_to_df(payload["csv_data"])
+        feature_cols = payload.get("columns") or df.select_dtypes(include="number").columns.tolist()
+        variance_threshold = float(payload.get("variance_threshold", 0.9))
+        res = apply_pca_treatment(df, feature_cols, variance_threshold)
+        csv_resp = _csv_response(res["df_pca"])
+        csv_resp.update({
+            "explained_variance": res["explained_variance"],
+            "n_components": res["n_components"],
+            "contributions": res["contributions"],
+            "top3": res["top3"],
+        })
+        return csv_resp
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))

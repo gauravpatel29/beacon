@@ -1,18 +1,22 @@
+
 import React, { createContext, useContext, useState, useCallback, useEffect } from "react";
 import { v1PatchWorkflow } from "../services/api";
 
 const AppContext = createContext(null);
 
 const initialState = {
-  // Workflow Entity Tracking (v1 = Postgres-backed; required by the v2 dataset API)
+  // Workflow Entity Tracking
   workflowId: null,
   workflowName: null,
 
-  // ─── Ingestion (v2) ─────────────────────────────────────────────────────────
-  // Metadata only. The bytes live in Neon Object Storage and are addressed by
-  // (workflowId, filename) - never carried in the browser or in localStorage.
+  // Ingestion (v2)
   datasets: [],          // [{filename, row_count, columns, category, spec, applied, kind}]
   activeDataset: null,   // filename the downstream stages read
+
+  // ARD Tracking & Stitching State Persistence
+  savedArds: [],
+  stitchingSteps: null,
+  stitchingSourceFiles: null,
 
   // Column Configuration
   dateColumn: null,
@@ -21,10 +25,7 @@ const initialState = {
   dmaColumn: null,
   dependentVariable: null,
 
-  // ─── Legacy CSV payloads ────────────────────────────────────────────────────
-  // TRANSITIONAL: EDA and everything after it still take a `csv_data` string.
-  // Ingestion fills granularCsvData from /v2/.../csv on handoff. Once those
-  // routers resolve datasets by id, these fields and the fetch both go away.
+  // CSV payloads
   mergedCsvData: null,
   filteredCsvData: null,
   transformedCsvData: null,
@@ -52,9 +53,6 @@ const initialState = {
 
 const STORAGE_KEY = "proctimize_active_state";
 
-// CSV payloads are megabytes and blow the ~5MB localStorage quota, which fails
-// silently and loses the whole session. They are recoverable from the server by
-// id, so they are never persisted.
 const NEVER_PERSIST = [
   "mergedCsvData",
   "filteredCsvData",
@@ -78,8 +76,6 @@ export function AppProvider({ children }) {
     }
   });
 
-  // Keep local storage in sync. Quota failures are reported, not swallowed:
-  // a silent failure here is how a session used to disappear on refresh.
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(persistable(state)));
@@ -96,7 +92,6 @@ export function AppProvider({ children }) {
     setState((prev) => ({ ...prev, ...patch }));
   }, []);
 
-  // Re-hydrate from a workflow record fetched from the server.
   const loadWorkflowState = useCallback((workflow) => {
     const saved = workflow.state_data || {};
     const hydrated = {
@@ -113,8 +108,6 @@ export function AppProvider({ children }) {
     }
   }, []);
 
-  // Snapshot to the server. Sends metadata only - the datasets themselves are
-  // already durable in Postgres + Object Storage.
   const saveWorkflowSnapshot = useCallback(
     async (stageName, routePath, moduleStatusUpdates = {}) => {
       if (!state.workflowId) return;
