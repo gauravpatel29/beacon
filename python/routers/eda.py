@@ -18,10 +18,21 @@ router = APIRouter()
 
 
 def _parse_csv(csv_data: str) -> pd.DataFrame:
+    """UTF-8 first, then latin-1.
+
+    Encoding a string as latin-1 raises on any character outside that range, so
+    a file carrying a non-Latin-1 name or value failed outright rather than
+    falling back.
+    """
     try:
         return pd.read_csv(io.StringIO(csv_data), low_memory=False)
     except Exception:
-        return pd.read_csv(io.BytesIO(csv_data.encode("latin-1")), low_memory=False)
+        try:
+            return pd.read_csv(io.BytesIO(csv_data.encode("utf-8")), low_memory=False)
+        except Exception:
+            return pd.read_csv(
+                io.BytesIO(csv_data.encode("latin-1", errors="replace")), low_memory=False
+            )
 
 
 @router.post("/stats")
