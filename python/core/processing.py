@@ -522,47 +522,10 @@ def compute_corr_pairs(df: pd.DataFrame, feature_cols: List[str], threshold: flo
     pairs.sort(key=lambda x: x[2], reverse=True)
     return pairs, corr_matrix
 
-def compute_cross_correlation_lags(
-    df: pd.DataFrame,
-    date_col: str,
-    x_col: str,
-    y_col: str,
-    max_lags: int = 6,
-) -> List[Dict[str, Any]]:
-    """Calculates cross-correlation across time lags (-max_lags to +max_lags)."""
-    if date_col not in df.columns or x_col not in df.columns or y_col not in df.columns:
-        return []
-
-    df_time = df[[date_col, x_col, y_col]].copy()
-    df_time[date_col] = pd.to_datetime(df_time[date_col], dayfirst=True, errors="coerce")
-    df_time = df_time.dropna().sort_values(date_col)
-
-    # Rollup to time series level
-    ts = df_time.groupby(date_col)[[x_col, y_col]].sum().reset_index()
-    s_x = pd.to_numeric(ts[x_col], errors="coerce").fillna(0)
-    s_y = pd.to_numeric(ts[y_col], errors="coerce").fillna(0)
-
-    lag_results = []
-    for lag in range(-max_lags, max_lags + 1):
-        if lag < 0:
-            shifted_x = s_x.shift(-lag)
-            r = shifted_x.corr(s_y)
-        elif lag > 0:
-            shifted_x = s_x.shift(lag)
-            r = shifted_x.corr(s_y)
-        else:
-            r = s_x.corr(s_y)
-
-        r_val = round(float(r), 3) if pd.notna(r) else 0.0
-        lag_label = f"Lag {lag:+d}w" if lag != 0 else "Same Week (Lag 0)"
-        lag_results.append({
-            "lag": lag,
-            "label": lag_label,
-            "correlation": r_val,
-        })
-
-    return lag_results
-
+# NOTE: compute_cross_correlation_lags is defined once, further down. An
+# earlier copy lived here and was removed: two definitions of the same name
+# means the later one silently wins, so the file read as if it inferred the
+# date format while the running code did not.
 
 def preview_removal_reasons(
     df: pd.DataFrame,
