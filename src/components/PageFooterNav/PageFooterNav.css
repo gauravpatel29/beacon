@@ -1,0 +1,70 @@
+/* ==========================================================================
+   PageFooterNav.css — shared across every pipeline page
+   ========================================================================== */
+
+.page-footer-nav {
+  background-color: var(--color-white);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+  padding: var(--spacing-md) var(--spacing-lg);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-md);
+}
+
+.page-footer-status-title {
+  font-size: 0.85rem;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.page-footer-status-subtitle {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  margin-top: 0.15rem;
+}
+
+.page-footer-actions {
+  display: flex;
+  gap: 0.6rem;
+  flex-shrink: 0;
+}
+
+.page-footer-back-btn {
+  padding: 0.75rem 1.3rem;
+  border-radius: var(--radius-pill);
+  border: 1.5px solid var(--color-border);
+  background-color: var(--color-white);
+  color: var(--color-text-primary);
+  font-size: 0.82rem;
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+}
+
+.page-footer-back-btn:hover {
+  background-color: var(--color-border-light);
+}
+
+.page-footer-proceed-btn {
+  padding: 0.75rem 1.4rem;
+  border-radius: var(--radius-pill);
+  background-color: var(--color-primary-dark);
+  color: var(--color-white);
+  font-size: 0.82rem;
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+  box-shadow: var(--shadow-card);
+}
+
+.page-footer-proceed-btn:hover {
+  opacity: 0.92;
+}
+
+.page-footer-proceed-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

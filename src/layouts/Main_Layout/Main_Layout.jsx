@@ -12,6 +12,7 @@ function MainLayout() {
         <main className="page-content">
           <Outlet />
         </main>
+        
       </div>
     </div>
   );
