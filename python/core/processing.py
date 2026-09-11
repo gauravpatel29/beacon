@@ -4,7 +4,7 @@ Core processing utilities – pure Python/Polars/Pandas logic.
 import re
 import math
 from datetime import datetime, timedelta, date
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -438,6 +438,7 @@ def compute_eda_stats(
                     "type": "Metric",
                     "is_numeric": True,
                     "unique_count": unique_count,
+                    "control_total": round(float(valid_nums.sum()), 2),
                     "min": round(float(valid_nums.min()), 2),
                     "max": round(float(valid_nums.max()), 2),
                     "mean": round(float(valid_nums.mean()), 2),
@@ -451,7 +452,7 @@ def compute_eda_stats(
             else:
                 summary_stats.append({
                     "variable": col, "type": "Metric", "is_numeric": True,
-                    "unique_count": unique_count, "min": None, "max": None,
+                    "unique_count": unique_count, "control_total": "—", "min": None, "max": None,
                     "mean": None, "median": None, "std": None, "p75": None, "p95": None,
                     "missing_count": missing_count, "missing_pct": missing_pct,
                 })
@@ -470,6 +471,7 @@ def compute_eda_stats(
                 "type": "Date",
                 "is_numeric": False,
                 "unique_count": unique_count,
+                "control_total": "—",
                 "min": min_d,
                 "max": max_d,
                 "mean": None,
@@ -490,6 +492,7 @@ def compute_eda_stats(
                 "type": "Dimension",
                 "is_numeric": False,
                 "unique_count": unique_count,
+                "control_total": "—",
                 "min": min_val,
                 "max": max_val,
                 "mean": None,
@@ -502,11 +505,14 @@ def compute_eda_stats(
             })
 
     trend_data = []
+    # Recorded before the temporary parsing column is added below, so it is
+    # never reported as one of the dataset's columns - `all_cols` populates the
+    # column pickers on the review screen.
+    all_cols = df.columns.tolist()
     if date_column in df.columns and len(metric_cols) > 0:
-        parsed_date_series = pd.to_datetime(df[date_column], dayfirst=True, errors="coerce")
-        if parsed_date_series.isna().sum() > 0:
-            parsed_d0 = pd.to_datetime(df[date_column], dayfirst=True, errors="coerce")
-            parsed_date_series = parsed_date_series.fillna(parsed_d0)
+        # Same reasoning as compute_trend_rollup: one explicit format chosen
+        # by coverage, rather than dayfirst inference that transposes ISO dates.
+        parsed_date_series = _parse_dates_robust(df[date_column].astype(str).str.strip())
 
         df["_parsed_date_str"] = parsed_date_series.dt.strftime("%Y-%m-%d")
         valid_trend_df = df[df["_parsed_date_str"].notna()]
@@ -524,13 +530,16 @@ def compute_eda_stats(
     by_geo = []
     if geo_column in df.columns and dependent_variable in df.columns:
         valid_geo = df.dropna(subset=[geo_column, dependent_variable])
-        geo_agg = (
-            valid_geo.groupby(geo_column)[dependent_variable]
-            .sum()
-            .reset_index()
-            .rename(columns={geo_column: "geo", dependent_variable: "value"})
-            .sort_values("value", ascending=False)
-        )
+        grouped = valid_geo.groupby(geo_column)[dependent_variable].sum()
+        # Built directly rather than via reset_index(): when geo_column and
+        # dependent_variable are the SAME column, the grouped Series and its
+        # index share a name and reset_index raises "cannot insert <col>,
+        # already exists". Naming the two output columns ourselves means the
+        # source names never have to be unique.
+        geo_agg = pd.DataFrame({
+            "geo": grouped.index.astype(str),
+            "value": grouped.values,
+        }).sort_values("value", ascending=False)
         by_geo = geo_agg.head(20).to_dict(orient="records")
 
     return {
@@ -538,7 +547,7 @@ def compute_eda_stats(
         "trend_data": trend_data,
         "by_geo": by_geo,
         "numeric_cols": metric_cols,
-        "all_cols": df.columns.tolist(),
+        "all_cols": all_cols,
         "total_rows": total_rows,
         "date_column": date_column,
         "geo_column": geo_column,
@@ -1556,3 +1565,232 @@ def create_response_curve(channel_name, impactable_sales_nation, beta_coeff, spe
         rows.append({"spend": spend, "impactable_geo_time": impactable_geo_time, "impactable_nation": impactable_nation, "impactable_nation_currency": impactable_nation_currency, "roi": roi, "mroi": mroi})
         prev_impactable = impactable_nation
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Data Review (EDA) engines
+# ---------------------------------------------------------------------------
+# Ported from the aashika-new-backend branch. Correlation is deliberately not
+# part of this port.
+
+
+def compute_sparsity_stats(df: pd.DataFrame, metric_cols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    """Calculates non-zero percentage and zero-inflation health per tactic."""
+    cols = metric_cols or df.select_dtypes(include=[np.number]).columns.tolist()
+    total_rows = len(df)
+    results = []
+
+    for col in cols:
+        if col not in df.columns:
+            continue
+        series = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        non_zero_count = int((series != 0).sum())
+        zero_count = total_rows - non_zero_count
+        non_zero_pct = round((non_zero_count / total_rows) * 100, 2) if total_rows > 0 else 0.0
+        zero_pct = round((zero_count / total_rows) * 100, 2) if total_rows > 0 else 0.0
+
+        if non_zero_pct < 10.0:
+            risk = "High Sparsity (<10% active)"
+            status = "critical"
+        elif non_zero_pct < 30.0:
+            risk = "Moderate Sparsity (10-30%)"
+            status = "warning"
+        else:
+            risk = "Healthy (>30% active)"
+            status = "healthy"
+
+        results.append({
+            "tactic": col,
+            "total_rows": total_rows,
+            "non_zero_count": non_zero_count,
+            "zero_count": zero_count,
+            "non_zero_pct": non_zero_pct,
+            "zero_pct": zero_pct,
+            "risk_label": risk,
+            "status": status,
+        })
+
+    results.sort(key=lambda x: x["non_zero_pct"], reverse=True)
+    return results
+
+
+def compute_poor_mans_curve_data(df: pd.DataFrame, x_col: str, y_col: str, n_bins: int = 12) -> Dict[str, Any]:
+    """Computes binned-average response curve of X vs Y to reveal response shape."""
+    sub = df[[x_col, y_col]].dropna().copy()
+    sub[x_col] = pd.to_numeric(sub[x_col], errors="coerce")
+    sub[y_col] = pd.to_numeric(sub[y_col], errors="coerce")
+    sub = sub.dropna()
+
+    if len(sub) < 5:
+        return {"binned_curve": [], "scatter_sample": [], "shape_indicator": "Insufficient Data", "x_col": x_col, "y_col": y_col}
+
+    sub = sub.sort_values(x_col)
+    
+    # Stratified quantile binning
+    try:
+        sub["bin"] = pd.qcut(sub[x_col], q=n_bins, duplicates="drop")
+    except Exception:
+        sub["bin"] = pd.cut(sub[x_col], bins=n_bins)
+
+    binned = (
+        sub.groupby("bin", observed=True)
+        .agg(
+            mean_x=(x_col, "mean"),
+            mean_y=(y_col, "mean"),
+            median_y=(y_col, "median"),
+            min_x=(x_col, "min"),
+            max_x=(x_col, "max"),
+            count=(y_col, "count"),
+        )
+        .reset_index()
+        .dropna()
+    )
+
+    binned_curve = []
+    for _, r in binned.iterrows():
+        binned_curve.append({
+            "bin_label": f"{r['min_x']:.1f} - {r['max_x']:.1f}",
+            "spend_x": round(float(r["mean_x"]), 2),
+            "response_y": round(float(r["mean_y"]), 2),
+            "median_y": round(float(r["median_y"]), 2),
+            "record_count": int(r["count"]),
+        })
+
+    # Curvature assessment (Log / Diminishing Returns vs Linear)
+    shape_indicator = "Linear"
+    if len(binned_curve) >= 3:
+        slopes = []
+        for i in range(1, len(binned_curve)):
+            dx = binned_curve[i]["spend_x"] - binned_curve[i - 1]["spend_x"]
+            dy = binned_curve[i]["response_y"] - binned_curve[i - 1]["response_y"]
+            if dx > 0:
+                slopes.append(dy / dx)
+        if len(slopes) >= 2:
+            if slopes[-1] < slopes[0] * 0.6:
+                shape_indicator = "Diminishing Returns (Log / Saturated)"
+            elif slopes[-1] > slopes[0] * 1.4:
+                shape_indicator = "Accelerating / Convex (Power)"
+
+    # Sample scatter points
+    scatter_sample = sub.sample(min(400, len(sub)), random_state=42)[[x_col, y_col]].to_dict(orient="records")
+
+    return {
+        "binned_curve": binned_curve,
+        "scatter_sample": [{"x": r[x_col], "y": r[y_col]} for r in scatter_sample],
+        "shape_indicator": shape_indicator,
+        "x_col": x_col,
+        "y_col": y_col,
+    }
+
+
+def detect_outliers_engine(
+    df: pd.DataFrame,
+    column: str,
+    method: str = "iqr",
+    threshold: float = 1.5,
+) -> Dict[str, Any]:
+    """Detects outliers in a column via IQR or Z-score."""
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not in dataset.")
+
+    series = pd.to_numeric(df[column], errors="coerce")
+    valid_idx = series.dropna().index
+    vals = series.dropna()
+
+    if method.lower() == "zscore":
+        mean_v = vals.mean()
+        std_v = vals.std() if vals.std() != 0 else 1.0
+        z_scores = (vals - mean_v).abs() / std_v
+        outlier_mask = z_scores > threshold
+        lower_bound = float(mean_v - threshold * std_v)
+        upper_bound = float(mean_v + threshold * std_v)
+    else:  # IQR
+        q25 = float(vals.quantile(0.25))
+        q75 = float(vals.quantile(0.75))
+        iqr = q75 - q25
+        lower_bound = float(q25 - threshold * iqr)
+        upper_bound = float(q75 + threshold * iqr)
+        outlier_mask = (vals < lower_bound) | (vals > upper_bound)
+
+    outlier_indices = valid_idx[outlier_mask].tolist()
+    outlier_rows = df.loc[outlier_indices].head(50).to_dict(orient="records")
+
+    return {
+        "column": column,
+        "method": method.upper(),
+        "threshold": threshold,
+        "total_rows": len(df),
+        "outlier_count": len(outlier_indices),
+        "outlier_pct": round((len(outlier_indices) / len(df)) * 100, 2) if len(df) > 0 else 0.0,
+        "lower_bound": round(lower_bound, 2),
+        "upper_bound": round(upper_bound, 2),
+        "preview_flagged_rows": outlier_rows,
+        "outlier_indices": outlier_indices,
+    }
+
+
+def remove_outliers_engine(
+    df: pd.DataFrame,
+    column: str,
+    method: str = "iqr",
+    threshold: float = 1.5,
+) -> Dict[str, Any]:
+    """Excludes flagged outliers and returns clean dataset."""
+    detection = detect_outliers_engine(df, column, method, threshold)
+    indices_to_drop = set(detection["outlier_indices"])
+    clean_df = df.drop(index=list(indices_to_drop)).reset_index(drop=True)
+
+    return {
+        "clean_csv": clean_df.to_csv(index=False),
+        "original_rows": len(df),
+        "dropped_rows": len(indices_to_drop),
+        "remaining_rows": len(clean_df),
+        "column": column,
+    }
+
+
+def compute_trend_rollup(
+    df: pd.DataFrame,
+    date_col: str,
+    metric_cols: List[str],
+    period: str = "week",
+    date_format: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Aggregates multi-metric trends by Week (WoW) or Month (MoM).
+
+    `date_format` is the strftime pattern the column is actually written in.
+    The upstream version inferred it with `dayfirst=True`, which silently
+    transposes day and month for every day-of-month <= 12 - the same bug the
+    ingestion pipeline was fixed for. Callers that know the format (v2 does,
+    from the manifest) must pass it; inference remains only for the legacy
+    csv_data route, which has nothing better to go on.
+    """
+    if date_col not in df.columns:
+        return []
+
+    df = df.copy()
+    if date_format:
+        parsed_dates = pd.to_datetime(df[date_col], format=date_format, errors="coerce")
+    else:
+        # One format for the whole column, chosen by coverage. Never
+        # `dayfirst=True` inference: on ISO input pandas infers %Y-%d-%m, which
+        # turns 2026-01-04 into 1 April and 2026-01-11 into 1 November while
+        # failing on 2026-01-18 - so the column comes back part correct, part
+        # transposed, and the rollup buckets are silently wrong.
+        parsed_dates = _parse_dates_robust(df[date_col].astype(str).str.strip())
+
+    df["_date_parsed"] = parsed_dates
+    df = df.dropna(subset=["_date_parsed"])
+
+    if period == "month":
+        df["_period_str"] = df["_date_parsed"].dt.strftime("%Y-%m")
+    else:  # week
+        df["_period_str"] = df["_date_parsed"].dt.to_period("W").dt.start_time.dt.strftime("%Y-%m-%d")
+
+    valid_metrics = [c for c in metric_cols if c in df.columns]
+    for c in valid_metrics:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+    agg = df.groupby("_period_str", as_index=False)[valid_metrics].sum().sort_values("_period_str")
+    agg.rename(columns={"_period_str": "date"}, inplace=True)
+    return agg.to_dict(orient="records")

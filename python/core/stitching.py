@@ -281,6 +281,12 @@ def execute_pipeline(
             "keys": lineage_keys,
             "rows_in": before,
             "rows_out": int(len(current)),
+            # What this step actually produced, so a later step referencing
+            # "Step N Result" can offer its real columns as join keys. The
+            # client cannot derive this: it would have to guess the union of the
+            # two inputs, which misses the duplicate-key collapse and the
+            # "_stepN" suffixes this join adds on a name clash.
+            "columns": [str(c) for c in current.columns],
         })
 
     if current is None or current.empty:

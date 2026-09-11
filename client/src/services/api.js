@@ -54,6 +54,21 @@ export const edaHistogram = (payload) =>
 export const edaScatter = (payload) =>
   API.post("/eda/scatter", payload).then((r) => r.data);
 
+export const edaSparsity = (payload) =>
+  API.post("/eda/sparsity", payload).then((r) => r.data);
+
+export const edaPoorMansCurve = (payload) =>
+  API.post("/eda/poor-mans-curve", payload).then((r) => r.data);
+
+export const edaDetectOutliers = (payload) =>
+  API.post("/eda/detect-outliers", payload).then((r) => r.data);
+
+export const edaRemoveOutliers = (payload) =>
+  API.post("/eda/remove-outliers", payload).then((r) => r.data);
+
+export const edaTrendRollup = (payload) =>
+  API.post("/eda/trend-rollup", payload).then((r) => r.data);
+
 // ─── Correlation & Multicollinearity ──────────────────────────────────────────
 export const correlationMatrix = (payload) =>
   API.post("/correlation/matrix", payload).then((r) => r.data);

@@ -101,6 +101,33 @@ def main() -> int:
         check("lineage records both steps", len(d["lineage"]["steps_executed"]) == 2,
               d["lineage"])
 
+        print("\n5b. lineage reports each step's OUTPUT columns")
+        # The stitching UI offers "Step N Result" as a later step's left
+        # dataset. That name is virtual - never a file - so the key dropdown
+        # has nothing to read unless lineage says what the step produced.
+        exec_steps = d["lineage"]["steps_executed"]
+        check("every step reports its columns",
+              all(s.get("columns") for s in exec_steps),
+              [s.get("columns") for s in exec_steps])
+        s1_cols = exec_steps[0]["columns"]
+        check("step 1 columns come from both sides",
+              "trx" in s1_cols and "calls" in s1_cols, s1_cols)
+        # Here npi and month are BOTH join keys, so the right-hand copies are
+        # consumed rather than carried through. That is the point: the true
+        # column set depends on which keys were used, which the client cannot
+        # work out from the file listing alone.
+        check("join keys are not duplicated into the output",
+              s1_cols == ["npi", "month", "trx", "calls"], s1_cols)
+        check("no right-hand key columns leaked in",
+              not any(c.lower().startswith("npi_") or c.lower().startswith("month_")
+                      for c in s1_cols), s1_cols)
+        check("step 2 columns include what step 1 carried forward",
+              set(s1_cols) <= set(exec_steps[1]["columns"]),
+              (s1_cols, exec_steps[1]["columns"]))
+        check("the last step's columns are the ARD's columns",
+              exec_steps[-1]["columns"] == d["columns"],
+              (exec_steps[-1]["columns"], d["columns"]))
+
         print("\n6. build for real")
         r = c.post(f"/v2/workflows/{wf}/ard/build", json=body)
         check("build 201", r.status_code == 201, r.text[:400])

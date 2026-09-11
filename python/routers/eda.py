@@ -1,127 +1,144 @@
+"""Data Review (EDA) - LEGACY csv_data route.
+
+Kept for the pre-v2 screens that still post a CSV string. New work should use
+`routers/v2_review.py`, which resolves a dataset by filename from storage: the
+browser never holds the file, and the date format comes from the manifest
+instead of being guessed.
+
+Correlation is deliberately not part of this module.
+"""
+
 import io
-import json
-import pandas as pd
-import polars as pl
+
 import numpy as np
+import pandas as pd
 from fastapi import APIRouter, HTTPException
-from core.processing import compute_eda_stats
+
+from core.processing import (
+    compute_eda_stats,
+    compute_poor_mans_curve_data,
+    compute_sparsity_stats,
+    compute_trend_rollup,
+    detect_outliers_engine,
+    remove_outliers_engine,
+)
+from core.review import histogram_of, scatter_of
 
 router = APIRouter()
 
 
-def _parse_csv_to_polars(content: bytes) -> pl.DataFrame:
+def _parse_csv(csv_data: str) -> pd.DataFrame:
+    """UTF-8 first, then latin-1.
+
+    The upstream version reversed this. Encoding a string as latin-1 raises on
+    any character outside that range, so a file with a non-Latin-1 name or value
+    failed outright rather than falling back.
+    """
     try:
-        return pl.read_csv(io.BytesIO(content), infer_schema_length=10000, ignore_errors=True)
+        return pd.read_csv(io.StringIO(csv_data), low_memory=False)
     except Exception:
-        pdf = pd.read_csv(io.BytesIO(content), encoding="latin-1", on_bad_lines="skip")
-        return pl.from_pandas(pdf)
+        try:
+            return pd.read_csv(io.BytesIO(csv_data.encode("utf-8")), low_memory=False)
+        except Exception:
+            return pd.read_csv(
+                io.BytesIO(csv_data.encode("latin-1", errors="replace")), low_memory=False
+            )
 
 
 @router.post("/stats")
 async def eda_stats_route(payload: dict):
-    """
-    Computes full comprehensive stats (summary table with 75th/95th, multi-series trends, geo breakdown).
+    """Summary table (with control totals), multi-series trends, geo breakdown.
+
     payload: { csv_data, date_column, geo_column, dependent_variable }
     """
     try:
-        df = _parse_csv_to_polars(payload["csv_data"].encode("latin-1")).to_pandas()
-        date_col = payload["date_column"]
-        geo_col = payload["geo_column"]
-        dep_var = payload["dependent_variable"]
-
-        result = compute_eda_stats(df, date_col, geo_col, dep_var)
-        return result
+        df = _parse_csv(payload["csv_data"])
+        return compute_eda_stats(
+            df, payload["date_column"], payload["geo_column"], payload["dependent_variable"]
+        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/histogram")
-async def histogram_route(payload: dict):
-    """Return histogram bins, counts, mean and median for a column with smart integer binning."""
+async def eda_histogram_route(payload: dict):
     try:
-        df = _parse_csv_to_polars(payload["csv_data"].encode("latin-1"))
+        df = _parse_csv(payload["csv_data"])
         col = payload["column"]
         if col not in df.columns:
             raise HTTPException(status_code=400, detail=f"Column '{col}' not found")
-
-        vals = pd.to_numeric(df.get_column(col).to_pandas(), errors="coerce").dropna()
-        if len(vals) == 0:
-            return {"counts": [], "bin_edges": [], "bin_labels": [], "mean": 0, "median": 0, "column": col}
-
-        min_val = float(vals.min())
-        max_val = float(vals.max())
-        is_integer = (vals % 1 == 0).all()
-        val_range = max_val - min_val
-
-        # If discrete whole numbers with small span, use exact integer bins
-        if is_integer and 0 < val_range <= 25:
-            bin_edges = np.arange(min_val, max_val + 2) - 0.5
-            counts, _ = np.histogram(vals, bins=bin_edges)
-            bin_labels = [str(int(x)) for x in np.arange(min_val, max_val + 1)]
-        else:
-            num_bins = min(25, max(5, int(len(vals) ** 0.5)))
-            counts, bin_edges = np.histogram(vals, bins=num_bins)
-            bin_labels = [f"{bin_edges[i]:.1f} - {bin_edges[i+1]:.1f}" for i in range(len(counts))]
-
-        return {
-            "counts": counts.tolist(),
-            "bin_labels": bin_labels,
-            "bin_edges": bin_edges.tolist(),
-            "mean": float(vals.mean()),
-            "median": float(vals.median()),
-            "min": min_val,
-            "max": max_val,
-            "column": col,
-        }
+        return histogram_of(df, col)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/scatter")
-async def scatter_route(payload: dict):
-    """Return x/y data and Pearson r with two-point linear regression trendline."""
+async def eda_scatter_route(payload: dict):
     try:
-        df = _parse_csv_to_polars(payload["csv_data"].encode("latin-1"))
-        x_col, y_col = payload["x_column"], payload["y_column"]
+        df = _parse_csv(payload["csv_data"])
+        return scatter_of(df, payload["x_column"], payload["y_column"])
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-        if x_col not in df.columns or y_col not in df.columns:
-            raise HTTPException(status_code=400, detail=f"Columns '{x_col}' or '{y_col}' not found")
 
-        sub = df.select([pl.col(x_col), pl.col(y_col)]).to_pandas().dropna().copy()
-        sub[x_col] = pd.to_numeric(sub[x_col], errors="coerce")
-        sub[y_col] = pd.to_numeric(sub[y_col], errors="coerce")
-        sub = sub.dropna()
+@router.post("/sparsity")
+async def eda_sparsity_route(payload: dict):
+    try:
+        df = _parse_csv(payload["csv_data"])
+        return {"sparsity_table": compute_sparsity_stats(df, payload.get("metric_columns"))}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-        if len(sub) < 2:
-            return {"x": [], "y": [], "r": 0, "trendline": [], "x_column": x_col, "y_column": y_col, "slope": 0, "intercept": 0}
 
-        r_val = float(sub[x_col].corr(sub[y_col]))
+@router.post("/poor-mans-curve")
+async def poor_mans_curve_route(payload: dict):
+    try:
+        df = _parse_csv(payload["csv_data"])
+        return compute_poor_mans_curve_data(
+            df, payload["x_column"], payload["y_column"], int(payload.get("n_bins", 12))
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-        # Best-fit linear trendline y = mx + c
-        x_vals = sub[x_col].values
-        y_vals = sub[y_col].values
-        m, c = np.polyfit(x_vals, y_vals, 1)
 
-        min_x = float(np.min(x_vals))
-        max_x = float(np.max(x_vals))
-        trendline = [
-            {"x": min_x, "y": float(m * min_x + c)},
-            {"x": max_x, "y": float(m * max_x + c)},
-        ]
+@router.post("/detect-outliers")
+async def detect_outliers_route(payload: dict):
+    try:
+        df = _parse_csv(payload["csv_data"])
+        return detect_outliers_engine(
+            df, payload["column"], payload.get("method", "iqr"),
+            float(payload.get("threshold", 1.5)),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-        # Sample for responsive rendering
-        if len(sub) > 600:
-            sub = sub.sample(600, random_state=42).sort_values(x_col)
 
+@router.post("/remove-outliers")
+async def remove_outliers_route(payload: dict):
+    try:
+        df = _parse_csv(payload["csv_data"])
+        return remove_outliers_engine(
+            df, payload["column"], payload.get("method", "iqr"),
+            float(payload.get("threshold", 1.5)),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/trend-rollup")
+async def trend_rollup_route(payload: dict):
+    try:
+        df = _parse_csv(payload["csv_data"])
         return {
-            "x": sub[x_col].tolist(),
-            "y": sub[y_col].tolist(),
-            "r": round(r_val, 4) if not np.isnan(r_val) else 0.0,
-            "slope": float(m),
-            "intercept": float(c),
-            "trendline": trendline,
-            "x_column": x_col,
-            "y_column": y_col,
+            "trend_data": compute_trend_rollup(
+                df, payload["date_column"], payload.get("metric_columns", []),
+                payload.get("period", "week"),
+                # This route has no manifest, so there is no stated format to
+                # pass. v2_review does, and passes it.
+                date_format=payload.get("date_format"),
+            )
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
