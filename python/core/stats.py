@@ -37,6 +37,17 @@ MAX_VALUES_LIMIT = 500
 NUMERIC_DTYPES = {"integer", "bigint", "float", "decimal"}
 DATE_DTYPES = {"date", "timestamp"}
 
+# Name fragments that mark a column as an identifier rather than a measure.
+# Summing an NPI or a ZIP produces a number with no meaning, so these never get
+# a control total however numeric they look. Same list the EDA summary uses, so
+# the two screens agree on what counts as a metric.
+ID_TOKENS = ("id", "code", "zip", "postal", "fips", "key", "account", "phone",
+             "npi", "num")
+
+
+def _is_identifier(name: str) -> bool:
+    return any(token in name.lower() for token in ID_TOKENS)
+
 
 def _blank(series: pd.Series) -> pd.Series:
     """Null, or whitespace-only text. Matches `profile._blank` so the two
@@ -90,11 +101,19 @@ def _kind_map(spec: Optional[ResolvedSpec]) -> Dict[str, str]:
 def _numeric_bounds(values: pd.Series) -> Dict[str, Any]:
     nums = _to_numeric(values).dropna()
     if nums.empty:
-        return {"min": None, "max": None}
+        return {"min": None, "max": None, "control_total": None}
     lo, hi = float(nums.min()), float(nums.max())
     # Integral bounds come back as ints so a range input doesn't show "0.0".
     whole = bool(np.all(np.equal(np.mod(nums, 1), 0)))
-    return {"min": int(lo) if whole else lo, "max": int(hi) if whole else hi}
+    total = float(nums.sum())
+    return {
+        "min": int(lo) if whole else lo,
+        "max": int(hi) if whole else hi,
+        # The figure a reviewer reconciles against the source system. Rounded
+        # only for display; a column of whole numbers stays whole so a row count
+        # or a script count does not read as "26000.0".
+        "control_total": int(total) if whole else round(total, 2),
+    }
 
 
 def _date_bounds(values: pd.Series, fmt: Optional[str]) -> Dict[str, Any]:
@@ -132,15 +151,26 @@ def column_stats(
     }
 
     if not len(values):
-        info["min"] = info["max"] = None
+        info["min"] = info["max"] = info["control_total"] = None
         return info
 
     if kind == "number":
         info.update(_numeric_bounds(values))
     elif kind == "date":
         info.update(_date_bounds(values, date_fmt))
+        info["control_total"] = None
     else:
-        info["min"] = info["max"] = None
+        info["min"] = info["max"] = info["control_total"] = None
+        # A column the user has not typed yet is a string here, which is the
+        # honest answer for the FILTER controls - an unconfirmed guess is not a
+        # fact. But a control total is arithmetic, not a claim about intent: if
+        # every value in the column is a number, it has a sum, and refusing to
+        # show one until someone visits the Columns & Types tab would leave the
+        # ribbon blank on a file that was just uploaded.
+        if not _is_identifier(name):
+            nums = _to_numeric(values)
+            if nums.notna().all():
+                info["control_total"] = _numeric_bounds(values)["control_total"]
 
     return info
 
@@ -156,19 +186,21 @@ def frame_stats(df: pd.DataFrame, spec: Optional[ResolvedSpec] = None) -> Dict[s
     kinds = _kind_map(spec)
     fmts = output_date_formats(spec.live_updates) if spec else {}
 
+    columns = [
+        column_stats(
+            str(col), df[col], kinds.get(str(col), "string"),
+            fmts.get(str(col)), total,
+        )
+        for col in df.columns
+    ]
+
     return {
         "row_count": total,
         # A duplicate is a row identical to an earlier one across every column.
         # `keep="first"` counts the copies, not the originals, so subtracting
         # gives the distinct-row count the user expects.
         "duplicate_rows": int(df.duplicated(keep="first").sum()) if total else 0,
-        "columns": [
-            column_stats(
-                str(col), df[col], kinds.get(str(col), "string"),
-                fmts.get(str(col)), total,
-            )
-            for col in df.columns
-        ],
+        "columns": columns,
     }
 
 

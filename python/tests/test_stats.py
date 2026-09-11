@@ -73,6 +73,41 @@ try:
     check("string column reports no bounds", cols["region"]["min"] is None, cols["region"]["min"])
     check("distinct counts present (blanks excluded)", cols["region"]["distinct_count"]==4, cols["region"]["distinct_count"])
 
+    print("\n2b. control totals for the ingestion ribbon")
+    # The ribbon reports the same figure the Data Review summary calls a
+    # control total, so the two screens reconcile against each other.
+    check("trx totals 100+200+300+500+600+700+800+100+900 = 4200",
+          cols["trx"]["control_total"] == 4200, cols["trx"]["control_total"])
+    check("a whole-number column stays whole",
+          isinstance(cols["trx"]["control_total"], int), cols["trx"]["control_total"])
+    check("a text column has no total", cols["region"]["control_total"] is None,
+          cols["region"]["control_total"])
+    check("a date column has no total", cols["month"]["control_total"] is None,
+          cols["month"]["control_total"])
+    # Summing an NPI produces a number with no meaning.
+    check("an identifier column has no total, however numeric it looks",
+          cols["npi"]["control_total"] is None, cols["npi"]["control_total"])
+
+    print("\n2c. a total does not wait for the Columns & Types tab")
+    # Before any dtype is committed every column reads as a string, but a column
+    # whose values are all numbers still has a sum. Requiring the manifest first
+    # would leave the ribbon blank on a file that was just uploaded.
+    fresh = c.post("/v1/workflows", json={"workflow_name": "fresh " + uuid.uuid4().hex[:6]}).json()["id"]
+    try:
+        c.post(f"/v2/workflows/{fresh}/files", params={"overwrite": True},
+               files=[("files", ("u.csv", CSV, "text/csv"))], data={"manifest": "{}"})
+        raw = c.get(f"/v2/workflows/{fresh}/files/u.csv/stats").json()
+        rawcols = {x["column"]: x for x in raw["columns"]}
+        check("every column is still untyped", all(x["kind"] == "string" for x in raw["columns"]),
+              [x["kind"] for x in raw["columns"]])
+        check("trx is totalled anyway", rawcols["trx"]["control_total"] == 4200,
+              rawcols["trx"]["control_total"])
+        check("npi is still not", rawcols["npi"]["control_total"] is None,
+              rawcols["npi"]["control_total"])
+    finally:
+        c.delete(f"/v2/workflows/{fresh}/files/u.csv")
+        c.delete(f"/v1/workflows/{fresh}")
+
     print("\n3. type-ahead over distinct values")
     r=c.get(f"/v2/workflows/{wf}/files/s.csv/values",params={"column":"region"})
     check("values 200", r.status_code==200, r.text[:200])
