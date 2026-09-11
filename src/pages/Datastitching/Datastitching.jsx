@@ -218,6 +218,11 @@ function Datastitching() {
         keys: s.keys || [],
         rows_in: s.rows_in ?? 0,
         rows_out: s.rows_out ?? 0,
+        // What this step produced. A later step joining on "Step N Result"
+        // needs these to offer real key columns, and they cannot be derived
+        // client-side: a name clash is suffixed ("month_step1") and duplicate
+        // right-hand keys are collapsed before the join.
+        columns: s.columns || [],
       }));
       setDraft({
         steps,
@@ -317,6 +322,15 @@ function Datastitching() {
     }
     setDraft({ isGenerating: false });
   };
+
+  // "Step N Result" is a virtual name - it is never a dataset, so it is not in
+  // `files`. The dry run reports what each step produced, so the modal can look
+  // its columns up here instead of falling back to a blind text box.
+  const stepResultColumns = Object.fromEntries(
+    draft.joinCards
+      .filter((card) => (card.columns || []).length)
+      .map((card) => [`Step ${card.step} Result`, card.columns])
+  );
 
   const previewedCard = draft.activePreview ? draft.joinCards[draft.activePreview.cardIndex] : null;
 
@@ -608,6 +622,7 @@ function Datastitching() {
           mode={modal.mode}
           stepIndex={modal.stepIndex}
           existingSteps={draft.steps}
+          stepResultColumns={stepResultColumns}
           step={modal.step}
           error={modal.error}
           isSaving={draft.isSavingPipeline}
@@ -621,8 +636,17 @@ function Datastitching() {
 }
 
 // ─── Modal: configure exactly ONE join step (add or edit) ──────────────────
-function SingleJoinModal({ files, selectedFileList, grainLabel, mode, stepIndex, existingSteps, step, error, isSaving, onChange, onDone, onClose }) {
-  const columnsForDataset = (name) => files.find((f) => f.filename === name)?.columns || null;
+function SingleJoinModal({ files, selectedFileList, grainLabel, mode, stepIndex, existingSteps, stepResultColumns = {}, step, error, isSaving, onChange, onDone, onClose }) {
+  // A real dataset first, then a previous step's result. Returns null only when
+  // neither is known yet - the first time a step is configured, before any dry
+  // run has reported what it produces - and the key field falls back to free
+  // text for that case rather than showing an empty dropdown.
+  const columnsForDataset = (name) => {
+    const dataset = files.find((f) => f.filename === name);
+    if (dataset) return dataset.columns || null;
+    const fromStep = stepResultColumns[name];
+    return fromStep && fromStep.length ? fromStep : null;
+  };
 
   // Exclude files already used by OTHER steps (not this one), so the same
   // source file can't be picked twice across the pipeline. Prior steps'
