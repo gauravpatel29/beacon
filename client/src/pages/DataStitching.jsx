@@ -1,18 +1,16 @@
+// client/src/pages/DataStitching.jsx
 import React, { useState, useMemo, useEffect } from "react";
 import toast from "react-hot-toast";
 import { useNavigate } from "react-router-dom";
-import { v2BuildArd, v2ListFiles, v2GetCsv, problemMessage } from "../services/api";
+import { v2BuildArd, v2ListFiles, v2ListArds, v2GetCsv, problemMessage } from "../services/api";
 import { useAppState } from "../context/AppContext";
-import { PageHeader, Card, Btn, DataTable, Alert, Spinner, Select } from "../components/UI";
+import { PageHeader, Card, Btn, DataTable, Spinner, Select } from "../components/UI";
 
 export default function DataStitching() {
   const navigate = useNavigate();
   const { state, setField, setFields, saveWorkflowSnapshot } = useAppState();
   const workflowId = state.workflowId;
 
-  // Datasets live in Neon; the browser holds only their names and columns.
-  // The steps name them and the server resolves the bytes, so no CSV text is
-  // sent up to build an ARD.
   const [datasets, setDatasets] = useState(() => state.datasets || []);
   const ingestedFiles = datasets;
 
@@ -20,14 +18,31 @@ export default function DataStitching() {
     if (!workflowId) return;
     v2ListFiles(workflowId)
       .then((res) => {
-        // Only real sources here - an ARD must not be an input to itself.
         const items = (res.items || []).filter((d) => d.kind !== "ard");
         setDatasets(items);
         setField("datasets", items);
       })
       .catch((err) => toast.error(problemMessage(err, "Could not load datasets")));
-    /* eslint-disable-next-line */
+
+    // Also sync all existing ARDs into state
+    v2ListArds(workflowId)
+      .then((res) => {
+        const ards = (res.items || []).map((a) => ({
+          id: a.filename,
+          name: a.filename.replace(/\.csv$/i, ""),
+          filename: a.filename,
+          grain: a.grain || (a.derived_from && a.derived_from.grain) || "hcp",
+          rows: a.row_count,
+          cols: (a.columns || []).length,
+          columns: a.columns || [],
+          version: a.version || 1,
+          createdAt: a.derived_at || a.stored_at || new Date().toISOString(),
+        }));
+        setField("savedArds", ards);
+      })
+      .catch(() => {});
   }, [workflowId]);
+
   const fileNames = useMemo(() => ingestedFiles.map((f) => f.filename), [ingestedFiles]);
 
   const datasetColumns = useMemo(() => {
@@ -42,26 +57,22 @@ export default function DataStitching() {
     return Array.from(new Set(ingestedFiles.flatMap((f) => f.columns || [])));
   }, [ingestedFiles]);
 
-  // ─── 1. Tab Selection (HCP, DMA, Custom) ──────────────────────────────────
   const [activeTab, setActiveTab] = useState("hcp");
-
-  // ─── 2. Source Files Checklist ────────────────────────────────────────────
-  const [selectedSourceFiles, setSelectedSourceFiles] = useState(() => fileNames);
+  const [selectedSourceFiles, setSelectedSourceFiles] = useState(() => state.stitchingSourceFiles || fileNames);
 
   useEffect(() => {
     if (!fileNames.length) return;
+    if (state.stitchingSourceFiles && state.stitchingSourceFiles.length > 0) {
+      setSelectedSourceFiles(state.stitchingSourceFiles);
+      return;
+    }
     if (activeTab === "hcp") {
       const hcpFiles = fileNames.filter((f) => {
         const l = f.toLowerCase();
         return (
-          l.includes("sale") ||
-          l.includes("call") ||
-          l.includes("sample") ||
-          l.includes("social") ||
-          l.includes("rte") ||
-          l.includes("speaker") ||
-          l.includes("email") ||
-          l.includes("hcp")
+          l.includes("sale") || l.includes("call") || l.includes("sample") ||
+          l.includes("social") || l.includes("rte") || l.includes("speaker") ||
+          l.includes("email") || l.includes("hcp")
         );
       });
       setSelectedSourceFiles(hcpFiles.length > 0 ? hcpFiles : fileNames);
@@ -69,12 +80,8 @@ export default function DataStitching() {
       const dmaFiles = fileNames.filter((f) => {
         const l = f.toLowerCase();
         return (
-          l.includes("dma") ||
-          l.includes("tv") ||
-          l.includes("digital") ||
-          l.includes("radio") ||
-          l.includes("print") ||
-          l.includes("pop") ||
+          l.includes("dma") || l.includes("tv") || l.includes("digital") ||
+          l.includes("radio") || l.includes("print") || l.includes("pop") ||
           l.includes("media")
         );
       });
@@ -85,17 +92,16 @@ export default function DataStitching() {
   }, [activeTab, fileNames]);
 
   const toggleSourceFile = (fname) => {
-    if (selectedSourceFiles.includes(fname)) {
-      if (selectedSourceFiles.length === 1) {
-        return toast.error("At least one source file must be selected.");
-      }
-      setSelectedSourceFiles(selectedSourceFiles.filter((f) => f !== fname));
-    } else {
-      setSelectedSourceFiles([...selectedSourceFiles, fname]);
+    const updated = selectedSourceFiles.includes(fname)
+      ? selectedSourceFiles.filter((f) => f !== fname)
+      : [...selectedSourceFiles, fname];
+    if (updated.length === 0) {
+      return toast.error("At least one source file must be selected.");
     }
+    setSelectedSourceFiles(updated);
+    setField("stitchingSourceFiles", updated);
   };
 
-  // ─── 3. Result Dataset Name ───────────────────────────────────────────────
   const [ardDatasetName, setArdDatasetName] = useState(() => {
     return activeTab === "hcp" ? "HCP_Master_ARD" : activeTab === "dma" ? "DMA_Master_ARD" : "Custom_Master_ARD";
   });
@@ -106,26 +112,25 @@ export default function DataStitching() {
     );
   }, [activeTab]);
 
-  // ─── 4. Helper to get default single primary key pair ─────────────────────
   const getSingleDefaultKeyPair = (lFile, rFile) => {
     const lCols = datasetColumns[lFile] || allKnownCols;
     const rCols = datasetColumns[rFile] || allKnownCols;
 
     const autoLKey =
       lCols.find((c) => c.toLowerCase().includes("npi") || c.toLowerCase().includes("id") || c.toLowerCase().includes("dma")) ||
-      lCols[0] ||
-      "";
+      lCols[0] || "";
     const autoRKey =
       rCols.find((c) => c.toLowerCase() === autoLKey.toLowerCase()) ||
       rCols.find((c) => c.toLowerCase().includes("npi") || c.toLowerCase().includes("id") || c.toLowerCase().includes("dma")) ||
-      rCols[0] ||
-      "";
+      rCols[0] || "";
 
     return [{ left_key: autoLKey, right_key: autoRKey }];
   };
 
-  // ─── 5. Steps State ───────────────────────────────────────────────────────
   const [steps, setSteps] = useState(() => {
+    if (state.stitchingSteps && state.stitchingSteps.length > 0) {
+      return state.stitchingSteps;
+    }
     const s1Left = selectedSourceFiles[0] || fileNames[0] || "";
     const s1Right = selectedSourceFiles[1] || fileNames[1] || "";
     return [
@@ -138,12 +143,20 @@ export default function DataStitching() {
     ];
   });
 
+  const updateStepsAndState = (newSteps) => {
+    setSteps(newSteps);
+    setField("stitchingSteps", newSteps);
+  };
+
   useEffect(() => {
-    if (selectedSourceFiles.length >= 2 && (!steps[0]?.left_file || !selectedSourceFiles.includes(steps[0]?.left_file))) {
+    if (
+      selectedSourceFiles.length >= 2 &&
+      (!steps[0]?.left_file || !selectedSourceFiles.includes(steps[0]?.left_file)) &&
+      !state.stitchingSteps
+    ) {
       const s1Left = selectedSourceFiles[0];
       const s1Right = selectedSourceFiles[1];
-
-      setSteps([
+      updateStepsAndState([
         {
           left_file: s1Left,
           right_file: s1Right,
@@ -165,105 +178,94 @@ export default function DataStitching() {
     return [...selectedSourceFiles, ...prevSteps];
   };
 
-  // ─── Step Operations ──────────────────────────────────────────────────────
   const addJoinStep = () => {
     const prevResultName = `Step ${steps.length} Result`;
     const usedRights = steps.map((s) => s.right_file);
     const defaultRight =
       selectedSourceFiles.find((f) => f !== steps[0]?.left_file && !usedRights.includes(f)) ||
-      selectedSourceFiles[0] ||
-      "";
+      selectedSourceFiles[0] || "";
 
-    setSteps((prev) => [
-      ...prev,
+    const nextSteps = [
+      ...steps,
       {
         left_file: prevResultName,
         right_file: defaultRight,
         join_type: "left",
         key_pairs: getSingleDefaultKeyPair(steps[0]?.left_file, defaultRight),
       },
-    ]);
+    ];
+    updateStepsAndState(nextSteps);
   };
 
   const updateStep = (index, field, value) => {
-    setSteps((prev) =>
-      prev.map((step, idx) => {
-        if (idx !== index) return step;
-        const updated = { ...step, [field]: value };
-        if (field === "left_file" || field === "right_file") {
-          updated.key_pairs = getSingleDefaultKeyPair(
-            field === "left_file" ? value : updated.left_file,
-            field === "right_file" ? value : updated.right_file
-          );
-        }
-        return updated;
-      })
-    );
+    const nextSteps = steps.map((step, idx) => {
+      if (idx !== index) return step;
+      const updated = { ...step, [field]: value };
+      if (field === "left_file" || field === "right_file") {
+        updated.key_pairs = getSingleDefaultKeyPair(
+          field === "left_file" ? value : updated.left_file,
+          field === "right_file" ? value : updated.right_file
+        );
+      }
+      return updated;
+    });
+    updateStepsAndState(nextSteps);
   };
 
   const removeStep = (index) => {
-    setSteps((prev) => prev.filter((_, i) => i !== index));
+    updateStepsAndState(steps.filter((_, i) => i !== index));
   };
 
-  // ─── Pure Immutable Key Pair Operations (Adds Exactly 1 Pair) ─────────────
   const addKeyPair = (stepIndex) => {
-    setSteps((prev) =>
-      prev.map((step, idx) => {
-        if (idx !== stepIndex) return step;
-        const lCols = datasetColumns[step.left_file] || allKnownCols;
-        const rCols = datasetColumns[step.right_file] || allKnownCols;
+    const nextSteps = steps.map((step, idx) => {
+      if (idx !== stepIndex) return step;
+      const lCols = datasetColumns[step.left_file] || allKnownCols;
+      const rCols = datasetColumns[step.right_file] || allKnownCols;
+      const currentLeftKeys = (step.key_pairs || []).map((kp) => kp.left_key);
+      const nextLeftKey = lCols.find((c) => !currentLeftKeys.includes(c)) || lCols[0] || "";
+      const nextRightKey =
+        rCols.find((c) => c.toLowerCase() === nextLeftKey.toLowerCase()) || rCols[0] || "";
 
-        const currentLeftKeys = (step.key_pairs || []).map((kp) => kp.left_key);
-        const nextLeftKey = lCols.find((c) => !currentLeftKeys.includes(c)) || lCols[0] || "";
-        const nextRightKey =
-          rCols.find((c) => c.toLowerCase() === nextLeftKey.toLowerCase()) ||
-          rCols[0] ||
-          "";
-
-        return {
-          ...step,
-          key_pairs: [...(step.key_pairs || []), { left_key: nextLeftKey, right_key: nextRightKey }],
-        };
-      })
-    );
+      return {
+        ...step,
+        key_pairs: [...(step.key_pairs || []), { left_key: nextLeftKey, right_key: nextRightKey }],
+      };
+    });
+    updateStepsAndState(nextSteps);
   };
 
   const updateKeyPair = (stepIndex, pairIndex, side, value) => {
-    setSteps((prev) =>
-      prev.map((step, idx) => {
-        if (idx !== stepIndex) return step;
-        const updatedPairs = step.key_pairs.map((pair, pIdx) => {
-          if (pIdx !== pairIndex) return pair;
-          return { ...pair, [side]: value };
-        });
-        return { ...step, key_pairs: updatedPairs };
-      })
-    );
+    const nextSteps = steps.map((step, idx) => {
+      if (idx !== stepIndex) return step;
+      const updatedPairs = step.key_pairs.map((pair, pIdx) => {
+        if (pIdx !== pairIndex) return pair;
+        return { ...pair, [side]: value };
+      });
+      return { ...step, key_pairs: updatedPairs };
+    });
+    updateStepsAndState(nextSteps);
   };
 
   const removeKeyPair = (stepIndex, pairIndex) => {
-    setSteps((prev) =>
-      prev.map((step, idx) => {
-        if (idx !== stepIndex) return step;
-        if (step.key_pairs.length <= 1) {
-          toast.error("At least one key pair is required.");
-          return step;
-        }
-        return {
-          ...step,
-          key_pairs: step.key_pairs.filter((_, pIdx) => pIdx !== pairIndex),
-        };
-      })
-    );
+    const nextSteps = steps.map((step, idx) => {
+      if (idx !== stepIndex) return step;
+      if (step.key_pairs.length <= 1) {
+        toast.error("At least one key pair is required.");
+        return step;
+      }
+      return {
+        ...step,
+        key_pairs: step.key_pairs.filter((_, pIdx) => pIdx !== pairIndex),
+      };
+    });
+    updateStepsAndState(nextSteps);
   };
 
-  // ─── 6. Execution Pipeline ────────────────────────────────────────────────
   const handleExecutePipeline = async () => {
     if (!selectedSourceFiles.length) {
       return toast.error("Please select at least one source file.");
     }
 
-    // Client-side Validation
     for (let i = 0; i < steps.length; i++) {
       const s = steps[i];
       if (!s.left_file || !s.right_file) {
@@ -287,7 +289,6 @@ export default function DataStitching() {
 
     try {
       const formattedSteps = steps.map((s) => {
-        // A cross join pairs every row with every row, so it carries no keys.
         const pairs = s.join_type === "cross" ? [] : s.key_pairs || [];
         return {
           left_file: s.left_file,
@@ -304,6 +305,24 @@ export default function DataStitching() {
         output: ardDatasetName,
       });
 
+      const csv = await v2GetCsv(workflowId, res.filename);
+
+      const ardObj = {
+        id: res.filename,
+        name: ardDatasetName,
+        filename: res.filename,
+        grain: activeTab === "dma" ? "dma" : "hcp",
+        rows: res.row_count,
+        cols: (res.columns || []).length,
+        columns: res.columns || [],
+        version: res.version || 1,
+        csv_data: csv,
+        createdAt: new Date().toISOString(),
+      };
+
+      const existingArds = (state.savedArds || []).filter((a) => a.filename !== res.filename);
+      const updatedArds = [ardObj, ...existingArds];
+
       setArdResult({
         rows: res.row_count,
         cols: (res.columns || []).length,
@@ -311,16 +330,16 @@ export default function DataStitching() {
         preview: res.preview || [],
         lineage: res.lineage || res.derived_from || {},
         filename: res.filename,
+        csv_data: csv,
       });
 
-      // Hand the ARD to the stages downstream. They still take a CSV string,
-      // so it is fetched once here rather than carried through the app.
-      const csv = await v2GetCsv(workflowId, res.filename);
-      if (activeTab === "dma") {
-        setFields({ activeDataset: res.filename, filteredCsvData: csv });
-      } else {
-        setFields({ activeDataset: res.filename, granularCsvData: csv, mergedCsvData: csv });
-      }
+      setFields({
+        savedArds: updatedArds,
+        activeDataset: res.filename,
+        granularCsvData: csv,
+        filteredCsvData: csv,
+        mergedCsvData: csv,
+      });
 
       toast.success(`Generated ${res.filename} (${res.row_count.toLocaleString()} rows)`);
     } catch (err) {
@@ -343,14 +362,12 @@ export default function DataStitching() {
 
   return (
     <div className="space-y-6">
-      {/* Page Header */}
       <PageHeader
         title="Data Stitching & ARD Creation"
         subtitle="Join your mapped files into analytic record datasets"
         icon="🧬"
       />
 
-      {/* Top Navigation Tabs */}
       <div className="bg-slate-200/70 p-1.5 rounded-2xl flex items-center gap-1 shadow-inner border border-slate-200">
         {[
           { id: "hcp", label: "HCP-Level ARD", icon: "🩺" },
@@ -373,7 +390,6 @@ export default function DataStitching() {
         ))}
       </div>
 
-      {/* Section 1: Source Files Checklist */}
       <Card title="Source Files">
         <p className="text-xs text-slate-500 mb-3">
           Select the source files to include in this <strong>{activeTab.toUpperCase()} ARD</strong> pipeline:
@@ -408,20 +424,13 @@ export default function DataStitching() {
             );
           })}
         </div>
-
-        <div className="mt-3 bg-slate-50 border border-slate-100 p-2.5 rounded-xl text-[11px] text-slate-500 flex items-center justify-between">
-          <span>Mapping file and population universe files included automatically</span>
-          <span className="font-semibold text-slate-700">{selectedSourceFiles.length} file(s) active</span>
-        </div>
       </Card>
 
-      {/* Section 2: Sequential Join Pipeline */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* Left: Sequential Pipeline Builder */}
         <div className="lg:col-span-6 space-y-4">
           <Card title="Sequential Join Pipeline Sequence">
             <p className="text-xs text-slate-500 mb-4">
-              Build your dataset step-by-step. Each step outputs an intermediate dataset (e.g. <em>Step 1 Result</em>) that can be paired with subsequent source files.
+              Build your dataset step-by-step. Each step outputs an intermediate dataset that can be paired with subsequent source files.
             </p>
 
             <div className="space-y-4 max-h-[580px] overflow-y-auto pr-1">
@@ -447,7 +456,6 @@ export default function DataStitching() {
                       )}
                     </div>
 
-                    {/* Dataset Dropdowns */}
                     <div className="grid grid-cols-2 gap-2">
                       <Select
                         label="Left Dataset"
@@ -463,7 +471,6 @@ export default function DataStitching() {
                       />
                     </div>
 
-                    {/* Join Strategy Dropdown with Cross Join */}
                     <Select
                       label="Join Strategy"
                       value={step.join_type}
@@ -477,10 +484,9 @@ export default function DataStitching() {
                       ]}
                     />
 
-                    {/* ─── DYNAMIC MULTIPLE KEY PAIRS BLOCK ─────────────────────── */}
                     {isCrossJoin ? (
                       <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-xs text-blue-800">
-                        ℹ️ <strong>Cross Join active:</strong> Combines every row from <strong>{step.left_file || "Left"}</strong> with every row from <strong>{step.right_file || "Right"}</strong> (no join keys needed).
+                        ℹ️ <strong>Cross Join active:</strong> Combines every row from <strong>{step.left_file || "Left"}</strong> with every row from <strong>{step.right_file || "Right"}</strong>.
                       </div>
                     ) : (
                       <div className="bg-white rounded-xl p-3 border border-slate-200 space-y-2.5">
@@ -541,7 +547,6 @@ export default function DataStitching() {
               })}
             </div>
 
-            {/* Pipeline Controls */}
             <div className="pt-2 space-y-3">
               <Btn variant="outline" onClick={addJoinStep} className="w-full justify-center text-xs">
                 + Add Next Join Step
@@ -555,7 +560,7 @@ export default function DataStitching() {
                   type="text"
                   value={ardDatasetName}
                   onChange={(e) => setArdDatasetName(e.target.value)}
-                  placeholder="e.g. HCP_Master_ARD_v1"
+                  placeholder="e.g. HCP_Master_ARD"
                   className="w-full text-xs font-bold border border-slate-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-brand-500"
                 />
               </div>
@@ -571,7 +576,6 @@ export default function DataStitching() {
           </Card>
         </div>
 
-        {/* Right: Live Stitched Preview & Lineage */}
         <div className="lg:col-span-6 space-y-4">
           {loading && <Spinner label="Executing multi-step join pipeline..." />}
 
@@ -580,7 +584,7 @@ export default function DataStitching() {
               <span className="text-5xl block mb-3">🧬</span>
               <h3 className="text-base font-bold text-slate-700">No ARD Generated Yet</h3>
               <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
-                Select your join strategy, configure key pairs, and click <strong>Execute & Generate ARD</strong>.
+                Configure join keys and click <strong>Execute & Generate ARD</strong>.
               </p>
             </Card>
           )}
@@ -604,7 +608,6 @@ export default function DataStitching() {
                 </div>
               </div>
 
-              {/* Lineage Audit Badge */}
               {ardResult.lineage?.steps_executed?.length > 0 && (
                 <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 mb-4 text-xs space-y-1">
                   <span className="font-bold text-slate-700 block">🔍 Join Lineage Audit Trail</span>
@@ -620,7 +623,6 @@ export default function DataStitching() {
                 </div>
               )}
 
-              {/* Table Preview */}
               <div className="mt-4 space-y-2">
                 <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">
                   Sample Stitched Records (First 100 rows)
@@ -628,7 +630,6 @@ export default function DataStitching() {
                 <DataTable data={ardResult.preview || []} />
               </div>
 
-              {/* Action Buttons */}
               <div className="mt-6 flex justify-end gap-3 flex-wrap">
                 <Btn
                   variant="outline"

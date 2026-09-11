@@ -73,6 +73,9 @@ export const edaTrendRollup = (payload) =>
 export const correlationMatrix = (payload) =>
   API.post("/correlation/matrix", payload).then((r) => r.data);
 
+export const edaLagCorrelation = (payload) =>
+  API.post("/eda/lag-correlation", payload).then((r) => r.data);
+
 export const pcaAnalysis = (payload) =>
   API.post("/correlation/pca", payload).then((r) => r.data);
 

@@ -1,7 +1,8 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
+import truststore
+truststore.inject_into_ssl()
 # Database Pool Manager
 from core.config import get_settings
 from core.database import get_db_pool

@@ -410,13 +410,13 @@ def compute_eda_stats(
 ) -> dict:
     df = df.copy()
     total_rows = len(df)
-
     summary_stats = []
     metric_cols = []
 
+    id_tokens = ["id", "npi", "zip", "postal", "dma", "code", "fips", "key", "account"]
+
     for col in df.columns:
         raw_s = df[col]
-
         s_str = raw_s.astype(str).str.strip()
         is_missing = raw_s.isna() | s_str.isin(["", "nan", "None", "NaT", "<NA>", "null"])
         missing_count = int(is_missing.sum())
@@ -425,20 +425,22 @@ def compute_eda_stats(
         valid_raw = raw_s[~is_missing]
         unique_count = int(valid_raw.nunique())
 
-        col_type = infer_column_semantic_type(
-            raw_s, col, date_column, geo_column, dependent_variable
-        )
+        col_lower = col.lower().strip()
+        is_id_column = any(token in col_lower for token in id_tokens)
 
-        if col_type == "Metric":
+        col_type = infer_column_semantic_type(raw_s, col, date_column, geo_column, dependent_variable)
+
+        if col_type == "Metric" and not is_id_column:
             metric_cols.append(col)
             valid_nums = pd.to_numeric(valid_raw, errors="coerce").dropna()
             if len(valid_nums) > 0:
+                control_total = round(float(valid_nums.sum()), 2)
                 summary_stats.append({
                     "variable": col,
                     "type": "Metric",
                     "is_numeric": True,
                     "unique_count": unique_count,
-                    "control_total": round(float(valid_nums.sum()), 2),
+                    "control_total": control_total,
                     "min": round(float(valid_nums.min()), 2),
                     "max": round(float(valid_nums.max()), 2),
                     "mean": round(float(valid_nums.mean()), 2),
@@ -452,17 +454,13 @@ def compute_eda_stats(
             else:
                 summary_stats.append({
                     "variable": col, "type": "Metric", "is_numeric": True,
-                    "unique_count": unique_count, "control_total": "—", "min": None, "max": None,
+                    "unique_count": unique_count, "control_total": "—", "min": "—", "max": "—",
                     "mean": None, "median": None, "std": None, "p75": None, "p95": None,
                     "missing_count": missing_count, "missing_pct": missing_pct,
                 })
 
         elif col_type == "Date":
             parsed_d = pd.to_datetime(valid_raw, errors="coerce", dayfirst=True)
-            if parsed_d.isna().sum() > 0:
-                parsed_d0 = pd.to_datetime(valid_raw, errors="coerce", dayfirst=False)
-                parsed_d = parsed_d.fillna(parsed_d0)
-
             min_d = str(parsed_d.min().date()) if parsed_d.notna().any() else "—"
             max_d = str(parsed_d.max().date()) if parsed_d.notna().any() else "—"
 
@@ -483,18 +481,15 @@ def compute_eda_stats(
                 "missing_pct": missing_pct,
             })
 
-        else:
-            min_val = str(valid_raw.min()) if len(valid_raw) > 0 else "—"
-            max_val = str(valid_raw.max()) if len(valid_raw) > 0 else "—"
-
+        else:  # Dimension / ID / Zip codes (No numerical Min/Max or Sum)
             summary_stats.append({
                 "variable": col,
                 "type": "Dimension",
                 "is_numeric": False,
                 "unique_count": unique_count,
                 "control_total": "—",
-                "min": min_val,
-                "max": max_val,
+                "min": "—",
+                "max": "—",
                 "mean": None,
                 "median": None,
                 "std": None,
@@ -505,18 +500,10 @@ def compute_eda_stats(
             })
 
     trend_data = []
-    # Recorded before the temporary parsing column is added below, so it is
-    # never reported as one of the dataset's columns - `all_cols` populates the
-    # column pickers on the review screen.
-    all_cols = df.columns.tolist()
     if date_column in df.columns and len(metric_cols) > 0:
-        # Same reasoning as compute_trend_rollup: one explicit format chosen
-        # by coverage, rather than dayfirst inference that transposes ISO dates.
-        parsed_date_series = _parse_dates_robust(df[date_column].astype(str).str.strip())
-
+        parsed_date_series = pd.to_datetime(df[date_column], dayfirst=True, errors="coerce")
         df["_parsed_date_str"] = parsed_date_series.dt.strftime("%Y-%m-%d")
         valid_trend_df = df[df["_parsed_date_str"].notna()]
-
         if len(valid_trend_df) > 0:
             trend_agg = (
                 valid_trend_df.groupby("_parsed_date_str")[metric_cols]
@@ -530,16 +517,13 @@ def compute_eda_stats(
     by_geo = []
     if geo_column in df.columns and dependent_variable in df.columns:
         valid_geo = df.dropna(subset=[geo_column, dependent_variable])
-        grouped = valid_geo.groupby(geo_column)[dependent_variable].sum()
-        # Built directly rather than via reset_index(): when geo_column and
-        # dependent_variable are the SAME column, the grouped Series and its
-        # index share a name and reset_index raises "cannot insert <col>,
-        # already exists". Naming the two output columns ourselves means the
-        # source names never have to be unique.
-        geo_agg = pd.DataFrame({
-            "geo": grouped.index.astype(str),
-            "value": grouped.values,
-        }).sort_values("value", ascending=False)
+        geo_agg = (
+            valid_geo.groupby(geo_column)[dependent_variable]
+            .sum()
+            .reset_index()
+            .rename(columns={geo_column: "geo", dependent_variable: "value"})
+            .sort_values("value", ascending=False)
+        )
         by_geo = geo_agg.head(20).to_dict(orient="records")
 
     return {
@@ -547,12 +531,13 @@ def compute_eda_stats(
         "trend_data": trend_data,
         "by_geo": by_geo,
         "numeric_cols": metric_cols,
-        "all_cols": all_cols,
+        "all_cols": df.columns.tolist(),
         "total_rows": total_rows,
         "date_column": date_column,
         "geo_column": geo_column,
         "dependent_variable": dependent_variable,
     }
+
 
 
 # ---------------------------------------------------------------------------
@@ -581,6 +566,47 @@ def compute_corr_pairs(df: pd.DataFrame, feature_cols: List[str], threshold: flo
                     pairs.append((f1, f2, corr_val))
     pairs.sort(key=lambda x: x[2], reverse=True)
     return pairs, corr_matrix
+
+def compute_cross_correlation_lags(
+    df: pd.DataFrame,
+    date_col: str,
+    x_col: str,
+    y_col: str,
+    max_lags: int = 6,
+) -> List[Dict[str, Any]]:
+    """Calculates cross-correlation across time lags (-max_lags to +max_lags)."""
+    if date_col not in df.columns or x_col not in df.columns or y_col not in df.columns:
+        return []
+
+    df_time = df[[date_col, x_col, y_col]].copy()
+    df_time[date_col] = pd.to_datetime(df_time[date_col], dayfirst=True, errors="coerce")
+    df_time = df_time.dropna().sort_values(date_col)
+
+    # Rollup to time series level
+    ts = df_time.groupby(date_col)[[x_col, y_col]].sum().reset_index()
+    s_x = pd.to_numeric(ts[x_col], errors="coerce").fillna(0)
+    s_y = pd.to_numeric(ts[y_col], errors="coerce").fillna(0)
+
+    lag_results = []
+    for lag in range(-max_lags, max_lags + 1):
+        if lag < 0:
+            shifted_x = s_x.shift(-lag)
+            r = shifted_x.corr(s_y)
+        elif lag > 0:
+            shifted_x = s_x.shift(lag)
+            r = shifted_x.corr(s_y)
+        else:
+            r = s_x.corr(s_y)
+
+        r_val = round(float(r), 3) if pd.notna(r) else 0.0
+        lag_label = f"Lag {lag:+d}w" if lag != 0 else "Same Week (Lag 0)"
+        lag_results.append({
+            "lag": lag,
+            "label": lag_label,
+            "correlation": r_val,
+        })
+
+    return lag_results
 
 
 def preview_removal_reasons(
@@ -660,37 +686,28 @@ def remove_correlated_features(
 
 
 def find_corr_clusters(df: pd.DataFrame, feature_cols: List[str], threshold: float) -> List[List[str]]:
+    """Strictly returns 2-variable pairs with pairwise |r| >= threshold."""
     feature_cols = [c for c in feature_cols if c in df.columns]
     if len(feature_cols) < 2:
         return []
 
     sub = df[feature_cols].apply(pd.to_numeric, errors='coerce').dropna()
     corr_matrix = sub.corr().abs().fillna(0)
-    adj = {f: set() for f in feature_cols}
+
+    pairs = []
+    seen = set()
     for i in range(len(feature_cols)):
         for j in range(i + 1, len(feature_cols)):
             f1, f2 = feature_cols[i], feature_cols[j]
-            if f1 in corr_matrix.index and f2 in corr_matrix.columns:
-                if corr_matrix.loc[f1, f2] >= threshold:
-                    adj[f1].add(f2)
-                    adj[f2].add(f1)
+            r_val = float(corr_matrix.loc[f1, f2])
+            if r_val >= threshold and not np.isnan(r_val):
+                pair_key = tuple(sorted([f1, f2]))
+                if pair_key not in seen:
+                    seen.add(pair_key)
+                    pairs.append((f1, f2, r_val))
 
-    visited = set()
-    clusters = []
-    for f in feature_cols:
-        if f not in visited and adj[f]:
-            stack = [f]
-            cluster = set()
-            while stack:
-                node = stack.pop()
-                if node not in visited:
-                    visited.add(node)
-                    cluster.add(node)
-                    stack.extend(list(adj[node] - visited))
-            if len(cluster) > 1:
-                clusters.append(sorted(list(cluster)))
-    return clusters
-
+    pairs.sort(key=lambda x: x[2], reverse=True)
+    return [[p[0], p[1]] for p in pairs]
 
 def preview_combination_details(
     df: pd.DataFrame,
@@ -730,6 +747,8 @@ def preview_combination_details(
     return {"clusters": cluster_previews}
 
 
+# python/core/processing.py
+
 def combine_clusters(
     df: pd.DataFrame,
     feature_cols: List[str],
@@ -743,26 +762,36 @@ def combine_clusters(
     new_cols_info = []
 
     for idx, cluster in enumerate(clusters):
+        valid_cluster = [c for c in cluster if c in df_combined.columns]
+        if not valid_cluster:
+            continue
+
         user_col_name = new_names[idx] if idx < len(new_names) else f"COMBO_{idx + 1}"
+
+        # Coerce all cluster columns to numeric for calculation
+        cluster_nums = df_combined[valid_cluster].apply(pd.to_numeric, errors='coerce').fillna(0)
+
         if method == "mean":
-            combined_series = df_combined[cluster].mean(axis=1)
+            combined_series = cluster_nums.mean(axis=1)
             method_str = "mean"
         elif method == "weighted_sum":
             w_dict = weights_per_cluster[idx] if weights_per_cluster and idx < len(weights_per_cluster) else {}
             combined_series = pd.Series(0.0, index=df_combined.index)
-            for col in cluster:
+            for col in valid_cluster:
                 w = float(w_dict.get(col, 1.0))
-                combined_series += w * df_combined[col]
-            weight_strs = ", ".join(f"{col}×{w_dict.get(col, 1.0):.2f}" for col in cluster)
+                combined_series += w * cluster_nums[col]
+            weight_strs = ", ".join(f"{col}×{w_dict.get(col, 1.0):.2f}" for col in valid_cluster)
             method_str = f"weighted_sum ({weight_strs})"
         else:
-            combined_series = df_combined[cluster].sum(axis=1)
+            combined_series = cluster_nums.sum(axis=1)
             method_str = "sum"
 
         df_combined[user_col_name] = combined_series
-        new_cols_info.append({"combo_name": user_col_name, "features": cluster, "method": method_str})
+        new_cols_info.append({"combo_name": user_col_name, "features": valid_cluster, "method": method_str})
+        
         if drop_original:
-            df_combined = df_combined.drop(columns=[c for c in cluster if c in df_combined.columns and c != user_col_name])
+            cols_to_drop = [c for c in valid_cluster if c != user_col_name and c in df_combined.columns]
+            df_combined = df_combined.drop(columns=cols_to_drop)
 
     return df_combined, pd.DataFrame(new_cols_info)
 

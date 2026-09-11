@@ -2,13 +2,13 @@ import React, { useState, useEffect, useMemo } from "react";
 import toast from "react-hot-toast";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  BarChart, Bar, ScatterChart, Scatter, Legend,
+  BarChart, Bar, ScatterChart, Scatter, Legend
 } from "recharts";
 import {
   edaStats, edaSparsity, edaPoorMansCurve, edaDetectOutliers, edaRemoveOutliers,
-  edaTrendRollup, edaHistogram, edaScatter, correlationMatrix, computeVIF, getCandidateFeatures,
-  getHighCorrPairs, previewRemoval, applyRemoval, findClusters, previewCombination, applyCombination,
-  v2ListArds, v2GetCsv,
+  edaTrendRollup, edaHistogram, edaScatter, correlationMatrix, computeVIF,
+  getHighCorrPairs, previewRemoval, applyRemoval, findClusters, applyCombination,
+  v2ListArds, v2GetCsv, problemMessage
 } from "../services/api";
 import { useAppState } from "../context/AppContext";
 import { PageHeader, Card, Btn, Select, Alert, Spinner, DataTable } from "../components/UI";
@@ -19,17 +19,32 @@ const PALETTE = [
   "#F97316", "#14B8A6", "#A855F7", "#3B82F6", "#E11D48"
 ];
 
-function CorrelationHeatmap({ matrix, columns, onCellClick }) {
+function CorrelationHeatmap({ matrix, columns, threshold = 0.7, onCellClick }) {
   if (!matrix || !columns || !columns.length) return null;
-  const getColor = (val) => {
+
+  const getStyle = (val) => {
     const v = parseFloat(val) || 0;
-    if (v > 0.7) return "#001E96";
-    if (v > 0.4) return "#4060CC";
-    if (v > 0.1) return "#8090EE";
-    if (v < -0.7) return "#CC2020";
-    if (v < -0.4) return "#EE5555";
-    if (v < -0.1) return "#FFB3B3";
-    return "#F0F0F5";
+    const absV = Math.abs(v);
+    const meetsThreshold = absV >= threshold;
+
+    if (!meetsThreshold) {
+      return {
+        backgroundColor: "#F8FAFC",
+        color: "#94A3B8",
+        fontWeight: "normal",
+        opacity: 0.6,
+      };
+    }
+
+    if (v > 0) {
+      if (v >= 0.8) return { backgroundColor: "#001E96", color: "#FFFFFF", fontWeight: "bold" };
+      if (v >= 0.5) return { backgroundColor: "#2563EB", color: "#FFFFFF", fontWeight: "bold" };
+      return { backgroundColor: "#60A5FA", color: "#FFFFFF", fontWeight: "bold" };
+    } else {
+      if (v <= -0.8) return { backgroundColor: "#991B1B", color: "#FFFFFF", fontWeight: "bold" };
+      if (v <= -0.5) return { backgroundColor: "#DC2626", color: "#FFFFFF", fontWeight: "bold" };
+      return { backgroundColor: "#F87171", color: "#FFFFFF", fontWeight: "bold" };
+    }
   };
 
   return (
@@ -50,14 +65,18 @@ function CorrelationHeatmap({ matrix, columns, onCellClick }) {
               {columns.map((col) => {
                 const val = matrix[row]?.[col] ?? 0;
                 const isDiag = row === col;
+                const style = isDiag
+                  ? { backgroundColor: "#E2E8F0", color: "#475569", fontWeight: "bold" }
+                  : getStyle(val);
+
                 return (
                   <td
                     key={col}
                     onClick={() => !isDiag && onCellClick && onCellClick(row, col)}
-                    style={{ backgroundColor: getColor(val) }}
-                    title={`${row} vs ${col}: ${Number(val).toFixed(3)}`}
-                    className={`w-14 h-10 text-center font-mono text-white font-bold ${
-                      !isDiag ? "cursor-pointer hover:scale-110 hover:ring-2 hover:ring-brand-400" : ""
+                    style={style}
+                    title={`${row} vs ${col}: ${Number(val).toFixed(3)} (Threshold: ${threshold})`}
+                    className={`w-14 h-10 text-center font-mono transition-all ${
+                      !isDiag ? "cursor-pointer hover:scale-105 hover:ring-2 hover:ring-brand-500" : ""
                     }`}
                   >
                     {Number(val).toFixed(2)}
@@ -74,90 +93,71 @@ function CorrelationHeatmap({ matrix, columns, onCellClick }) {
 
 export default function EDA() {
   const { state, setField, saveWorkflowSnapshot } = useAppState();
-
-  // ─── 1. ARD registry, read from the server ────────────────────────────────
-  // ARDs are rows in `workflow_files` (kind='ard') under this workflow, so they
-  // are listed from there rather than from app state.
-  //
-  // This has to be a server read, not an in-memory handoff. CSV payloads are
-  // deliberately never persisted - they are megabytes and blow the localStorage
-  // quota (see NEVER_PERSIST in AppContext) - so anything handed over in memory
-  // is gone after a reload, and the screen showed no dataset. Fetching by
-  // filename survives that, and it also stops a DMA-level ARD being shadowed by
-  // whatever ingestion happened to leave in `granularCsvData`.
   const workflowId = state.workflowId;
-  const [savedArds, setSavedArds] = useState([]);
-  const [selectedArdId, setSelectedArdId] = useState("active_granular");
-  const [ardCsv, setArdCsv] = useState(null);
-  const [ardLoading, setArdLoading] = useState(false);
 
-  // Whatever the stitching screen left in memory, when the user came straight
-  // from it. Null after a reload - which is exactly why the list above exists.
-  const handoffCsv = state.granularCsvData || state.filteredCsvData || state.mergedCsvData;
+  const [ardList, setArdList] = useState(() => state.savedArds || []);
+  const [selectedArdId, setSelectedArdId] = useState(() => state.activeDataset || "active_granular");
+  const [loadedCsvMap, setLoadedCsvMap] = useState({});
 
   useEffect(() => {
-    if (!workflowId) return undefined;
-    let cancelled = false;
+    if (!workflowId) return;
     v2ListArds(workflowId)
-      .then((data) => {
-        if (cancelled) return;
-        const items = data.items || [];
-        setSavedArds(items);
-        setSelectedArdId((current) => {
-          if (current !== "active_granular") return current;
-          // Prefer the one the stitching screen just built; else the newest.
-          const active = items.find((a) => a.filename === state.activeDataset);
-          return (active || items[0])?.filename || "active_granular";
-        });
+      .then((res) => {
+        const ards = (res.items || []).map((a) => ({
+          id: a.filename,
+          name: a.filename.replace(/\.csv$/i, ""),
+          filename: a.filename,
+          grain: a.grain || (a.derived_from && a.derived_from.grain) || "hcp",
+          rows: a.row_count,
+          cols: (a.columns || []).length,
+          columns: a.columns || [],
+          version: a.version || 1,
+          createdAt: a.derived_at || a.stored_at || new Date().toISOString(),
+        }));
+        if (ards.length > 0) {
+          setArdList(ards);
+          setField("savedArds", ards);
+          if (selectedArdId === "active_granular" || !ards.some((a) => a.id === selectedArdId)) {
+            setSelectedArdId(ards[0].id);
+          }
+        }
       })
-      .catch(() => { if (!cancelled) setSavedArds([]); });
-    return () => { cancelled = true; };
-  }, [workflowId, state.activeDataset]);
+      .catch(() => {});
+  }, [workflowId]);
 
   useEffect(() => {
-    if (!workflowId || selectedArdId === "active_granular") return undefined;
-    let cancelled = false;
-    setArdLoading(true);
+    if (!workflowId || !selectedArdId || selectedArdId === "active_granular") return;
+    if (loadedCsvMap[selectedArdId]) return;
+
     v2GetCsv(workflowId, selectedArdId)
-      .then((csv) => { if (!cancelled) setArdCsv(csv); })
-      .catch(() => {
-        if (cancelled) return;
-        setArdCsv(null);
-        toast.error(`Could not load ${selectedArdId}.`);
+      .then((csv) => {
+        setLoadedCsvMap((prev) => ({ ...prev, [selectedArdId]: csv }));
+        setField("granularCsvData", csv);
+        setField("filteredCsvData", csv);
+        setField("activeDataset", selectedArdId);
       })
-      .finally(() => { if (!cancelled) setArdLoading(false); });
-    return () => { cancelled = true; };
+      .catch((err) => toast.error(problemMessage(err, "Failed to load ARD data")));
   }, [workflowId, selectedArdId]);
 
-  const activeCsv = selectedArdId === "active_granular" ? handoffCsv : ardCsv;
+  const activeArdObj = useMemo(() => {
+    return ardList.find((a) => a.id === selectedArdId) || null;
+  }, [ardList, selectedArdId]);
 
-  // Keep backup for restoring exclusions. Re-taken per ARD, so restoring after
-  // switching datasets cannot put the previous ARD's rows back.
+  const activeCsv = useMemo(() => {
+    if (selectedArdId && loadedCsvMap[selectedArdId]) {
+      return loadedCsvMap[selectedArdId];
+    }
+    return state.granularCsvData || state.filteredCsvData || state.mergedCsvData;
+  }, [selectedArdId, loadedCsvMap, state]);
+
   const [backupCsv, setBackupCsv] = useState(null);
-
-  useEffect(() => {
-    setBackupCsv(null);
-  }, [selectedArdId]);
 
   useEffect(() => {
     if (activeCsv && !backupCsv) {
       setBackupCsv(activeCsv);
     }
-  }, [activeCsv, backupCsv]);
+  }, [activeCsv, selectedArdId]);
 
-  // Outlier removal edits the working copy in place. When the data came from
-  // the server it has to be written back to `ardCsv`, or the edit is discarded
-  // on the next render.
-  const setWorkingCsv = (csv) => {
-    if (selectedArdId === "active_granular") {
-      setField("granularCsvData", csv);
-      setField("filteredCsvData", csv);
-    } else {
-      setArdCsv(csv);
-    }
-  };
-
-  // Key Columns
   const [columns, setColumns] = useState([]);
   const [dateCol, setDateCol] = useState(state.dateColumn || "");
   const [geoCol, setGeoCol] = useState(state.geoColumn || "");
@@ -183,9 +183,7 @@ export default function EDA() {
         if (found) setGeoCol(found);
       }
       if (!kpiCol || !cols.includes(kpiCol)) {
-        const found = cols
-          .filter((c) => c !== dateCol && c !== geoCol)
-          .find((c) => c.toLowerCase().includes("sale") || c.toLowerCase().includes("trx") || c.toLowerCase().includes("nrx") || c.toLowerCase().includes("kpi"));
+        const found = cols.find((c) => c.toLowerCase().includes("sale") || c.toLowerCase().includes("trx") || c.toLowerCase().includes("nrx") || c.toLowerCase().includes("kpi"));
         if (found) setKpiCol(found);
       }
     } catch (e) {}
@@ -194,21 +192,11 @@ export default function EDA() {
   const handleRunEDA = async (csvOverride = null) => {
     const csv = csvOverride || activeCsv;
     if (!csv) return toast.error("No dataset available.");
-    if (!dateCol || !geoCol) return toast.error("Please specify Date and Geo / Group Keys.");
+    if (!dateCol || !geoCol) return toast.error("Please specify Date and Geo Keys.");
 
     setLoading(true);
     try {
-      // Never the date or geo key: grouping a column by itself is
-      // meaningless, and the API cannot build its per-geo table from it.
-      const usable = columns.filter((c) => c !== dateCol && c !== geoCol);
-      const targetDep =
-        (kpiCol && kpiCol !== geoCol && kpiCol !== dateCol ? kpiCol : null) ||
-        usable.find((c) => c.toLowerCase().includes("sale") || c.toLowerCase().includes("trx")) ||
-        usable[0];
-      if (!targetDep) {
-        setLoading(false);
-        return toast.error("Pick a KPI column that is not the Date or Geo key.");
-      }
+      const targetDep = kpiCol || columns.find((c) => c.toLowerCase().includes("sale") || c.toLowerCase().includes("trx")) || columns[0];
       const data = await edaStats({
         csv_data: csv,
         date_column: dateCol,
@@ -219,7 +207,7 @@ export default function EDA() {
       setField("dateColumn", dateCol);
       setField("geoColumn", geoCol);
       if (kpiCol) setField("dependentVariable", kpiCol);
-      toast.success("Dataset diagnostics loaded");
+      toast.success("Diagnostics loaded successfully");
     } catch (err) {
       toast.error(err.response?.data?.error || err.response?.data?.detail || "EDA stats failed");
     } finally {
@@ -233,7 +221,7 @@ export default function EDA() {
     }
   }, [activeCsv, dateCol, geoCol]);
 
-  // ─── TAB 1: SUMMARY STATS & SPARSITY WITH CONTROL TOTALS ──────────────────
+  // ─── TAB 1: SUMMARY STATS ─────────────────────────────────────────────────
   const [sortField, setSortField] = useState("variable");
   const [sortAsc, setSortAsc] = useState(true);
   const [searchVar, setSearchVar] = useState("");
@@ -249,7 +237,7 @@ export default function EDA() {
           });
           setSparsityMap(map);
         })
-        .catch(reportPanelError("Sparsity analysis"));
+        .catch(() => {});
     }
   }, [activeCsv, statsResult]);
 
@@ -273,16 +261,16 @@ export default function EDA() {
     return list;
   }, [statsResult, sparsityMap, sortField, sortAsc, searchVar]);
 
-  // ─── TAB 2: TIME TRENDS (WoW / MoM) + CUSTOM BIVARIATE GRAPH ───────────────
+  // ─── TAB 2: TIME TRENDS & BIVARIATE SCATTER PLOT ──────────────────────────
   const [trendPeriod, setTrendPeriod] = useState("week");
   const [selectedTrendMetrics, setSelectedTrendMetrics] = useState([]);
   const [trendRollupData, setTrendRollupData] = useState([]);
   const [indexedView, setIndexedView] = useState(false);
 
-  // Custom Bivariate Relationship Explorer in Tab 2
-  const [trendBivarX, setTrendBivarX] = useState("");
-  const [trendBivarY, setTrendBivarY] = useState("");
-  const [trendBivarScatter, setTrendBivarScatter] = useState(null);
+  const [trendScatterX, setTrendScatterX] = useState("");
+  const [trendScatterY, setTrendScatterY] = useState("");
+  const [trendScatterData, setTrendScatterData] = useState(null);
+  const [trendScatterLoading, setTrendScatterLoading] = useState(false);
 
   useEffect(() => {
     if (statsResult?.numeric_cols?.length) {
@@ -294,43 +282,28 @@ export default function EDA() {
         setSelectedTrendMetrics(activeNumeric.slice(0, 2));
       }
 
-      if (!trendBivarX) setTrendBivarX(activeNumeric[0] || "");
-      if (!trendBivarY) setTrendBivarY(activeNumeric[1] || activeNumeric[0] || "");
+      if (!trendScatterX) setTrendScatterX(activeNumeric.find((c) => c !== kpiCol) || activeNumeric[0] || "");
+      if (!trendScatterY) setTrendScatterY(kpiCol || activeNumeric[0] || "");
     }
-  }, [statsResult]);
+  }, [statsResult, kpiCol]);
 
   useEffect(() => {
     if (activeMainTab === "trends" && activeCsv && dateCol && selectedTrendMetrics.length > 0) {
       edaTrendRollup({ csv_data: activeCsv, date_column: dateCol, metric_columns: selectedTrendMetrics, period: trendPeriod })
         .then((res) => setTrendRollupData(res.trend_data || []))
-        .catch((err) => {
-          setTrendRollupData([]);
-          reportPanelError("Trend rollup")(err);
-        });
+        .catch(() => {});
     }
   }, [activeMainTab, activeCsv, dateCol, selectedTrendMetrics, trendPeriod]);
 
   useEffect(() => {
-    if (activeMainTab === "trends" && activeCsv && trendBivarX && trendBivarY) {
-      edaScatter({ csv_data: activeCsv, x_column: trendBivarX, y_column: trendBivarY })
-        .then((res) => setTrendBivarScatter(res))
-        .catch(reportPanelError("Relationship explorer"));
+    if (activeMainTab === "trends" && activeCsv && trendScatterX && trendScatterY) {
+      setTrendScatterLoading(true);
+      edaScatter({ csv_data: activeCsv, x_column: trendScatterX, y_column: trendScatterY })
+        .then((res) => setTrendScatterData(res))
+        .catch(() => {})
+        .finally(() => setTrendScatterLoading(false));
     }
-  }, [activeMainTab, activeCsv, trendBivarX, trendBivarY]);
-
-  // Every one of these calls previously discarded its error, so a failing
-  // request and an empty result looked identical on screen. They are
-  // best-effort panels, so the toast is throttled to whichever fails first.
-  const reportPanelError = (what) => (err) => {
-    const detail = err?.response?.data?.error || err?.response?.data?.detail;
-    const status = err?.response?.status;
-    toast.error(
-      status === 404
-        ? `${what} is not available from this server (404). The API route may not be deployed.`
-        : `${what} failed${detail ? `: ${detail}` : ""}.`,
-      { id: "eda-panel-error" }
-    );
-  };
+  }, [activeMainTab, activeCsv, trendScatterX, trendScatterY]);
 
   const displayTrendData = useMemo(() => {
     if (!trendRollupData.length) return [];
@@ -346,7 +319,7 @@ export default function EDA() {
     });
   }, [trendRollupData, indexedView, selectedTrendMetrics]);
 
-  // ─── TAB 3: DISTRIBUTIONS & OUTLIERS (DIRECT INPUT + RESTORE) ─────────────
+  // ─── TAB 3: DISTRIBUTIONS & OUTLIERS ──────────────────────────────────────
   const [distCol, setDistCol] = useState("");
   const [histData, setHistData] = useState(null);
   const [outlierMethod, setOutlierMethod] = useState("iqr");
@@ -396,7 +369,10 @@ export default function EDA() {
         method: outlierMethod,
         threshold: parsedThresh,
       });
-      setWorkingCsv(res.clean_csv);
+
+      setLoadedCsvMap((prev) => ({ ...prev, [selectedArdId]: res.clean_csv }));
+      setField("granularCsvData", res.clean_csv);
+      setField("filteredCsvData", res.clean_csv);
       toast.success(`Excluded ${res.dropped_rows} outlier row(s)! ${res.remaining_rows.toLocaleString()} rows remaining.`);
       handleRunEDA(res.clean_csv);
     } catch (err) {
@@ -408,7 +384,9 @@ export default function EDA() {
 
   const handleRestoreOriginalDataset = () => {
     if (!backupCsv) return toast.error("No original backup found.");
-    setWorkingCsv(backupCsv);
+    setLoadedCsvMap((prev) => ({ ...prev, [selectedArdId]: backupCsv }));
+    setField("granularCsvData", backupCsv);
+    setField("filteredCsvData", backupCsv);
     toast.success("Restored original dataset (all exclusions undone)");
     handleRunEDA(backupCsv);
   };
@@ -417,7 +395,6 @@ export default function EDA() {
   const [relX, setRelX] = useState("");
   const [relY, setRelY] = useState(kpiCol || "");
   const [poorManCurve, setPoorManCurve] = useState(null);
-  const [scatterData, setScatterData] = useState(null);
   const [relLoading, setRelLoading] = useState(false);
 
   useEffect(() => {
@@ -433,21 +410,15 @@ export default function EDA() {
   useEffect(() => {
     if (activeMainTab === "relationships" && activeCsv && relX && relY) {
       setRelLoading(true);
-      Promise.all([
-        edaPoorMansCurve({ csv_data: activeCsv, x_column: relX, y_column: relY, n_bins: 12 }),
-        edaScatter({ csv_data: activeCsv, x_column: relX, y_column: relY }),
-      ])
-        .then(([pRes, sRes]) => {
-          setPoorManCurve(pRes);
-          setScatterData(sRes);
-        })
-        .catch(reportPanelError("Response curve"))
+      edaPoorMansCurve({ csv_data: activeCsv, x_column: relX, y_column: relY, n_bins: 12 })
+        .then((pRes) => setPoorManCurve(pRes))
+        .catch(() => {})
         .finally(() => setRelLoading(false));
     }
   }, [activeMainTab, activeCsv, relX, relY]);
 
-  // ─── TAB 5: CORRELATION & MULTICOLLINEARITY (VARIABLE SELECTOR + SUB-TABS) ─
-  const [corrSubTab, setCorrSubTab] = useState("analysis"); // analysis | removal | combination
+  // ─── TAB 5: CORRELATION & MULTICOLLINEARITY ───────────────────────────────
+  const [corrSubTab, setCorrSubTab] = useState("analysis");
   const [corrSelectedCols, setCorrSelectedCols] = useState([]);
   const [corrKpiTarget, setCorrKpiTarget] = useState(kpiCol || "");
   const [corrMatrix, setCorrMatrix] = useState(null);
@@ -456,32 +427,34 @@ export default function EDA() {
   const [vifLoading, setVifLoading] = useState(false);
   const [corrThreshold, setCorrThreshold] = useState(0.7);
 
-  // Removal state
   const [removalThreshold, setRemovalThreshold] = useState("0.75");
   const [removalPreview, setRemovalPreview] = useState(null);
   const [removalModalOpen, setRemovalModalOpen] = useState(false);
+  const [singleDropTarget, setSingleDropTarget] = useState(null);
+  const [removalLoading, setRemovalLoading] = useState(false);
+  const [removalResultData, setRemovalResultData] = useState(null);
 
-  // Combination state
   const [comboThreshold, setComboThreshold] = useState("0.75");
-  const [comboMethod, setComboMethod] = useState("Sum");
   const [dropOriginalOnCombo, setDropOriginalOnCombo] = useState(true);
   const [foundClusters, setFoundClusters] = useState([]);
   const [clusterNames, setClusterNames] = useState([]);
-  const [comboWeights, setComboWeights] = useState({});
-  const [comboPreviewData, setComboPreviewData] = useState(null);
   const [comboModalOpen, setComboModalOpen] = useState(false);
+  const [comboLoading, setComboLoading] = useState(false);
+  const [comboResultData, setComboResultData] = useState(null);
 
-  // Initialize selected correlation columns
   useEffect(() => {
-    if (statsResult?.numeric_cols?.length && corrSelectedCols.length === 0) {
-      setCorrSelectedCols(statsResult.numeric_cols);
-      setCorrKpiTarget(kpiCol || statsResult.numeric_cols[0]);
+    if (statsResult?.numeric_cols?.length) {
+      const activeNumeric = statsResult.numeric_cols;
+      setCorrSelectedCols(activeNumeric);
+      if (!corrKpiTarget) {
+        setCorrKpiTarget(kpiCol || activeNumeric[0]);
+      }
     }
-  }, [statsResult, kpiCol]);
+  }, [statsResult]);
 
   const toggleCorrCol = (col) => {
     if (corrSelectedCols.includes(col)) {
-      if (corrSelectedCols.length <= 2) return toast.error("Select at least 2 columns for correlation.");
+      if (corrSelectedCols.length <= 2) return toast.error("Select at least 2 variables.");
       setCorrSelectedCols(corrSelectedCols.filter((c) => c !== col));
     } else {
       setCorrSelectedCols([...corrSelectedCols, col]);
@@ -510,7 +483,7 @@ export default function EDA() {
     try {
       const data = await computeVIF({ csv_data: activeCsv, columns: corrSelectedCols });
       setVifTable(data.vif || []);
-      toast.success("VIF scores computed successfully");
+      toast.success("VIF scores computed");
     } catch (e) {
       toast.error(e.response?.data?.detail || e.message || "VIF calculation failed");
     } finally {
@@ -518,59 +491,72 @@ export default function EDA() {
     }
   };
 
-  // Removal Handlers
-  const handlePreviewRemoval = async () => {
-    if (corrSelectedCols.length < 2) return;
-    setLoading(true);
+  const handleScanRemovalPairs = async () => {
+    if (corrSelectedCols.length < 2) return toast.error("Select at least 2 variables.");
+    setRemovalLoading(true);
     try {
       const parsedThresh = parseFloat(removalThreshold) || 0.75;
+      const targetDep = corrKpiTarget || kpiCol;
       const res = await previewRemoval({
         csv_data: activeCsv,
         columns: corrSelectedCols,
         threshold: parsedThresh,
-        dependent_variable: corrKpiTarget || kpiCol,
+        dependent_variable: targetDep,
       });
       setRemovalPreview(res);
+      if (res.total_pairs === 0) {
+        toast.info(`No pairs found with |r| ≥ ${parsedThresh}`);
+      } else {
+        toast.success(`Found ${res.total_pairs} correlated pair(s)`);
+      }
     } catch (e) {
-      toast.error("Removal preview failed");
+      const msg = e.response?.data?.detail || e.response?.data?.error || e.message || "Removal scan failed";
+      toast.error(msg);
     } finally {
-      setLoading(false);
+      setRemovalLoading(false);
     }
   };
 
   useEffect(() => {
     if (corrSubTab === "removal" && corrSelectedCols.length >= 2) {
-      handlePreviewRemoval();
+      handleScanRemovalPairs();
     }
-  }, [corrSubTab, removalThreshold, corrSelectedCols, corrKpiTarget]);
+  }, [corrSubTab, removalThreshold, corrKpiTarget]);
 
-  const handleConfirmApplyRemoval = async () => {
+  const handleApplySingleRemoval = (varToDrop) => {
+    setSingleDropTarget(varToDrop);
+    setRemovalModalOpen(true);
+  };
+
+  const handleConfirmExecuteRemoval = async () => {
     setRemovalModalOpen(false);
-    setLoading(true);
+    setRemovalLoading(true);
     try {
-      const parsedThresh = parseFloat(removalThreshold) || 0.75;
+      const dropList = singleDropTarget ? [singleDropTarget] : (removalPreview?.dropped || []);
       const res = await applyRemoval({
         csv_data: activeCsv,
         columns: corrSelectedCols,
-        threshold: parsedThresh,
-        dependent_variable: corrKpiTarget || kpiCol,
+        drop_cols: dropList,
       });
+
+      setRemovalResultData(res);
+      setLoadedCsvMap((prev) => ({ ...prev, [selectedArdId]: res.csv_data }));
       setField("granularCsvData", res.csv_data);
       setField("filteredCsvData", res.csv_data);
-      toast.success(`Removed ${res.dropped.length} collinear variable(s)`);
+      toast.success(`Removed ${res.dropped.length} variable(s)!`);
       handleRunEDA(res.csv_data);
       setRemovalPreview(null);
+      setSingleDropTarget(null);
     } catch (e) {
       toast.error("Failed to apply removal");
     } finally {
-      setLoading(false);
+      setRemovalLoading(false);
     }
   };
 
-  // Combination Handlers
-  const handleFindClusters = async () => {
-    if (corrSelectedCols.length < 2) return toast.error("Select at least 2 columns.");
-    setLoading(true);
+  const handleFindCorrelatedPairs = async () => {
+    if (corrSelectedCols.length < 2) return toast.error("Select at least 2 variables.");
+    setComboLoading(true);
     try {
       const parsedThresh = parseFloat(comboThreshold) || 0.75;
       const res = await findClusters({
@@ -580,71 +566,43 @@ export default function EDA() {
       });
       const clusters = res.clusters || [];
       setFoundClusters(clusters);
-      setClusterNames(clusters.map((_, i) => `COMBO_${i + 1}`));
-      const initW = {};
-      clusters.forEach((c, idx) => {
-        initW[idx] = {};
-        c.forEach((col) => { initW[idx][col] = 1.0; });
-      });
-      setComboWeights(initW);
+      setClusterNames(clusters.map((c) => `SUM_${c[0].toUpperCase()}_${c[1].toUpperCase()}`));
       if (clusters.length === 0) {
-        toast.error(`No correlated pairs found with |r| ≥ ${parsedThresh}. Try lowering the threshold.`);
+        toast.info(`No correlated pairs with |r| ≥ ${parsedThresh}. Try lowering threshold.`);
       } else {
-        toast.success(`Found ${clusters.length} correlated pair(s) with |r| ≥ ${parsedThresh}`);
+        toast.success(`Found ${clusters.length} correlated 2-variable pair(s)`);
       }
     } catch (e) {
-      toast.error("Cluster identification failed");
+      toast.error(e.response?.data?.detail || "Pair search failed");
     } finally {
-      setLoading(false);
-    }
-  };
-
-  const handlePreviewCombination = async () => {
-    if (!foundClusters.length) return toast.error("Find correlated clusters first");
-    setLoading(true);
-    try {
-      const methodMap = { Sum: "sum", Mean: "mean", "Weighted Sum": "weighted_sum" };
-      const weightsList = foundClusters.map((_, idx) => comboWeights[idx] || {});
-      const res = await previewCombination({
-        csv_data: activeCsv,
-        clusters: foundClusters,
-        new_names: clusterNames,
-        method: methodMap[comboMethod] || "sum",
-        weights_per_cluster: weightsList,
-      });
-      setComboPreviewData(res);
-    } catch (e) {
-      toast.error("Combination preview failed");
-    } finally {
-      setLoading(false);
+      setComboLoading(false);
     }
   };
 
   const handleConfirmApplyCombination = async () => {
     setComboModalOpen(false);
-    setLoading(true);
+    setComboLoading(true);
     try {
-      const methodMap = { Sum: "sum", Mean: "mean", "Weighted Sum": "weighted_sum" };
-      const weightsList = foundClusters.map((_, idx) => comboWeights[idx] || {});
       const res = await applyCombination({
         csv_data: activeCsv,
         columns: corrSelectedCols,
         clusters: foundClusters,
         new_names: clusterNames,
-        method: methodMap[comboMethod] || "sum",
+        method: "sum",
         drop_original: dropOriginalOnCombo,
-        weights_per_cluster: weightsList,
       });
+
+      setComboResultData(res);
+      setLoadedCsvMap((prev) => ({ ...prev, [selectedArdId]: res.csv_data }));
       setField("granularCsvData", res.csv_data);
       setField("filteredCsvData", res.csv_data);
-      toast.success(`Created ${foundClusters.length} composite variable(s)`);
+      toast.success(`Combined ${foundClusters.length} pair(s) using Sum!`);
       setFoundClusters([]);
-      setComboPreviewData(null);
       handleRunEDA(res.csv_data);
     } catch (e) {
-      toast.error("Failed to apply combination");
+      toast.error(e.response?.data?.detail || e.message || "Combination failed");
     } finally {
-      setLoading(false);
+      setComboLoading(false);
     }
   };
 
@@ -660,7 +618,7 @@ export default function EDA() {
       eda: "completed",
       transformation: "in_progress",
     });
-    toast.success("EDA Diagnostics Complete! Proceeding to Data Transformation.");
+    toast.success("EDA Complete! Proceeding to Data Transformation.");
   };
 
   return (
@@ -687,30 +645,20 @@ export default function EDA() {
               onChange={(e) => {
                 setSelectedArdId(e.target.value);
                 setStatsResult(null);
+                setBackupCsv(null);
               }}
               className="w-full text-xs font-bold border-2 border-brand-500 rounded-xl px-3.5 py-2.5 bg-white text-slate-800 focus:outline-none"
             >
-              {savedArds.length === 0 ? (
+              {ardList.length === 0 ? (
                 <option value="active_granular">Active Stitched ARD</option>
               ) : (
-                savedArds.map((ard) => (
-                  <option key={ard.filename} value={ard.filename}>
-                    📄 {ard.filename} ({ard.grain?.toUpperCase()} Grain • {ard.row_count?.toLocaleString()} rows • {(ard.columns || []).length} cols{ard.version > 1 ? ` • v${ard.version}` : ""})
+                ardList.map((ard) => (
+                  <option key={ard.id} value={ard.id}>
+                    📄 {ard.name} ({ard.grain?.toUpperCase()} Grain • {ard.rows?.toLocaleString()} rows • {ard.cols} cols)
                   </option>
                 ))
               )}
             </select>
-            {ardLoading && (
-              <p className="mt-1.5 text-[11px] font-semibold text-slate-500">
-                Loading {selectedArdId}…
-              </p>
-            )}
-            {!ardLoading && !activeCsv && savedArds.length === 0 && (
-              <p className="mt-1.5 text-[11px] font-semibold text-amber-700">
-                No ARD has been generated for this workflow yet. Build one on the
-                Data Stitching &amp; ARDs screen first.
-              </p>
-            )}
           </div>
 
           <div className="grid grid-cols-2 gap-3 flex-1 min-w-[280px]">
@@ -718,10 +666,17 @@ export default function EDA() {
             <Select label="Geo / Group Key" value={geoCol} onChange={setGeoCol} options={columns} placeholder="Select Geo Column" />
           </div>
 
-          <Btn onClick={() => handleRunEDA()} disabled={loading || ardLoading || !activeCsv} className="self-end py-2.5">
+          <Btn onClick={() => handleRunEDA()} disabled={loading || !activeCsv} className="self-end py-2.5">
             {loading ? "Calculating…" : "↻ Recalculate EDA"}
           </Btn>
         </div>
+
+        {activeArdObj && (
+          <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+            <span>Currently reviewing: <strong className="text-slate-800">{activeArdObj.name}</strong></span>
+            <span className="font-mono">Created: {new Date(activeArdObj.createdAt).toLocaleDateString()}</span>
+          </div>
+        )}
       </Card>
 
       {/* ─── 5 Unified Tabs ──────────────────────────────────────────────────── */}
@@ -750,9 +705,7 @@ export default function EDA() {
 
       {loading && <Spinner label="Running diagnostic calculations on ARD..." />}
 
-      {/* ═════════════════════════════════════════════════════════════════════════ */}
-      {/* TAB 1: SUMMARY STATS WITH CONTROL TOTALS & SPARSITY                      */}
-      {/* ═════════════════════════════════════════════════════════════════════════ */}
+      {/* TAB 1: SUMMARY STATS */}
       {activeMainTab === "summary" && statsResult && (
         <Card title="Variable Health, Sparsity & Control Totals">
           <div className="flex justify-between items-center mb-4 flex-wrap gap-2">
@@ -833,12 +786,9 @@ export default function EDA() {
         </Card>
       )}
 
-      {/* ═════════════════════════════════════════════════════════════════════════ */}
-      {/* TAB 2: TIME TRENDS (WoW / MoM) + BIVARIATE RELATIONSHIP GRAPH             */}
-      {/* ═════════════════════════════════════════════════════════════════════════ */}
+      {/* TAB 2: TIME TRENDS & BIVARIATE SCATTER PLOT */}
       {activeMainTab === "trends" && (
         <div className="space-y-6">
-          {/* Chart 1: Time Series Multi-Metric Line Rollup */}
           <Card title="Time-Series Trend Rollup (WoW & MoM)">
             <div className="flex justify-between items-center mb-4 flex-wrap gap-3">
               <div className="flex items-center gap-2">
@@ -866,29 +816,9 @@ export default function EDA() {
             </div>
 
             <div className="mb-4">
-              <div className="flex justify-between items-center mb-1.5">
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
-                  Select Metrics to Display on Trend Line ({selectedTrendMetrics.length} selected):
-                </label>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setSelectedTrendMetrics(statsResult?.numeric_cols || [])}
-                    className="text-[11px] font-bold text-brand-600 hover:underline"
-                  >
-                    Select All
-                  </button>
-                  <span className="text-slate-300">|</span>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedTrendMetrics((statsResult?.numeric_cols || []).slice(0, 1))}
-                    className="text-[11px] font-bold text-slate-400 hover:text-slate-600"
-                  >
-                    Clear to 1
-                  </button>
-                </div>
-              </div>
-
+              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                Select Metrics to Display on Trend Line ({selectedTrendMetrics.length} selected):
+              </label>
               <div className="flex flex-wrap gap-1.5">
                 {(statsResult?.numeric_cols || []).map((col) => {
                   const isSel = selectedTrendMetrics.includes(col);
@@ -915,23 +845,6 @@ export default function EDA() {
               </div>
             </div>
 
-            {displayTrendData.length === 0 && (
-              <div className="py-10 text-center">
-                <p className="text-xs font-bold text-slate-500">No trend to plot yet.</p>
-                <p className="mt-1 text-[11px] text-slate-400">
-                  {!statsResult
-                    ? "Run the summary stats first — the metric list comes from there."
-                    : !(statsResult.numeric_cols || []).length
-                    ? "No numeric columns were detected in this dataset, so there is nothing to roll up."
-                    : !dateCol
-                    ? "Pick a Date Key above."
-                    : !selectedTrendMetrics.length
-                    ? "Select at least one metric below."
-                    : "The date column produced no parseable dates, so no periods could be formed."}
-                </p>
-              </div>
-            )}
-
             {displayTrendData.length > 0 && (
               <ResponsiveContainer width="100%" height={340}>
                 <LineChart data={displayTrendData}>
@@ -948,33 +861,49 @@ export default function EDA() {
             )}
           </Card>
 
-          {/* Chart 2: Custom Bivariate X vs Y Relationship Explorer */}
-          <Card title="Custom Relationship Explorer (X vs Y Comparison)">
+          {/* 2nd Graph: Bivariate Scatter Plot for Relationship Between X and Y */}
+          <Card title="Variable Relationship Explorer (Scatter Plot & Linear Correlation)">
             <p className="text-xs text-slate-500 mb-4">
-              Select any two metrics from your dataset to inspect their direct relationship with linear trendline fitting.
+              Inspect the relationship between any marketing variable ($X$) and sales/response ($Y$). Displays observed data points, linear trendline, and Pearson correlation coefficient ($r$).
             </p>
 
             <div className="grid grid-cols-2 gap-4 mb-4">
-              <Select label="X Metric:" value={trendBivarX} onChange={setTrendBivarX} options={statsResult?.numeric_cols || columns} />
-              <Select label="Y Metric:" value={trendBivarY} onChange={setTrendBivarY} options={statsResult?.numeric_cols || columns} />
+              <Select
+                label="Select Independent Variable (X Axis):"
+                value={trendScatterX}
+                onChange={setTrendScatterX}
+                options={(statsResult?.numeric_cols || []).filter((c) => c !== trendScatterY)}
+              />
+              <Select
+                label="Select Dependent / Response Variable (Y Axis):"
+                value={trendScatterY}
+                onChange={setTrendScatterY}
+                options={statsResult?.numeric_cols || columns}
+              />
             </div>
 
-            {trendBivarScatter && (
+            {trendScatterLoading && <Spinner label="Loading scatter plot..." />}
+
+            {trendScatterData && !trendScatterLoading && (
               <div className="space-y-3">
-                <div className="flex justify-between items-center bg-slate-50 p-2.5 rounded-xl text-xs">
-                  <span className="font-bold text-slate-700">Observed Scatter Data ({trendBivarX} vs {trendBivarY})</span>
-                  <span className="font-mono font-bold text-brand-700">Pearson r = {trendBivarScatter.r}</span>
+                <div className="flex justify-between items-center bg-slate-50 p-2.5 rounded-xl border border-slate-200 text-xs">
+                  <span className="font-bold text-slate-700">
+                    {trendScatterX} vs {trendScatterY}
+                  </span>
+                  <span className="font-mono font-bold text-brand-700 bg-brand-50 px-2.5 py-1 rounded border border-brand-200">
+                    Pearson r = {trendScatterData.r}
+                  </span>
                 </div>
 
-                <ResponsiveContainer width="100%" height={280}>
+                <ResponsiveContainer width="100%" height={320}>
                   <ScatterChart margin={{ top: 10, right: 30, bottom: 20, left: 10 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                    <XAxis type="number" dataKey="x" name={trendBivarX} label={{ value: trendBivarX, position: "insideBottom", offset: -5, fontSize: 10 }} tick={{ fontSize: 10 }} />
-                    <YAxis type="number" dataKey="y" name={trendBivarY} label={{ value: trendBivarY, angle: -90, position: "insideLeft", fontSize: 10 }} tick={{ fontSize: 10 }} />
+                    <XAxis type="number" dataKey="x" name={trendScatterX} tick={{ fontSize: 10 }} label={{ value: trendScatterX, position: "insideBottom", offset: -10, fontSize: 11 }} />
+                    <YAxis type="number" dataKey="y" name={trendScatterY} tick={{ fontSize: 10 }} label={{ value: trendScatterY, angle: -90, position: "insideLeft", fontSize: 11 }} />
                     <Tooltip formatter={(v) => Number(v).toFixed(2)} />
-                    <Scatter name="Data Points" data={trendBivarScatter.x.map((xv, i) => ({ x: xv, y: trendBivarScatter.y[i] }))} fill="#001E96" opacity={0.6} />
-                    {trendBivarScatter.trendline?.length > 0 && (
-                      <Scatter name="Linear Fit" data={trendBivarScatter.trendline} line={{ stroke: "#EF4444", strokeWidth: 2 }} shape={() => null} />
+                    <Scatter name="Data Points" data={trendScatterData.x.map((xv, i) => ({ x: xv, y: trendScatterData.y[i] }))} fill="#001E96" opacity={0.65} />
+                    {trendScatterData.trendline?.length > 0 && (
+                      <Scatter name="Linear Trendline" data={trendScatterData.trendline} line={{ stroke: "#EF4444", strokeWidth: 2 }} shape={() => null} />
                     )}
                   </ScatterChart>
                 </ResponsiveContainer>
@@ -984,9 +913,7 @@ export default function EDA() {
         </div>
       )}
 
-      {/* ═════════════════════════════════════════════════════════════════════════ */}
-      {/* TAB 3: DISTRIBUTIONS & OUTLIERS                                          */}
-      {/* ═════════════════════════════════════════════════════════════════════════ */}
+      {/* TAB 3: DISTRIBUTIONS & OUTLIERS */}
       {activeMainTab === "distributions" && (
         <div className="space-y-6">
           <Card title="Variable Distribution & Skewness">
@@ -1017,7 +944,6 @@ export default function EDA() {
             )}
           </Card>
 
-          {/* Outlier Diagnostics Section */}
           <Card title={`Outlier Diagnostics for ${distCol}`}>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
               <Select
@@ -1073,22 +999,18 @@ export default function EDA() {
                   <>
                     <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Flagged Outlier Records:</h4>
                     <DataTable data={outlierResult.preview_flagged_rows} />
-                    
                     <div className="flex items-center gap-3 pt-2">
                       <Btn variant="danger" onClick={() => setOutlierModalOpen(true)}>
                         Exclude {outlierResult.outlier_count} Outliers from Dataset
                       </Btn>
                       <Btn variant="outline" onClick={handleRestoreOriginalDataset}>
-                        ↺ Restore Original Dataset (Undo Exclusions)
+                        ↺ Restore Original Dataset
                       </Btn>
                     </div>
                   </>
                 ) : (
                   <div className="flex items-center justify-between bg-emerald-50 border border-emerald-200 p-3 rounded-xl">
                     <span className="text-xs font-bold text-emerald-800">✅ No extreme outliers detected in {distCol}.</span>
-                    <Btn variant="outline" onClick={handleRestoreOriginalDataset} className="text-xs py-1.5">
-                      ↺ Restore Original Dataset
-                    </Btn>
                   </div>
                 )}
               </div>
@@ -1097,13 +1019,11 @@ export default function EDA() {
         </div>
       )}
 
-      {/* ═════════════════════════════════════════════════════════════════════════ */}
-      {/* TAB 4: RELATIONSHIPS & POOR MAN'S CURVE                                  */}
-      {/* ═════════════════════════════════════════════════════════════════════════ */}
+      {/* TAB 4: RELATIONSHIPS & POOR MAN'S CURVE */}
       {activeMainTab === "relationships" && (
         <Card title="Bivariate Relationships & Poor Man's Saturation Curve">
           <p className="text-xs text-slate-500 mb-4">
-            Combines raw data points with the <strong>binned-average response curve</strong> to reveal whether a marketing tactic exhibits diminishing returns (logarithmic saturation) or linear growth before Module 5 Transformation.
+            Reveals whether a marketing tactic exhibits diminishing returns (logarithmic saturation) or linear growth.
           </p>
 
           <div className="grid grid-cols-2 gap-4 mb-4">
@@ -1111,7 +1031,7 @@ export default function EDA() {
             <Select label="Target Sales / KPI (Y Axis):" value={relY} onChange={setRelY} options={statsResult?.numeric_cols || columns} />
           </div>
 
-          {relLoading && <Spinner label="Calculating response curve & scatter points..." />}
+          {relLoading && <Spinner label="Calculating response curve..." />}
 
           {poorManCurve && !relLoading && (
             <div className="space-y-6">
@@ -1123,9 +1043,8 @@ export default function EDA() {
                 <span className="text-slate-500">12 Quantile Average Bins</span>
               </div>
 
-              {/* Binned Average Curve */}
               <div>
-                <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">1. Binned Average Response Curve (Mean {relY} per {relX} Tier):</h4>
+                <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">1. Binned Average Response Curve:</h4>
                 <ResponsiveContainer width="100%" height={300}>
                   <LineChart data={poorManCurve.binned_curve}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
@@ -1136,90 +1055,19 @@ export default function EDA() {
                   </LineChart>
                 </ResponsiveContainer>
               </div>
-
-              {/* Bivariate Scatter Plot with Linear Fit */}
-              {scatterData && (
-                <div className="border-t border-slate-100 pt-4">
-                  <div className="flex justify-between items-center mb-2">
-                    <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider">2. Raw Observed Data Points with Linear Trendline:</h4>
-                    <span className="text-xs font-bold text-brand-700 font-mono">Pearson r = {scatterData.r}</span>
-                  </div>
-                  <ResponsiveContainer width="100%" height={300}>
-                    <ScatterChart margin={{ top: 10, right: 30, bottom: 20, left: 10 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                      <XAxis type="number" dataKey="x" name={relX} tick={{ fontSize: 10 }} />
-                      <YAxis type="number" dataKey="y" name={relY} tick={{ fontSize: 10 }} />
-                      <Tooltip formatter={(v) => Number(v).toFixed(2)} />
-                      <Scatter name="Observed Points" data={scatterData.x.map((xv, i) => ({ x: xv, y: scatterData.y[i] }))} fill="#001E96" opacity={0.6} />
-                      {scatterData.trendline?.length > 0 && (
-                        <Scatter name="Linear OLS" data={scatterData.trendline} line={{ stroke: "#EF4444", strokeWidth: 2 }} shape={() => null} />
-                      )}
-                    </ScatterChart>
-                  </ResponsiveContainer>
-                </div>
-              )}
             </div>
           )}
         </Card>
       )}
 
-      {/* ═════════════════════════════════════════════════════════════════════════ */}
-      {/* TAB 5: CORRELATION & MULTICOLLINEARITY (VARIABLE SELECTOR + 3 SUB-TABS)  */}
-      {/* ═════════════════════════════════════════════════════════════════════════ */}
+      {/* TAB 5: CORRELATION & MULTICOLLINEARITY */}
       {activeMainTab === "correlation" && (
         <div className="space-y-6">
-          {/* Top Column Selection Box */}
-          <Card title="Select Variables to Include in Multicollinearity Analysis">
-            <div className="flex justify-between items-center mb-2">
-              <p className="text-xs text-slate-500">
-                Choose the marketing tactics and variables to analyze ({corrSelectedCols.length} selected):
-              </p>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setCorrSelectedCols(statsResult?.numeric_cols || [])}
-                  className="text-[11px] font-bold text-brand-600 hover:underline"
-                >
-                  Select All
-                </button>
-                <span className="text-slate-300">|</span>
-                <button
-                  type="button"
-                  onClick={() => setCorrSelectedCols((statsResult?.numeric_cols || []).slice(0, 2))}
-                  className="text-[11px] font-bold text-slate-400 hover:text-slate-600"
-                >
-                  Reset to 2
-                </button>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap gap-1.5">
-              {(statsResult?.numeric_cols || []).map((col) => {
-                const isSelected = corrSelectedCols.includes(col);
-                return (
-                  <button
-                    key={col}
-                    type="button"
-                    onClick={() => toggleCorrCol(col)}
-                    className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${
-                      isSelected
-                        ? "bg-brand-600 text-white shadow-sm ring-2 ring-brand-400/30"
-                        : "bg-slate-100 text-slate-600 hover:bg-slate-200 opacity-60"
-                    }`}
-                  >
-                    {col}
-                  </button>
-                );
-              })}
-            </div>
-          </Card>
-
-          {/* Sub-tab Navigation */}
           <div className="flex gap-2 border-b border-slate-200">
             {[
               { id: "analysis", label: "1. Analysis (Heatmap & VIF)" },
               { id: "removal", label: "2. Treatment — Removal" },
-              { id: "combination", label: "3. Treatment — Combination" },
+              { id: "combination", label: "3. Treatment — Combination (Sum)" },
             ].map((st) => (
               <button
                 key={st.id}
@@ -1236,64 +1084,86 @@ export default function EDA() {
             ))}
           </div>
 
-          {/* Sub-tab 1: Analysis */}
           {corrSubTab === "analysis" && (
-            <Card title="Pairwise Correlation & Multicollinearity Matrix">
-              <div className="flex items-center justify-between gap-4 mb-4 flex-wrap">
-                <div>
-                  <label className="text-xs font-bold text-slate-700 block mb-1">Highlight Threshold (|r| ≥ {corrThreshold}):</label>
-                  <input type="range" min="0" max="1" step="0.05" value={corrThreshold} onChange={(e) => setCorrThreshold(parseFloat(e.target.value))} className="w-56" />
+            <div className="space-y-4">
+              <Card title="Select Variables for Multicollinearity Analysis">
+                <div className="flex flex-wrap gap-1.5">
+                  {(statsResult?.numeric_cols || []).map((col) => {
+                    const isSelected = corrSelectedCols.includes(col);
+                    return (
+                      <button
+                        key={col}
+                        type="button"
+                        onClick={() => toggleCorrCol(col)}
+                        className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${
+                          isSelected
+                            ? "bg-brand-600 text-white shadow-sm ring-2 ring-brand-400/30"
+                            : "bg-slate-100 text-slate-600 hover:bg-slate-200 opacity-60"
+                        }`}
+                      >
+                        {col}
+                      </button>
+                    );
+                  })}
                 </div>
-                <Btn variant="outline" onClick={handleComputeVIF} disabled={vifLoading}>
-                  {vifLoading ? "Computing VIF…" : "Compute VIF Scores"}
-                </Btn>
-              </div>
+              </Card>
 
-              {corrMatrix && (
-                <div className="space-y-2 mb-4">
-                  <span className="text-xs font-bold text-slate-700 uppercase tracking-wider block">
-                    Feature Correlation Heatmap (Click any cell to inspect in Tab 4):
-                  </span>
-                  <CorrelationHeatmap matrix={corrMatrix.matrix} columns={corrMatrix.columns} onCellClick={handleHeatmapJumpToScatter} />
+              <Card title="Pairwise Correlation & Multicollinearity Matrix">
+                <div className="flex items-center justify-between gap-4 mb-4 flex-wrap">
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 block mb-1">Highlight Threshold (|r| ≥ {corrThreshold}):</label>
+                    <input type="range" min="0" max="1" step="0.05" value={corrThreshold} onChange={(e) => setCorrThreshold(parseFloat(e.target.value))} className="w-56" />
+                  </div>
+                  <Btn variant="outline" onClick={handleComputeVIF} disabled={vifLoading}>
+                    {vifLoading ? "Computing VIF…" : "Compute VIF Scores"}
+                  </Btn>
                 </div>
-              )}
 
-              {highPairs.length > 0 && (
-                <div className="mb-4">
-                  <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">High Collinearity Pairs (|r| ≥ {corrThreshold}):</h4>
-                  <DataTable data={highPairs.map((p) => ({ "Tactic 1": p.feature1, "Tactic 2": p.feature2, "Correlation (|r|)": p.corr.toFixed(4) }))} />
-                </div>
-              )}
+                {corrMatrix && (
+                  <div className="space-y-2 mb-4">
+                    <span className="text-xs font-bold text-slate-700 uppercase tracking-wider block">
+                      Feature Correlation Heatmap (Highlighted for |r| ≥ {corrThreshold}):
+                    </span>
+                    <CorrelationHeatmap
+                      matrix={corrMatrix.matrix}
+                      columns={corrMatrix.columns}
+                      threshold={corrThreshold}
+                      onCellClick={handleHeatmapJumpToScatter}
+                    />
+                  </div>
+                )}
 
-              {vifTable && (
-                <div className="mt-4">
-                  <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">Variance Inflation Factor (VIF):</h4>
-                  <DataTable data={vifTable.map((r) => ({
-                    Variable: r.variable,
-                    VIF: r.VIF != null ? r.VIF : "—",
-                    Status: r.status || (r.VIF > 10 ? "🔴 High (>10)" : r.VIF > 5 ? "⚠️ Moderate (5-10)" : "✅ OK (<5)"),
-                  }))} />
-                </div>
-              )}
-            </Card>
+                {highPairs.length > 0 && (
+                  <div className="mb-4">
+                    <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">High Collinearity Pairs (|r| ≥ {corrThreshold}):</h4>
+                    <DataTable data={highPairs.map((p) => ({ "Tactic 1": p.feature1, "Tactic 2": p.feature2, "Correlation (|r|)": p.corr.toFixed(4) }))} />
+                  </div>
+                )}
+
+                {vifTable && (
+                  <div className="mt-4">
+                    <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">Variance Inflation Factor (VIF):</h4>
+                    <DataTable data={vifTable.map((r) => ({
+                      Variable: r.variable,
+                      VIF: r.VIF != null ? r.VIF : "—",
+                      Status: r.status || (r.VIF > 10 ? "🔴 High (>10)" : r.VIF > 5 ? "⚠️ Moderate (5-10)" : "✅ OK (<5)"),
+                    }))} />
+                  </div>
+                )}
+              </Card>
+            </div>
           )}
 
-          {/* Sub-tab 2: Removal Treatment */}
           {corrSubTab === "removal" && (
             <Card title="Multicollinearity Treatment — Variable Removal">
-              <p className="text-xs text-slate-500 mb-4">
-                Compares correlated pairs against the Target KPI. The variable with lower correlation to KPI is automatically dropped.
-              </p>
-
               <div className="grid grid-cols-2 gap-4 mb-4">
-                <Select label="Target KPI for Correlation Comparison:" value={corrKpiTarget} onChange={setCorrKpiTarget} options={corrSelectedCols} />
+                <Select label="Target KPI for Correlation Comparison:" value={corrKpiTarget} onChange={setCorrKpiTarget} options={columns} />
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
                     Removal Threshold (|r| ≥ {removalThreshold}):
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. 0.75"
                     value={removalThreshold}
                     onChange={(e) => setRemovalThreshold(e.target.value)}
                     className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white"
@@ -1301,130 +1171,104 @@ export default function EDA() {
                 </div>
               </div>
 
+              <Btn onClick={handleScanRemovalPairs} disabled={removalLoading}>
+                {removalLoading ? "Scanning…" : "🔍 Scan Correlated Pairs"}
+              </Btn>
+
               {removalPreview && (
-                <div className="space-y-4">
-                  <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-xs text-blue-900 font-medium">
-                    {removalPreview.total_pairs} correlated pair(s) found → <strong>{removalPreview.total_dropped} feature(s) will be dropped</strong>.
-                  </div>
+                <div className="space-y-3 mt-4">
+                  {removalPreview.pairs?.map((p, idx) => (
+                    <div key={idx} className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex items-center justify-between gap-4 flex-wrap">
+                      <div>
+                        <span className="text-xs font-bold text-slate-800">{p.feature1} ↔ {p.feature2} (|r| = {p.correlation})</span>
+                        <p className="text-xs text-slate-600">{p.reason}</p>
+                      </div>
+                      <Btn variant="danger" onClick={() => handleApplySingleRemoval(p.will_drop)} className="text-xs py-1.5">
+                        Drop "{p.will_drop}"
+                      </Btn>
+                    </div>
+                  ))}
+                </div>
+              )}
 
-                  {removalPreview.pairs?.length > 0 ? (
-                    <>
-                      <DataTable data={removalPreview.pairs.map((p) => ({
-                        "Feature 1": p.feature1,
-                        "Feature 2": p.feature2,
-                        "|r|": p.correlation,
-                        "Will Drop": p.will_drop,
-                        "Decision Reason": p.reason,
-                      }))} />
-
-                      {removalPreview.total_dropped > 0 && (
-                        <Btn variant="danger" onClick={() => setRemovalModalOpen(true)}>
-                          Apply Removal (Drops {removalPreview.total_dropped} feature{removalPreview.total_dropped > 1 ? "s" : ""})
-                        </Btn>
-                      )}
-                    </>
-                  ) : (
-                    <Alert type="info">No pairs cross the removal threshold of |r| ≥ {removalThreshold}.</Alert>
-                  )}
+              {removalResultData && (
+                <div className="mt-6 pt-4 border-t border-slate-200 space-y-2">
+                  <span className="text-xs font-bold text-emerald-600 block">✅ Dropped: {removalResultData.dropped.join(", ")}</span>
+                  <DataTable data={removalResultData.preview} />
                 </div>
               )}
             </Card>
           )}
 
-          {/* Sub-tab 3: Combination Treatment (Pairwise Correlated Groups) */}
           {corrSubTab === "combination" && (
-            <Card title="Multicollinearity Treatment — Variable Combination (Pairwise Clusters)">
-              <div className="space-y-4">
-                <div className="flex gap-4 items-center flex-wrap">
-                  <div className="w-56">
-                    <label className="text-xs font-bold text-slate-700 block mb-1">
-                      Pairwise Correlation Threshold (|r| ≥ {comboThreshold}):
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="e.g. 0.75"
-                      value={comboThreshold}
-                      onChange={(e) => setComboThreshold(e.target.value)}
-                      className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white"
-                    />
-                  </div>
-
-                  <div className="flex gap-3 items-center text-xs font-bold pt-3">
-                    <span className="text-slate-600">Method:</span>
-                    {["Sum", "Mean", "Weighted Sum"].map((m) => (
-                      <label key={m} className="flex items-center gap-1 cursor-pointer">
-                        <input type="radio" checked={comboMethod === m} onChange={() => setComboMethod(m)} />
-                        {m}
-                      </label>
-                    ))}
-                  </div>
+            <Card title="Multicollinearity Treatment — Variable Combination (Sum Pairs)">
+              <div className="grid grid-cols-2 gap-4 mb-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Pairwise Correlation Threshold (|r| ≥ {comboThreshold}):
+                  </label>
+                  <input
+                    type="text"
+                    value={comboThreshold}
+                    onChange={(e) => setComboThreshold(e.target.value)}
+                    className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white"
+                  />
                 </div>
-
-                <div className="flex items-center gap-4">
-                  <Btn variant="outline" onClick={handleFindClusters}>Find Correlated Pairs</Btn>
-                  <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+                <div className="flex items-center gap-2 pt-6">
+                  <label className="flex items-center gap-2 text-xs font-bold text-slate-700 cursor-pointer">
                     <input type="checkbox" checked={dropOriginalOnCombo} onChange={(e) => setDropOriginalOnCombo(e.target.checked)} className="rounded" />
-                    Drop original features after combination
+                    Drop original features after summing
                   </label>
                 </div>
-
-                {foundClusters.length > 0 && (
-                  <div className="space-y-3 pt-2">
-                    <h4 className="text-xs font-bold text-slate-700 uppercase">Identified Correlated Pairs:</h4>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      {foundClusters.map((cluster, cIdx) => (
-                        <div key={cIdx} className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
-                          <span className="text-xs font-bold text-brand-800">Pair #{cIdx + 1} ({cluster.length} features)</span>
-                          <div>
-                            <label className="block text-[11px] text-slate-500 mb-1">Combined Column Name:</label>
-                            <input
-                              type="text"
-                              value={clusterNames[cIdx] || ""}
-                              onChange={(e) => {
-                                const next = [...clusterNames];
-                                next[cIdx] = e.target.value;
-                                setClusterNames(next);
-                              }}
-                              className="w-full text-xs font-bold border border-slate-200 rounded-lg px-2.5 py-1.5 bg-white"
-                            />
-                          </div>
-                          <div className="text-[11px] text-slate-600">
-                            <strong>Correlated Tactic Pair:</strong> {cluster.join(" + ")}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-
-                    <Btn onClick={handlePreviewCombination}>Preview Combination Formula & Values</Btn>
-                  </div>
-                )}
-
-                {comboPreviewData && (
-                  <div className="space-y-3 pt-4 border-t border-slate-200">
-                    <h4 className="text-xs font-bold text-slate-700 uppercase">Combination Preview:</h4>
-                    {comboPreviewData.clusters?.map((c, i) => (
-                      <div key={i} className="bg-white border border-slate-200 rounded-xl p-3 text-xs font-mono font-bold text-brand-700 bg-brand-50">
-                        {c.formula}
-                      </div>
-                    ))}
-                    <Btn onClick={() => setComboModalOpen(true)}>
-                      Apply Combination (Creates {foundClusters.length} composite variable{foundClusters.length > 1 ? "s" : ""})
-                    </Btn>
-                  </div>
-                )}
               </div>
+
+              <Btn onClick={handleFindCorrelatedPairs} disabled={comboLoading}>
+                {comboLoading ? "Scanning…" : "🔍 Find Correlated Pairs"}
+              </Btn>
+
+              {foundClusters.length > 0 && (
+                <div className="space-y-4 mt-4">
+                  {foundClusters.map((cluster, cIdx) => (
+                    <div key={cIdx} className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-2">
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs font-bold text-brand-800">Pair #{cIdx + 1}: {cluster[0]} + {cluster[1]}</span>
+                      </div>
+                      <input
+                        type="text"
+                        value={clusterNames[cIdx] || ""}
+                        onChange={(e) => {
+                          const next = [...clusterNames];
+                          next[cIdx] = e.target.value;
+                          setClusterNames(next);
+                        }}
+                        className="w-full text-xs font-bold border border-slate-200 rounded-lg px-2.5 py-1.5 bg-white"
+                      />
+                    </div>
+                  ))}
+
+                  <Btn onClick={() => setComboModalOpen(true)} disabled={comboLoading}>
+                    Apply Sum Combination
+                  </Btn>
+                </div>
+              )}
+
+              {comboResultData && (
+                <div className="mt-6 pt-4 border-t border-slate-200 space-y-2">
+                  <span className="text-xs font-bold text-emerald-600 block">✅ Sum Columns Created & Dataset Updated</span>
+                  <DataTable data={comboResultData.preview} />
+                </div>
+              )}
             </Card>
           )}
         </div>
       )}
 
-      {/* Outlier Exclusion Confirmation Modal */}
       {outlierModalOpen && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4">
             <h3 className="text-lg font-bold text-slate-800">Confirm Outlier Exclusion</h3>
-            <p className="text-xs text-slate-600 leading-relaxed">
-              Excluding <strong>{outlierResult?.outlier_count} rows</strong> with extreme values in <code>{distCol}</code>. A clean working dataset layer will be created for downstream modeling without altering your raw source ARDs.
+            <p className="text-xs text-slate-600">
+              Excluding <strong>{outlierResult?.outlier_count} rows</strong> with extreme values in <code>{distCol}</code>.
             </p>
             <div className="flex justify-end gap-2 pt-2">
               <Btn variant="secondary" onClick={() => setOutlierModalOpen(false)}>Cancel</Btn>
@@ -1434,44 +1278,33 @@ export default function EDA() {
         </div>
       )}
 
-      {/* Removal Confirmation Modal */}
       {removalModalOpen && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4">
             <h3 className="text-lg font-bold text-slate-800">Confirm Variable Removal</h3>
-            <p className="text-xs text-slate-600 leading-relaxed">
-              Based on correlation against <strong>{corrKpiTarget}</strong>, the following <strong>{removalPreview?.total_dropped} variable(s)</strong> will be dropped:
-            </p>
-            <div className="flex flex-wrap gap-1 bg-slate-50 p-2 rounded-lg">
-              {removalPreview?.dropped?.map((c) => (
-                <span key={c} className="bg-red-100 text-red-800 px-2 py-0.5 rounded text-xs font-bold">{c}</span>
-              ))}
-            </div>
             <div className="flex justify-end gap-2 pt-2">
-              <Btn variant="secondary" onClick={() => setRemovalModalOpen(false)}>Cancel</Btn>
-              <Btn variant="danger" onClick={handleConfirmApplyRemoval}>Confirm & Apply Removal</Btn>
+              <Btn variant="secondary" onClick={() => { setRemovalModalOpen(false); setSingleDropTarget(null); }}>Cancel</Btn>
+              <Btn variant="danger" onClick={handleConfirmExecuteRemoval}>Confirm & Drop</Btn>
             </div>
           </div>
         </div>
       )}
 
-      {/* Combination Confirmation Modal */}
       {comboModalOpen && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4">
             <h3 className="text-lg font-bold text-slate-800">Confirm Variable Combination</h3>
-            <p className="text-xs text-slate-600 leading-relaxed">
-              This will combine <strong>{foundClusters.length} correlated pair(s)</strong> into new columns ({clusterNames.join(", ")}) using <strong>{comboMethod}</strong>.
+            <p className="text-xs text-slate-600">
+              This will create <strong>{foundClusters.length} new sum column(s)</strong> ({clusterNames.join(", ")}).
             </p>
             <div className="flex justify-end gap-2 pt-2">
               <Btn variant="secondary" onClick={() => setComboModalOpen(false)}>Cancel</Btn>
-              <Btn onClick={handleConfirmApplyCombination}>Confirm Combination</Btn>
+              <Btn onClick={handleConfirmApplyCombination}>Confirm & Apply Sum</Btn>
             </div>
           </div>
         </div>
       )}
 
-      {/* Bottom Proceed Bar */}
       <div className="bg-slate-900 text-white rounded-2xl p-5 flex items-center justify-between flex-wrap gap-4 shadow-xl">
         <div>
           <span className="text-emerald-400 font-bold text-sm block">✅ Dataset Diagnostics Complete</span>
