@@ -270,6 +270,12 @@ class ResolvedSpec(BaseModel):
     config_metadata: Dict[str, Any] = Field(default_factory=dict)
     live_updates: LiveUpdates = Field(default_factory=LiveUpdates)
     filters: List[Filter] = Field(default_factory=list)
+    # How several filters combine. "all" keeps a row only if every filter
+    # accepts it; "any" keeps it if at least one does.
+    #
+    # Defaults to "all", which is what the engine did before this field
+    # existed - so a spec saved without it replays exactly as it used to.
+    filter_mode: Literal["all", "any"] = "all"
     granularity: Optional[Granularity] = None
 
 

@@ -321,7 +321,17 @@ def _parse_dates(series: pd.Series, fmt: Optional[str]) -> pd.Series:
 def _apply_filters(
     filename: str, df: pd.DataFrame, filters: List[Any], errors: List[Dict[str, Any]],
     date_formats: Optional[Dict[str, str]] = None,
+    mode: str = "all",
 ) -> Tuple[pd.DataFrame, int]:
+    """Keep the rows the filters accept, combined by `mode`.
+
+    Every mask is evaluated against the SAME incoming frame and combined at the
+    end, rather than narrowing the frame filter by filter. For "all" the result
+    is identical either way - the masks are row-wise and independent - but "any"
+    is only expressible this way: a row rejected by the first filter has to stay
+    available for the second one to accept it.
+    """
+    masks: List[pd.Series] = []
     applied = 0
     for filt in filters:
         col = df[filt.column]
@@ -368,9 +378,17 @@ def _apply_filters(
         else:  # unreachable: the Literal union constrains `type`
             continue
 
-        df = df[mask]
+        masks.append(mask.fillna(False))
         applied += 1
-    return df.reset_index(drop=True), applied
+
+    if not masks:
+        return df.reset_index(drop=True), applied
+
+    combined = masks[0]
+    for mask in masks[1:]:
+        combined = (combined | mask) if mode == "any" else (combined & mask)
+
+    return df[combined].reset_index(drop=True), applied
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +491,7 @@ def apply_manifest(
 
     if spec.filters:
         df, counts.filters_applied = _apply_filters(
-            filename, df, spec.filters, errors, date_fmts
+            filename, df, spec.filters, errors, date_fmts, spec.filter_mode
         )
         if errors:
             raise TransformError(errors)

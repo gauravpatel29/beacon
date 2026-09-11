@@ -235,6 +235,7 @@ class SpecBody(BaseModel):
     config_metadata: Dict[str, Any] = Field(default_factory=dict)
     live_updates: Optional[Dict[str, Any]] = None
     filters: Optional[List[Dict[str, Any]]] = None
+    filter_mode: Optional[str] = None
     granularity: Optional[Dict[str, Any]] = None
     expected_version: Optional[int] = None
 
@@ -242,6 +243,8 @@ class SpecBody(BaseModel):
         payload: Dict[str, Any] = {"config_metadata": self.config_metadata}
         if self.live_updates is not None:
             payload["live_updates"] = self.live_updates
+        if self.filter_mode is not None:
+            payload["filter_mode"] = self.filter_mode
         if self.filters is not None:
             payload["filters"] = self.filters
         if self.granularity is not None:
