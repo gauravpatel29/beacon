@@ -204,6 +204,12 @@
   padding: 0.3rem;
 }
 
+/* Same as the review tabs: clickable divs and spans, not buttons. */
+.grain-tab,
+.tab-remove-x {
+  cursor: pointer;
+}
+
 .grain-tab {
   flex: 1;
   display: flex;

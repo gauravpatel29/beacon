@@ -6,7 +6,7 @@ const shownFor = (draft, cards = []) => {
     ? { kind: 'step', heading: previewedCard ? `Step ${previewedCard.step} result — ${previewedCard.left} + ${previewedCard.right}` : null,
         isLoading: draft.activePreview.isLoading, error: draft.activePreview.error, data: draft.activePreview.data }
     : draft.generatedArd
-    ? { kind: 'ard', heading: `Generated ${draft.generatedArd.filename}` + (draft.generatedArd.version ? ` — version ${draft.generatedArd.version}` : ''),
+    ? { kind: 'ard', heading: `Generated ${draft.generatedArd.filename}` + (draft.generatedArd.version ? ` (version ${draft.generatedArd.version})` : ''),
         isLoading: false, error: null, data: draft.generatedArd, isGenerated: true }
     : null;
 };
@@ -24,7 +24,7 @@ t('no preview, no ard -> null', shownFor({ activePreview: null, generatedArd: nu
 console.log('\n2. the reported bug: after Generate the ARD is shown');
 const g = shownFor({ activePreview: null, generatedArd: ard }, cards);
 t('shows the generated ARD', g?.kind === 'ard', g?.kind);
-t('heading names the file and version', g.heading === 'Generated HCP_Master_ARD.csv — version 2', g.heading);
+t('heading names the file and version', g.heading === 'Generated HCP_Master_ARD.csv (version 2)', g.heading);
 t('renders the ARD columns', JSON.stringify(g.data.columns) === '["npi","trx"]', g.data.columns);
 t('renders the ARD rows', g.data.preview.length === 1, g.data.preview);
 t('row count available for the count line', g.data.row_count === 3, g.data.row_count);

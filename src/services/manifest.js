@@ -135,23 +135,201 @@ export function looksLikeNpi(file, column) {
  * which control the Filter tab renders; the rest stay inert so switching a
  * column's type never silently drops what the user typed.
  */
+export function emptyCondition() {
+  return { min: '', max: '', start: '', end: '', values: [], luhn: false, notNull: false };
+}
+
 export function emptyRule(kind = 'string') {
-  return { kind, min: '', max: '', start: '', end: '', values: [], luhn: false, notNull: false };
+  return { kind, mode: 'all', conditions: [emptyCondition()] };
 }
 
 /**
- * Does this rule actually constrain anything?
+ * Accept either shape of rule and return the current one.
+ *
+ * A rule used to be a single flat set of fields; it is now a list of conditions
+ * with a mode. Normalising on read means the older shape - held in state from
+ * before a reload, or written by an older check script - still works, and the
+ * page never has to ask which shape it is holding.
+ */
+export function normalizeRule(rule, kind = 'string') {
+  if (!rule) return emptyRule(kind);
+  if (Array.isArray(rule.conditions)) {
+    return {
+      kind: rule.kind || kind,
+      mode: rule.mode === 'any' ? 'any' : 'all',
+      conditions: rule.conditions.length ? rule.conditions : [emptyCondition()],
+    };
+  }
+  const { kind: ruleKind, mode, ...fields } = rule;
+  return {
+    kind: ruleKind || kind,
+    mode: mode === 'any' ? 'any' : 'all',
+    conditions: [{ ...emptyCondition(), ...fields }],
+  };
+}
+
+/**
+ * Does this condition actually constrain anything?
  *
  * A column picked in the dropdown but left blank is a browse, not a filter -
  * sending it would be a no-op the API still has to validate, and `range` with
  * neither bound is a 422.
  */
+export function conditionIsSet(condition, kind) {
+  if (!condition) return false;
+  if (condition.luhn || condition.notNull) return true;
+  if (kind === 'number') return condition.min !== '' || condition.max !== '';
+  if (kind === 'date') return Boolean(condition.start || condition.end);
+  return (condition.values || []).length > 0;
+}
+
+/** Does any condition on this column constrain anything? */
 export function ruleIsSet(rule) {
   if (!rule) return false;
-  if (rule.luhn || rule.notNull) return true;
-  if (rule.kind === 'number') return rule.min !== '' || rule.max !== '';
-  if (rule.kind === 'date') return Boolean(rule.start || rule.end);
-  return (rule.values || []).length > 0;
+  const norm = normalizeRule(rule);
+  return norm.conditions.some((c) => conditionIsSet(c, norm.kind));
+}
+
+/**
+ * Read a committed spec back into the Filter tab's shape.
+ *
+ * The inverse of `buildFilters`. Without it, reopening a configured file shows
+ * an empty Filter tab - and worse, the next Apply sends no filters and wipes
+ * the ones already committed.
+ *
+ * Filters are stored against post-rename names; the tab keys its rules by the
+ * ORIGINAL column, so the renames are undone here.
+ */
+/** How the committed spec combines its filters. Older specs have no mode. */
+export function restoreFilterMode(spec) {
+  return spec?.filter_mode === 'any' ? 'any' : 'all';
+}
+
+/** Read one condition's filters back into the tab's condition shape. */
+function conditionFromFilters(filters) {
+  const condition = emptyCondition();
+  let kind = 'string';
+  for (const f of filters || []) {
+    if (f.type === 'range') {
+      kind = 'number';
+      if (f.min !== undefined && f.min !== null) condition.min = String(f.min);
+      if (f.max !== undefined && f.max !== null) condition.max = String(f.max);
+    } else if (f.type === 'date_range') {
+      kind = 'date';
+      if (f.start) condition.start = f.start;
+      if (f.end) condition.end = f.end;
+    } else if (f.type === 'value_in') {
+      condition.values = [...(f.values || [])];
+    } else if (f.type === 'npi_luhn') {
+      condition.luhn = true;
+    } else if (f.type === 'not_null') {
+      condition.notNull = true;
+    }
+  }
+  return { condition, kind };
+}
+
+export function restoreFilters(specFilters, renameMap) {
+  const originalOf = Object.fromEntries(
+    Object.entries(renameMap || {}).map(([from, to]) => [to, from])
+  );
+  const rules = {};
+
+  // A flat list carries no grouping, so one filter per field is assumed and a
+  // repeat of a field already set starts a new condition. Every spec written
+  // before groups existed has exactly one condition per column, which this
+  // reproduces; a hand-written spec with two ranges on a column now round-trips
+  // instead of the second silently overwriting the first.
+  const occupied = (c, f) =>
+    (f.type === 'range' && ((f.min != null && c.min !== '') || (f.max != null && c.max !== '')))
+    || (f.type === 'date_range' && ((f.start && c.start) || (f.end && c.end)))
+    || (f.type === 'value_in' && (c.values || []).length > 0)
+    || (f.type === 'npi_luhn' && c.luhn)
+    || (f.type === 'not_null' && c.notNull);
+
+  for (const f of specFilters || []) {
+    const col = originalOf[f.column] || f.column;
+    if (!rules[col]) rules[col] = { kind: 'string', mode: 'all', conditions: [emptyCondition()] };
+    const rule = rules[col];
+    let current = rule.conditions[rule.conditions.length - 1];
+    if (occupied(current, f)) {
+      current = emptyCondition();
+      rule.conditions.push(current);
+    }
+    const { condition: merged, kind } = conditionFromFilters([f]);
+    for (const key of Object.keys(merged)) {
+      if (key === 'values') {
+        if (merged.values.length) current.values = merged.values;
+      } else if (merged[key] !== '' && merged[key] !== false) {
+        current[key] = merged[key];
+      }
+    }
+    if (kind !== 'string') rule.kind = kind;
+  }
+  return rules;
+}
+
+/**
+ * Read a committed spec's filters back into the tab's shape, preferring the
+ * nested `filter_groups` when the spec carries them. The flat list is the
+ * fallback for specs written before groups existed.
+ */
+export function restoreFilterGroups(spec, renameMap) {
+  const groups = spec?.filter_groups;
+  if (!Array.isArray(groups) || !groups.length) {
+    return restoreFilters(spec?.filters, renameMap);
+  }
+  const originalOf = Object.fromEntries(
+    Object.entries(renameMap || {}).map(([from, to]) => [to, from])
+  );
+
+  const rules = {};
+  for (const group of groups) {
+    for (const cond of group.conditions || []) {
+      const first = (cond.filters || [])[0];
+      if (!first) continue;
+      const col = originalOf[first.column] || first.column;
+      const { condition, kind } = conditionFromFilters(cond.filters);
+      if (!rules[col]) {
+        rules[col] = {
+          kind: 'string',
+          mode: group.mode === 'any' ? 'any' : 'all',
+          conditions: [],
+        };
+      }
+      if (kind !== 'string') rules[col].kind = kind;
+      rules[col].conditions.push(condition);
+    }
+  }
+  for (const rule of Object.values(rules)) {
+    if (!rule.conditions.length) rule.conditions.push(emptyCondition());
+  }
+  return rules;
+}
+
+/**
+ * Read a committed `granularity` back into the Granularity tab's shape.
+ * The inverse of `buildGranularity`; same reasoning as `restoreFilters`.
+ */
+export function restoreGranularity(granularity, renameMap) {
+  const blank = { dateCol: '', geoCol: '', detected: null, target: '', numOps: {} };
+  if (!granularity) return blank;
+  const originalOf = Object.fromEntries(
+    Object.entries(renameMap || {}).map(([from, to]) => [to, from])
+  );
+  const original = (c) => originalOf[c] || c;
+
+  return {
+    dateCol: original(granularity.date_column || ''),
+    geoCol: original(granularity.geo_column || ''),
+    // `from` is what detection found when this was committed. Restoring it
+    // means the tab does not have to re-run detection to show its own state.
+    detected: granularity.from || null,
+    target: granularity.to || '',
+    numOps: Object.fromEntries(
+      Object.entries(granularity.numeric || {}).map(([col, op]) => [original(col), op])
+    ),
+  };
 }
 
 /**
@@ -162,41 +340,77 @@ export function ruleIsSet(rule) {
  * dropdown: the dropdown chooses what you are *editing*, and a filter you set
  * on another column is still a filter you asked for.
  */
-export function buildFilters(file) {
-  const cfg = file.filterConfig || {};
-  const rules = cfg.rules || {};
+/** The filters for one condition. They are always ANDed by the engine. */
+function conditionFilters(file, col, kind, condition) {
+  const column = renamedName(file, col);
   const filters = [];
 
-  for (const col of Object.keys(rules)) {
-    const rule = rules[col];
-    if (!ruleIsSet(rule)) continue;
-    const column = renamedName(file, col);
+  if (condition.notNull) filters.push({ type: 'not_null', column });
+  // Guarded, not just hidden in the UI: a column renamed away from NPI after
+  // the box was ticked would otherwise still be Luhn-filtered.
+  if (condition.luhn && looksLikeNpi(file, col)) filters.push({ type: 'npi_luhn', column });
 
-    if (rule.notNull) filters.push({ type: 'not_null', column });
-    // Guarded, not just hidden in the UI: a column renamed away from NPI after
-    // the box was ticked would otherwise still be Luhn-filtered.
-    if (rule.luhn && looksLikeNpi(file, col)) filters.push({ type: 'npi_luhn', column });
-
-    if (rule.kind === 'number' && (rule.min !== '' || rule.max !== '')) {
-      const f = { type: 'range', column };
-      if (rule.min !== '') f.min = Number(rule.min);
-      if (rule.max !== '') f.max = Number(rule.max);
+  if (kind === 'number' && (condition.min !== '' || condition.max !== '')) {
+    const f = { type: 'range', column };
+    if (condition.min !== '') f.min = Number(condition.min);
+    if (condition.max !== '') f.max = Number(condition.max);
+    filters.push(f);
+  } else if (kind === 'date') {
+    const start = toIsoDate(condition.start);
+    const end = toIsoDate(condition.end);
+    if (start || end) {
+      const f = { type: 'date_range', column };
+      if (start) f.start = start;
+      if (end) f.end = end;
       filters.push(f);
-    } else if (rule.kind === 'date') {
-      const start = toIsoDate(rule.start);
-      const end = toIsoDate(rule.end);
-      if (start || end) {
-        const f = { type: 'date_range', column };
-        if (start) f.start = start;
-        if (end) f.end = end;
-        filters.push(f);
-      }
-    } else if ((rule.values || []).length) {
-      filters.push({ type: 'value_in', column, values: rule.values });
     }
+  } else if (kind !== 'number' && kind !== 'date' && (condition.values || []).length) {
+    filters.push({ type: 'value_in', column, values: condition.values });
   }
 
   return filters;
+}
+
+/**
+ * Build `filter_groups`: one group per filtered column, holding that column's
+ * conditions and how they combine.
+ *
+ * Every configured rule is sent, not just the one currently selected in the
+ * dropdown: the dropdown chooses what you are *editing*, and a filter you set
+ * on another column is still a filter you asked for.
+ */
+export function buildFilterGroups(file) {
+  const rules = (file.filterConfig || {}).rules || {};
+  const groups = [];
+
+  for (const col of Object.keys(rules)) {
+    const rule = normalizeRule(rules[col]);
+    const conditions = rule.conditions
+      .filter((c) => conditionIsSet(c, rule.kind))
+      .map((c) => ({ filters: conditionFilters(file, col, rule.kind, c) }))
+      .filter((c) => c.filters.length);
+    if (conditions.length) groups.push({ mode: rule.mode, conditions });
+  }
+
+  return groups;
+}
+
+/**
+ * The flat projection of the groups, which is what the API stores as `filters`.
+ * Sent alongside the groups so nothing that reads the flat list has to know
+ * about the nesting.
+ */
+export function buildFilters(file) {
+  return buildFilterGroups(file).flatMap((g) => g.conditions.flatMap((c) => c.filters));
+}
+
+/**
+ * "all" keeps a row only when every filter accepts it; "any" keeps it when at
+ * least one does. Defaults to "all", which is what the engine did before the
+ * mode existed.
+ */
+export function buildFilterMode(file) {
+  return file.filterConfig?.mode === 'any' ? 'any' : 'all';
 }
 
 /** Build `granularity` from the Granularity tab, or null when incomplete. */
@@ -253,7 +467,14 @@ export function buildSpec(file) {
   const spec = {
     config_metadata: file.category ? { category: file.category } : {},
     live_updates: buildLiveUpdates(file),
+    // Both forms are sent: the groups drive the engine, and the flat list is
+    // their projection, so a backend that predates groups still filters - just
+    // without the per-column nesting.
     filters: buildFilters(file),
+    filter_groups: buildFilterGroups(file),
+    // Always sent, so switching back to "all" is recorded rather than leaving
+    // the previously committed "any" in place.
+    filter_mode: buildFilterMode(file),
   };
   const granularity = buildGranularity(file);
   if (granularity) spec.granularity = granularity;

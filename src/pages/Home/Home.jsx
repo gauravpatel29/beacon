@@ -286,7 +286,7 @@ function Home() {
                 Get Started <span aria-hidden="true">→</span>
               </button>
               <button className="btn btn-secondary" onClick={openWorkflowDialog}>Continue Workflow</button>
-              <button className="btn btn-tertiary" >AI Integration</button>
+              <button className="btn btn-tertiary" >Interact with Workflow</button>
             </div>
           </div>
 
@@ -403,7 +403,7 @@ function Home() {
                 <p className="workflow-empty-state">Loading workflows…</p>
               ) : visibleWorkflows.length === 0 ? (
                 <p className="workflow-empty-state">
-                  {workflows.length === 0 ? 'No saved workflows yet — create one to get started.' : 'No workflows match your search.'}
+                  {workflows.length === 0 ? 'No saved workflows yet. Create one to get started.' : 'No workflows match your search.'}
                 </p>
               ) : (
                 <div className="workflow-list">

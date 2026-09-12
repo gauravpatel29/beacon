@@ -148,6 +148,74 @@ export const getColumnValues = (workflowId, filename, column, q = '', limit = 50
       `?column=${encodeURIComponent(column)}&q=${encodeURIComponent(q)}&limit=${limit}`
   );
 
+// ─── Data Review (EDA) ───────────────────────────────────────────────────
+// These post the CSV itself rather than naming a dataset. That is deliberate:
+// the screen lets the user exclude outlier rows locally, and the analysis has
+// to run on what they are actually looking at. `routers/v2_review.py` is the
+// name-based equivalent for callers that do not need that.
+const edaPost = (endpoint, payload) =>
+  request(`/api/eda/${endpoint}`, { method: 'POST', ...json(payload) });
+
+/** Summary table (with control totals), trend series and per-geo breakdown. */
+export const edaStats = (payload) => edaPost('stats', payload);
+
+/** Non-zero share per metric — which tactics are too sparse to model. */
+export const edaSparsity = (payload) => edaPost('sparsity', payload);
+
+/** Binned distribution of one numeric column. */
+export const edaHistogram = (payload) => edaPost('histogram', payload);
+
+/** Scatter of two columns, with r and a least-squares trendline. */
+export const edaScatter = (payload) => edaPost('scatter', payload);
+
+/** Binned average of Y against X — the response shape before any model. */
+export const edaPoorMansCurve = (payload) => edaPost('poor-mans-curve', payload);
+
+/** IQR or Z-score outliers, with the bounds used and the flagged rows. */
+export const edaDetectOutliers = (payload) => edaPost('detect-outliers', payload);
+
+/** The dataset with flagged rows dropped. Returns CSV; writes nothing. */
+export const edaRemoveOutliers = (payload) => edaPost('remove-outliers', payload);
+
+/** Metrics aggregated by week or month. */
+export const edaTrendRollup = (payload) => edaPost('trend-rollup', payload);
+
+/** Cross-correlation of X against Y across time lags. */
+export const edaLagCorrelation = (payload) => edaPost('lag-correlation', payload);
+
+// ─── Correlation & multicollinearity ─────────────────────────────────────
+// Same csv_data contract as the EDA engines. These replace a browser-side
+// implementation: VIF in particular needs a real least-squares fit, and the
+// hand-rolled normal equations it used went singular on collinear inputs -
+// which is exactly the case VIF exists to measure.
+const corrPost = (endpoint, payload) =>
+  request(`/api/correlation/${endpoint}`, { method: 'POST', ...json(payload) });
+
+/** Pairwise correlation matrix. -> { matrix, columns } */
+export const correlationMatrix = (payload) => corrPost('matrix', payload);
+
+/** Variance inflation factors. -> { vif: [{ variable, VIF, status }] } */
+export const computeVIF = (payload) => corrPost('vif', payload);
+
+/** Pairs above a threshold. -> { pairs: [{ feature1, feature2, corr }] } */
+export const getHighCorrPairs = (payload) => corrPost('high-pairs', payload);
+
+/**
+ * Which variables a removal would drop, and why - without changing anything.
+ * -> { pairs: [{ feature1, feature2, correlation, will_drop, will_keep, reason }],
+ *      dropped, kept, total_pairs, total_dropped, total_kept }
+ */
+export const previewRemoval = (payload) => corrPost('preview-removal', payload);
+
+/** Apply the removal. Returns the REDUCED dataset as csv_data. */
+export const applyRemoval = (payload) => corrPost('apply-removal', payload);
+
+/** Groups of mutually correlated variables. -> { clusters: [[col, col], …] } */
+export const findClusters = (payload) => corrPost('find-clusters', payload);
+
+/** Apply the combination. Returns the COMBINED dataset as csv_data. */
+export const applyCombination = (payload) => corrPost('apply-combination', payload);
+
 /** Dry run: applies the manifest to the stored bytes and stores nothing. */
 export const previewSpec = (workflowId, filename, spec) =>
   request(

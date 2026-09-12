@@ -90,6 +90,19 @@ button {
   background: none;
 }
 
+/* A disabled control should not look clickable. Deliberately low specificity
+   (one element + one pseudo-class) so the per-component rules that show a
+   wait cursor during an in-flight request still win. */
+button:disabled {
+  cursor: not-allowed;
+}
+
+/* Divs and spans wired up as controls. They get no cursor from the rule above
+   because they are not buttons. */
+[role="button"]:not(:disabled) {
+  cursor: pointer;
+}
+
 ul {
   list-style: none;
 }

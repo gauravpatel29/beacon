@@ -22,6 +22,10 @@ export default defineConfig(({ mode }) => {
       proxy: {
         '/v1': { target: BACKEND, changeOrigin: true },
         '/v2': { target: BACKEND, changeOrigin: true },
+        // Data Review's engines. Same FastAPI app, older prefix: these take the
+        // CSV in the body rather than resolving a dataset by name, which is
+        // what lets the screen analyse a row set the user has filtered locally.
+        '/api': { target: BACKEND, changeOrigin: true },
       },
     },
   }

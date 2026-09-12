@@ -339,7 +339,7 @@ function Datastitching() {
   const shownPreview = draft.activePreview
     ? {
         heading: previewedCard
-          ? `Step ${previewedCard.step} result — ${previewedCard.left} + ${previewedCard.right}`
+          ? `Step ${previewedCard.step} result: ${previewedCard.left} + ${previewedCard.right}`
           : null,
         isLoading: draft.activePreview.isLoading,
         error: draft.activePreview.error,
@@ -348,7 +348,7 @@ function Datastitching() {
     : draft.generatedArd
     ? {
         heading: `Generated ${draft.generatedArd.filename}` +
-          (draft.generatedArd.version ? ` — version ${draft.generatedArd.version}` : ''),
+          (draft.generatedArd.version ? ` (version ${draft.generatedArd.version})` : ''),
         isLoading: false,
         error: null,
         data: draft.generatedArd,
@@ -504,7 +504,7 @@ function Datastitching() {
                     {card.join === 'cross' ? (
                       <>
                         Every combination of <strong>{card.left}</strong> and{' '}
-                        <strong>{card.right}</strong> — no keys
+                        <strong>{card.right}</strong>, no keys
                       </>
                     ) : (
                       <>
@@ -654,7 +654,7 @@ function SingleJoinModal({ files, selectedFileList, grainLabel, mode, stepIndex,
   const usedFilenames = (side) => {
     const used = new Set();
     existingSteps.forEach((s, i) => {
-      if (i === stepIndex) return; // editing this step — don't exclude its own current values
+      if (i === stepIndex) return; // editing this step, so do not exclude its own current values
       if (s.leftFile) used.add(s.leftFile);
       if (s.rightFile) used.add(s.rightFile);
     });

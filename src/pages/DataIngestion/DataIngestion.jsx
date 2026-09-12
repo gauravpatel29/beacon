@@ -21,8 +21,14 @@ import {
   buildLiveUpdates,
   buildSpec,
   clampDtype,
+  conditionIsSet,
+  emptyCondition,
   emptyRule,
   looksLikeNpi,
+  normalizeRule,
+  restoreFilterGroups,
+  restoreFilterMode,
+  restoreGranularity,
   ruleIsSet,
   humanFormat,
   localProblems,
@@ -104,6 +110,25 @@ const GRAN_OPTIONS = {
 
 const TAB_ORDER = ['mapping', 'standardize', 'filter', 'granularity'];
 
+/**
+ * Has this dataset ever been applied?
+ *
+ * A freshly uploaded file carries an empty spec. Anything in `live_updates`,
+ * `filters` or `granularity` means someone configured it and pressed Apply.
+ */
+function hasCommittedSpec(dataset) {
+  const spec = dataset?.spec || {};
+  const lu = spec.live_updates || {};
+  return Boolean(
+    (lu.column_drops || []).length ||
+    (lu.column_renames || []).length ||
+    (lu.dtype_changes || []).length ||
+    (lu.date_formats || []).length ||
+    (spec.filters || []).length ||
+    spec.granularity
+  );
+}
+
 // Guess a category from the filename the user can always override it
 // via the dropdown, this just saves them a click for the common cases.
 function suggestCategory(filename) {
@@ -154,7 +179,9 @@ function ControlTotalsRibbon({ stats, isOpen, onToggle }) {
           </span>
         </span>
         <span className="control-totals-toggle">
-          {error ? 'Unavailable' : isLoading ? 'Loading…' : isOpen ? 'Hide null %' : 'Show null %'}
+          {/* "detail" rather than "null %": the panel carries the control
+              totals and the missing counts as well now. */}
+          {error ? 'Unavailable' : isLoading ? 'Loading…' : isOpen ? 'Hide detail' : 'Show detail'}
           {!error && !isLoading && (
             <span className={`control-totals-caret${isOpen ? ' is-open' : ''}`} aria-hidden="true">▾</span>
           )}
@@ -167,6 +194,13 @@ function ControlTotalsRibbon({ stats, isOpen, onToggle }) {
         <div
           className={`control-totals-panel${columns.length > NULL_ROWS_BEFORE_SCROLL ? ' is-scrollable' : ''}`}
         >
+          <div className="null-row null-row-head">
+            <span>Column</span>
+            <span>Nulls</span>
+            <span className="null-row-pct">%</span>
+            <span className="null-row-count">Missing</span>
+            <span className="null-row-total">Control total</span>
+          </div>
           {columns.map((col) => {
             const { bar, tint } = nullPctColor(col.null_pct);
             return (
@@ -183,6 +217,12 @@ function ControlTotalsRibbon({ stats, isOpen, onToggle }) {
                 </span>
                 <span className="null-row-count">
                   {col.null_count.toLocaleString()} null
+                </span>
+                {/* The same figure the Data Review summary calls a control
+                    total: the column sum, for reconciling against the source
+                    system. Only numeric columns have one. */}
+                <span className="null-row-total" title={col.control_total != null ? 'Sum of this column' : 'Not a numeric column'}>
+                  {col.control_total != null ? col.control_total.toLocaleString() : '\u2014'}
                 </span>
               </div>
             );
@@ -321,7 +361,6 @@ function DataIngestion() {
   const [isDragging, setIsDragging] = useState(false);
   const [activeTab, setActiveTab] = useState('mapping'); // mapping | standardize | filter | granularity
   const [visitedTabs, setVisitedTabs] = useState(new Set(['mapping']));
-  const [hasClickedNext, setHasClickedNext] = useState(false);
   const [isApplying, setIsApplying] = useState(false);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [isFiltering, setIsFiltering] = useState(false);
@@ -366,7 +405,6 @@ function DataIngestion() {
   const hasVisitedAllTabs = TAB_ORDER.every((t) => visitedTabs.has(t));
 
   const handleNext = () => {
-    setHasClickedNext(true);
     const currentIndex = TAB_ORDER.indexOf(activeTab);
     const nextTab = TAB_ORDER[Math.min(currentIndex + 1, TAB_ORDER.length - 1)];
     setActiveTab(nextTab);
@@ -405,14 +443,24 @@ function DataIngestion() {
           const spec = dataset.spec || {};
           const updates = spec.live_updates || {};
           const dropped = new Set(updates.column_drops || []);
+          const renameMap = Object.fromEntries(
+            (updates.column_renames || []).map((item) => [item.from, item.to])
+          );
           const typeCastMap = Object.fromEntries(profile.map((p) => [p.column, clampDtype(p.suggested_dtype)]));
           for (const change of updates.dtype_changes || []) typeCastMap[change.column] = change.to;
           return {
             id: `file-${++fileIdCounter}`, filename: dataset.filename, name: dataset.filename, workflowId,
             category: spec.config_metadata?.category || suggestCategory(dataset.filename),
-            columns: rawColumns, previewRows: currentDataset.preview || [], totalRows: dataset.row_count || 0,
+            columns: rawColumns,
+            previewRows: currentDataset.preview || [],
+            // `dataset.columns` is the DERIVED column list. The preview rows are
+            // derived too, so using rawColumns here rendered a table of empty
+            // cells for any file with a rename or a drop.
+            previewColumns: dataset.columns || rawColumns,
+            previewRowCount: dataset.row_count,
+            totalRows: dataset.row_count || 0,
             isParsing: false, parseError: null, selectedCols: rawColumns.filter((column) => !dropped.has(column)),
-            renameMap: Object.fromEntries((updates.column_renames || []).map((item) => [item.from, item.to])),
+            renameMap,
             profile,
             typeCastMap,
             // Fall back to the detected dates when nothing has been committed
@@ -426,15 +474,29 @@ function DataIngestion() {
               ? Object.fromEntries(updates.date_formats.map((item) => [item.column, item.from]))
               : Object.fromEntries(profile.filter((p) => p.suggested_date_from)
                   .map((p) => [p.column, p.suggested_date_from])),
-            // The Filter tab edits one column at a time (`activeColumn`) but keeps a
-          // rule per column, so switching the dropdown never discards a filter.
-          filterConfig: { activeColumn: '', rules: {} },
-            granularityConfig: { dateCol: '', geoCol: '', detected: null, target: '', numOps: {} },
+            // Read back from the committed spec, not reset to empty. These two
+            // were the only parts of the manifest that did not survive a
+            // refresh: the tabs came up blank, and the next Apply then sent an
+            // empty `filters`/`granularity` and wiped what was stored.
+            filterConfig: {
+              activeColumn: '',
+              rules: restoreFilterGroups(spec, renameMap),
+              mode: restoreFilterMode(spec),
+            },
+            granularityConfig: restoreGranularity(spec.granularity, renameMap),
           };
         }));
         if (!cancelled) {
           setUploadedFiles(files);
           setSelectedFileId(files[0]?.id || null);
+          // The four tabs are a first-run walkthrough: Apply only appears once
+          // they have all been seen. That walk already happened in the session
+          // that configured these files, and `visitedTabs` does not survive a
+          // refresh - so on resume the Apply button simply disappeared from a
+          // file that was already fully configured.
+          if ((response.items || []).some(hasCommittedSpec)) {
+            setVisitedTabs(new Set(TAB_ORDER));
+          }
         }
       } catch (err) {
         if (!cancelled) window.alert(err instanceof ApiError ? err.text : 'Could not load workflow files.');
@@ -478,7 +540,7 @@ function DataIngestion() {
             .map((p) => [p.column, p.suggested_date_from])),
           // The Filter tab edits one column at a time (`activeColumn`) but keeps a
           // rule per column, so switching the dropdown never discards a filter.
-          filterConfig: { activeColumn: '', rules: {} },
+          filterConfig: { activeColumn: '', rules: {}, mode: 'all' },
           granularityConfig: { dateCol: '', geoCol: '', detected: null, target: '', numOps: {} },
         };
       }));
@@ -585,18 +647,42 @@ function DataIngestion() {
       filterConfig: { ...file.filterConfig, activeColumn: column },
     });
 
-  const setFilterRuleField = (file, key, value) => {
+  // Every write to the active column's rule goes through here, so the rule is
+  // normalised to the condition shape in exactly one place.
+  const updateActiveRule = (file, change) => {
     const column = file.filterConfig.activeColumn;
     if (!column) return;
     const kind = filterKindOf(file, statsFor, column);
-    const current = file.filterConfig.rules?.[column] || emptyRule(kind);
+    const current = normalizeRule(file.filterConfig.rules?.[column], kind);
+    const next = { ...current, kind, ...change(current) };
     updateFileConfig(file.id, {
       filterConfig: {
         ...file.filterConfig,
-        rules: { ...file.filterConfig.rules, [column]: { ...current, kind, [key]: value } },
+        rules: { ...file.filterConfig.rules, [column]: next },
       },
     });
   };
+
+  const setConditionField = (file, index, key, value) =>
+    updateActiveRule(file, (rule) => ({
+      conditions: rule.conditions.map((c, i) => (i === index ? { ...c, [key]: value } : c)),
+    }));
+
+  const addCondition = (file) =>
+    updateActiveRule(file, (rule) => ({ conditions: [...rule.conditions, emptyCondition()] }));
+
+  // Removing the last one leaves a blank condition rather than none: the column
+  // is still selected, and a rule with no conditions has nothing to render.
+  const removeCondition = (file, index) =>
+    updateActiveRule(file, (rule) => {
+      const kept = rule.conditions.filter((_, i) => i !== index);
+      return { conditions: kept.length ? kept : [emptyCondition()] };
+    });
+
+  const setColumnFilterMode = (file, mode) => updateActiveRule(file, () => ({ mode }));
+
+  const setFilterMode = (file, mode) =>
+    updateFileConfig(file.id, { filterConfig: { ...file.filterConfig, mode } });
 
   const clearFilterRule = (file, column) => {
     const rules = { ...file.filterConfig.rules };
@@ -776,9 +862,10 @@ function DataIngestion() {
 
   const activeFilterColumn = selectedFile?.filterConfig?.activeColumn || '';
   const activeFilterKind = activeFilterColumn ? filterKinds[activeFilterColumn] : null;
-  const activeFilterRule =
-    (activeFilterColumn && selectedFile.filterConfig.rules?.[activeFilterColumn]) ||
-    emptyRule(activeFilterKind || 'string');
+  const activeFilterRule = activeFilterColumn
+    ? normalizeRule(selectedFile.filterConfig.rules?.[activeFilterColumn],
+                    activeFilterKind || 'string')
+    : emptyRule(activeFilterKind || 'string');
   const activeFilterIsNpi = Boolean(activeFilterColumn) && looksLikeNpi(selectedFile, activeFilterColumn);
   const activeFilterBounds = activeFilterColumn
     ? statsByColumn[renamedName(selectedFile, activeFilterColumn)] || null
@@ -951,7 +1038,9 @@ function DataIngestion() {
                   <div className="mapping-top-actions">
                     {applyMessage && <p className="apply-config-message" role="status">{applyMessage}</p>}
 
-                    {hasClickedNext && (
+                    {/* Position in the walkthrough, not "have you pressed Next
+                        this session" - which did not survive a refresh. */}
+                    {activeTab !== TAB_ORDER[0] && (
                       <button className="mapping-btn secondary" onClick={handleBack}>
                         Back
                       </button>
@@ -961,13 +1050,21 @@ function DataIngestion() {
                       {isPreviewing ? 'Previewing changes…' : 'Preview changes'}
                     </button>
 
-                    {hasVisitedAllTabs ? (
+                    {activeTab !== TAB_ORDER[TAB_ORDER.length - 1] && (
+                      <button
+                        className={`mapping-btn ${hasVisitedAllTabs ? 'secondary' : 'primary'}`}
+                        onClick={handleNext}
+                      >
+                        Next
+                      </button>
+                    )}
+
+                    {/* Shown alongside Next, not instead of it: once every tab
+                        has been seen the configuration can be applied from any
+                        of them, and the user can still move between tabs. */}
+                    {hasVisitedAllTabs && (
                       <button className="mapping-btn primary" disabled={!selectedFile || isApplying || isPreviewing || isFiltering} onClick={() => applyFile(selectedFile)}>
                         {isApplying ? 'Applying configurations…' : 'Apply configuration'}
-                      </button>
-                    ) : (
-                      <button className="mapping-btn primary" onClick={handleNext}>
-                        Next
                       </button>
                     )}
                   </div>
@@ -1132,6 +1229,38 @@ function DataIngestion() {
 
                 {activeTab === 'filter' && (
                   <>
+                    {/* Shown from the first filter on. It only changes the result
+                        once there are two, but a control that appears only after
+                        you have already built both is a control nobody finds. */}
+                    {activeFilterSummary.length > 0 && (
+                      <div className="filter-mode-row">
+                        <p className="filter-field-label">
+                          {activeFilterSummary.length > 1
+                            ? `Combine ${activeFilterSummary.length} filtered columns with`
+                            : 'Combine filtered columns with'}
+                        </p>
+                        <div className="filter-mode-toggle">
+                          <button
+                            type="button"
+                            className={selectedFile.filterConfig.mode !== 'any' ? 'active' : ''}
+                            onClick={() => setFilterMode(selectedFile, 'all')}
+                          >AND</button>
+                          <button
+                            type="button"
+                            className={selectedFile.filterConfig.mode === 'any' ? 'active' : ''}
+                            onClick={() => setFilterMode(selectedFile, 'any')}
+                          >OR</button>
+                        </div>
+                        <p className="filter-mode-hint">
+                          {activeFilterSummary.length < 2
+                            ? 'Takes effect once a second column is filtered.'
+                            : selectedFile.filterConfig.mode === 'any'
+                              ? 'Keep a row if it matches at least one of these columns.'
+                              : 'Keep a row only if it matches every one of these columns.'}
+                        </p>
+                      </div>
+                    )}
+
                     <div className="filter-picker">
                       <p className="filter-field-label">Column</p>
                       <select
@@ -1156,8 +1285,21 @@ function DataIngestion() {
                       </p>
                     )}
 
-                    {activeFilterColumn && (
-                      <div className="filter-rule">
+                    {activeFilterColumn && activeFilterRule.conditions.map((condition, index) => (
+                      <div className="filter-rule" key={index}>
+                        {activeFilterRule.conditions.length > 1 && (
+                          <div className="filter-condition-head">
+                            <p className="filter-condition-label">Condition {index + 1}</p>
+                            <button
+                              type="button"
+                              className="filter-condition-remove"
+                              onClick={() => removeCondition(selectedFile, index)}
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        )}
+
                         {activeFilterKind === 'number' && (
                           <>
                             <div className="filter-grid">
@@ -1167,8 +1309,8 @@ function DataIngestion() {
                                   type="number"
                                   className="filter-input"
                                   placeholder={activeFilterBounds?.min ?? 'No lower bound'}
-                                  value={activeFilterRule.min}
-                                  onChange={(e) => setFilterRuleField(selectedFile, 'min', e.target.value)}
+                                  value={condition.min}
+                                  onChange={(e) => setConditionField(selectedFile, index, 'min', e.target.value)}
                                 />
                               </div>
                               <div>
@@ -1177,8 +1319,8 @@ function DataIngestion() {
                                   type="number"
                                   className="filter-input"
                                   placeholder={activeFilterBounds?.max ?? 'No upper bound'}
-                                  value={activeFilterRule.max}
-                                  onChange={(e) => setFilterRuleField(selectedFile, 'max', e.target.value)}
+                                  value={condition.max}
+                                  onChange={(e) => setConditionField(selectedFile, index, 'max', e.target.value)}
                                 />
                               </div>
                             </div>
@@ -1199,8 +1341,8 @@ function DataIngestion() {
                                 <input
                                   type="date"
                                   className="filter-input"
-                                  value={activeFilterRule.start}
-                                  onChange={(e) => setFilterRuleField(selectedFile, 'start', e.target.value)}
+                                  value={condition.start}
+                                  onChange={(e) => setConditionField(selectedFile, index, 'start', e.target.value)}
                                 />
                               </div>
                               <div>
@@ -1208,8 +1350,8 @@ function DataIngestion() {
                                 <input
                                   type="date"
                                   className="filter-input"
-                                  value={activeFilterRule.end}
-                                  onChange={(e) => setFilterRuleField(selectedFile, 'end', e.target.value)}
+                                  value={condition.end}
+                                  onChange={(e) => setConditionField(selectedFile, index, 'end', e.target.value)}
                                 />
                               </div>
                             </div>
@@ -1227,16 +1369,16 @@ function DataIngestion() {
                             workflowId={selectedFile.workflowId}
                             filename={selectedFile.filename}
                             column={renamedName(selectedFile, activeFilterColumn)}
-                            selected={activeFilterRule.values}
-                            onChange={(values) => setFilterRuleField(selectedFile, 'values', values)}
+                            selected={condition.values}
+                            onChange={(values) => setConditionField(selectedFile, index, 'values', values)}
                           />
                         )}
 
                         <label className="filter-checkbox-row">
                           <input
                             type="checkbox"
-                            checked={activeFilterRule.notNull}
-                            onChange={(e) => setFilterRuleField(selectedFile, 'notNull', e.target.checked)}
+                            checked={condition.notNull}
+                            onChange={(e) => setConditionField(selectedFile, index, 'notNull', e.target.checked)}
                           />
                           Drop rows where this column is empty
                         </label>
@@ -1245,14 +1387,61 @@ function DataIngestion() {
                           <label className="filter-checkbox-row">
                             <input
                               type="checkbox"
-                              checked={activeFilterRule.luhn}
-                              onChange={(e) => setFilterRuleField(selectedFile, 'luhn', e.target.checked)}
+                              checked={condition.luhn}
+                              onChange={(e) => setConditionField(selectedFile, index, 'luhn', e.target.checked)}
                             />
                             Apply Luhn algorithm validation (checks 10-digit US NPI numbers)
                           </label>
                         )}
                       </div>
+                    ))}
+
+                    {activeFilterColumn && (
+                      <div className="filter-condition-foot">
+                        <button
+                          type="button"
+                          className="filter-add-condition"
+                          onClick={() => addCondition(selectedFile)}
+                        >
+                          Add another condition
+                        </button>
+
+                        {/* Within one column. Two conditions on the same column
+                            are almost always alternatives, but the choice is the
+                            user's and AND stays the default. */}
+                        {activeFilterRule.conditions.length > 1 && (
+                          <div className="filter-mode-inline">
+                            <span className="filter-mode-inline-label">
+                              Combine these on {renamedName(selectedFile, activeFilterColumn)} with
+                            </span>
+                            <div className="filter-mode-toggle">
+                              <button
+                                type="button"
+                                className={activeFilterRule.mode !== 'any' ? 'active' : ''}
+                                onClick={() => setColumnFilterMode(selectedFile, 'all')}
+                              >AND</button>
+                              <button
+                                type="button"
+                                className={activeFilterRule.mode === 'any' ? 'active' : ''}
+                                onClick={() => setColumnFilterMode(selectedFile, 'any')}
+                              >OR</button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     )}
+
+                    {activeFilterColumn
+                      && activeFilterRule.conditions.length > 1
+                      && activeFilterRule.mode !== 'any'
+                      && activeFilterRule.conditions.filter((c) => conditionIsSet(c, activeFilterRule.kind)).length > 1
+                      && (
+                        <p className="filter-bounds-hint">
+                          With AND a row must satisfy every condition above. Two ranges on one
+                          column rarely overlap, so this often matches nothing. Switch to OR to
+                          keep rows matching either.
+                        </p>
+                      )}
 
                     {/* Every configured rule is sent on Apply, not just the one on
                         screen, so the ones out of view have to stay visible somewhere. */}

@@ -65,11 +65,33 @@
   margin-bottom: var(--spacing-sm);
 }
 
+/* Five children: the ARD picker, Date Key, Geo Key, KPI, and Recalculate.
+   The template must name all five - a missing track pushes the last child onto
+   an implicit second row, which is what put the button under the ARD picker
+   when the KPI field was added. */
 .ard-select-row {
   display: grid;
-  grid-template-columns: 2fr 1fr 1fr auto;
+  grid-template-columns: 1.6fr 1fr 1fr 1fr auto;
   gap: 0.7rem;
   align-items: end;
+}
+
+/* Grid items default to min-width:auto, so a long filename in the ARD select
+   would push the row wider than its card instead of the select shrinking. */
+.ard-select-row > * {
+  min-width: 0;
+}
+
+/* Below this the five controls are too narrow to read; two rows of readable
+   fields beat one row of unreadable ones. */
+@media (max-width: 1100px) {
+  .ard-select-row {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .recalc-btn {
+    grid-column: 1 / -1;
+  }
 }
 
 .ard-select-field label {
@@ -108,7 +130,21 @@
 }
 
 /* ---- Tabs ---- */
+/* Pinned once it reaches the top of the scroll area, so the tabs stay reachable
+   from anywhere in a long tab.
+
+   The scroller is .page-content in Main_Layout (overflow-y: auto), not the
+   window, so top:0 pins this just under the navbar rather than under the
+   viewport edge. Nothing between here and that scroller sets overflow, which is
+   what would otherwise make sticky silently do nothing.
+
+   The background must stay opaque: content scrolls underneath this, and the
+   card shadow is what separates the two. */
 .review-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+
   display: flex;
   gap: 0.3rem;
   overflow-x: auto;
@@ -117,6 +153,14 @@
   box-shadow: var(--shadow-card);
   padding: 0.4rem;
   margin-bottom: var(--spacing-md);
+}
+
+/* Tabs, sub-tabs and metric pills are divs and spans with onClick, so they
+   need this spelled out; the global button rule does not reach them. */
+.review-tab,
+.review-subtab,
+.metric-pill {
+  cursor: pointer;
 }
 
 .review-tab {
@@ -348,12 +392,25 @@
 }
 
 /* ---- Outlier tab ---- */
+/* Four children: Variable, Detection Strategy, Threshold, Re-Scan. The
+   Detection Strategy select was added later and the template was not widened,
+   so the button wrapped onto a second row. */
 .outlier-controls-row {
   display: grid;
-  grid-template-columns: 1.4fr 1fr auto;
+  grid-template-columns: 1fr 1fr 1fr auto;
   gap: 0.7rem;
   align-items: end;
   margin-bottom: var(--spacing-md);
+}
+
+.outlier-controls-row > * {
+  min-width: 0;
+}
+
+@media (max-width: 1100px) {
+  .outlier-controls-row {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 .outlier-stat-row {
@@ -715,4 +772,305 @@
   .outlier-stat-row {
     grid-template-columns: 1fr;
   }
+}
+/* ---- Sortable summary headers ---- */
+.sortable-th {
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.sortable-th:hover {
+  background-color: #eef1f6;
+}
+
+/* ---- Poor Man's Curve verdict row ---- */
+.curve-verdict-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 0.85rem;
+}
+
+/* Same shape as .role-badge / .health-badge, so the three read as one family. */
+.shape-badge {
+  font-size: 0.72rem;
+  font-weight: var(--font-weight-semibold);
+  padding: 0.2rem 0.6rem;
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+  background-color: #eef1f6;
+  color: var(--color-text-secondary);
+}
+
+/* Saturating is the shape a marketer hopes to see; convex is worth a second
+   look; linear means the data has not revealed a shape yet, so it stays the
+   neutral grey above. Palette matches .health-badge exactly. */
+.shape-badge.saturating {
+  background-color: #eafaf0;
+  color: #1f8a4c;
+}
+
+.shape-badge.convex {
+  background-color: #fdf3e3;
+  color: #c07a1f;
+}
+
+.curve-stat {
+  font-size: 0.74rem;
+  color: var(--color-text-secondary);
+}
+
+/* ---- Confirm modal ----
+   Same overlay, footer and button treatment as the Data Stitching modal, so a
+   confirmation reads the same wherever it appears in the app. */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(20, 30, 50, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  padding: var(--spacing-md);
+}
+
+.confirm-modal {
+  background-color: var(--color-white);
+  border-radius: var(--radius-lg);
+  width: 100%;
+  max-width: 460px;
+  overflow: hidden;
+}
+
+.confirm-modal-title {
+  font-size: 0.95rem;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+  padding: var(--spacing-lg) var(--spacing-lg) 0.4rem;
+}
+
+.confirm-modal-body {
+  font-size: var(--font-size-small);
+  color: var(--color-text-secondary);
+  line-height: 1.55;
+  padding: 0 var(--spacing-lg) var(--spacing-lg);
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  padding: var(--spacing-sm) var(--spacing-lg);
+  border-top: 1px solid var(--color-border-light);
+}
+
+.modal-btn {
+  padding: 0.6rem 1.3rem;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-small);
+  font-weight: var(--font-weight-semibold);
+  border: 1px solid var(--color-border);
+  background-color: var(--color-white);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.modal-btn.primary {
+  background: linear-gradient(90deg, var(--color-primary) 0%, var(--color-primary-dark) 100%);
+  color: var(--color-white);
+  border: none;
+}
+
+/* Dropping rows or columns cannot be undone from the server - this dataset
+   only exists in the browser - so those confirmations read as destructive. */
+.modal-btn.primary.danger {
+  background: #c0392b;
+}
+
+.modal-btn:hover {
+  opacity: 0.92;
+}
+
+/* ---- Chart tooltip ----
+   The box design from the hand-drawn charts, kept when the charts moved to
+   recharts. recharts positions its own wrapper and handles flipping near the
+   edges, so this is static inside it - no offsets of our own. */
+.chart-tooltip {
+  min-width: 9rem;
+  max-width: 15rem;
+  padding: 0.5rem 0.65rem;
+  background-color: var(--color-white);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 6px 18px rgba(20, 30, 50, 0.14);
+}
+
+.chart-tooltip-title {
+  font-size: 0.72rem;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+  margin-bottom: 0.35rem;
+  white-space: nowrap;
+}
+
+.chart-tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.chart-tooltip-swatch {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.chart-tooltip-label {
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 9rem;
+}
+
+.chart-tooltip-value {
+  margin-left: auto;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+}
+
+/* recharts draws a focus outline on the SVG when the chart takes focus. */
+.recharts-wrapper:focus,
+.recharts-surface:focus {
+  outline: none;
+}
+
+/* ---- Correlation: removal pair cards ---- */
+.removal-pair-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  background-color: #fbfcfe;
+  margin-bottom: 0.55rem;
+}
+
+.removal-pair-title {
+  font-size: 0.82rem;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.removal-pair-reason {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  margin-top: 0.2rem;
+}
+
+/* Dropping a column cannot be undone from this screen, so it reads as
+   destructive - same treatment as the confirm modal's danger action. */
+/* The main action of a sub-tab. Same treatment as .recalc-btn - filled
+   primary - so the primary / outline / destructive hierarchy reads the same
+   wherever it appears on this screen. Outline stays for the secondary action
+   sitting beside it, like Compute VIF Scores. */
+.primary-btn {
+  padding: 0.7rem 1.2rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--color-primary-dark);
+  color: var(--color-white);
+  font-size: 0.82rem;
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+}
+
+.primary-btn:hover {
+  opacity: 0.92;
+}
+
+.primary-btn:disabled {
+  opacity: 0.55;
+}
+
+/* Dropping one column is the same destructive action as excluding rows, just
+   scoped smaller - so it shares the treatment rather than introducing a second
+   red at a different size. */
+.drop-one-btn {
+  flex-shrink: 0;
+  padding: 0.7rem 1.2rem;
+  border-radius: var(--radius-sm);
+  background-color: #c0392b;
+  color: var(--color-white);
+  font-size: 0.82rem;
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+}
+
+.drop-one-btn:hover {
+  opacity: 0.92;
+}
+
+/* Three VIF severities now, matching the server's own verdict. */
+.vif-flag.warn {
+  background-color: #fdf3e3;
+  color: #c07a1f;
+}
+
+/* ---- Correlation: combination pair cards ---- */
+.combo-pair-card {
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  background-color: #fbfcfe;
+  padding: 0.7rem 0.9rem;
+  margin-top: 0.6rem;
+}
+
+.combo-pair-title {
+  font-size: 0.78rem;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-primary);
+  margin-bottom: 0.4rem;
+}
+
+/* The generated name is editable: a composite still has to be readable in the
+   model output, and SUM_TV_RADIO is a starting point, not a decision. */
+.combo-pair-name {
+  width: 100%;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 0.78rem;
+  font-weight: var(--font-weight-semibold);
+  background-color: var(--color-white);
+}
+
+
+/* ---- Correlation: a treatment's result ---- */
+/* Both apply endpoints return the first rows of the new dataset. Showing them
+   is the difference between "3 columns were dropped" and seeing that they are
+   in fact gone. */
+.treatment-preview {
+  margin-top: var(--spacing-md);
+  padding-top: var(--spacing-md);
+  border-top: 1px solid var(--color-border-light);
+}
+
+.treatment-preview-title {
+  font-size: 0.82rem;
+  font-weight: var(--font-weight-semibold);
+  color: #1f8a4c;
+  margin-bottom: 0.25rem;
+}
+
+.treatment-preview-meta {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  margin-bottom: var(--spacing-sm);
 }
