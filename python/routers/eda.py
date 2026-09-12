@@ -52,23 +52,50 @@ async def eda_histogram_route(payload: dict):
     try:
         df = _parse_csv(payload["csv_data"])
         col = payload["column"]
+        bin_width_param = payload.get("bin_width")
+        
         vals = pd.to_numeric(df[col], errors="coerce").dropna()
         if len(vals) == 0:
-            return {"counts": [], "bin_edges": [], "bin_labels": [], "mean": 0, "median": 0, "min": 0, "max": 0, "column": col}
+            return {
+                "counts": [], "bin_edges": [], "bin_labels": [],
+                "mean": 0, "median": 0, "min": 0, "max": 0,
+                "bin_width": 1.0, "column": col
+            }
 
         min_val = float(vals.min())
         max_val = float(vals.max())
-        is_integer = (vals % 1 == 0).all()
         val_range = max_val - min_val
 
-        if is_integer and 0 < val_range <= 25:
-            bin_edges = np.arange(min_val, max_val + 2) - 0.5
-            counts, _ = np.histogram(vals, bins=bin_edges)
-            bin_labels = [str(int(x)) for x in np.arange(min_val, max_val + 1)]
+        # User-specified custom bin width
+        if bin_width_param is not None and float(bin_width_param) > 0:
+            bw = float(bin_width_param)
+            bin_edges = np.arange(min_val, max_val + bw, bw)
+            if len(bin_edges) < 2:
+                bin_edges = np.array([min_val, min_val + bw])
+            counts, bin_edges = np.histogram(vals, bins=bin_edges)
         else:
-            num_bins = min(25, max(5, int(len(vals) ** 0.5)))
-            counts, bin_edges = np.histogram(vals, bins=num_bins)
-            bin_labels = [f"{bin_edges[i]:.1f} - {bin_edges[i+1]:.1f}" for i in range(len(counts))]
+            is_integer = (vals % 1 == 0).all()
+            if is_integer and 0 < val_range <= 25:
+                bin_edges = np.arange(min_val, max_val + 2) - 0.5
+                counts, _ = np.histogram(vals, bins=bin_edges)
+                bin_labels = [str(int(x)) for x in np.arange(min_val, max_val + 1)]
+                return {
+                    "counts": counts.tolist(),
+                    "bin_labels": bin_labels,
+                    "bin_edges": bin_edges.tolist(),
+                    "mean": float(vals.mean()),
+                    "median": float(vals.median()),
+                    "min": min_val,
+                    "max": max_val,
+                    "bin_width": 1.0,
+                    "column": col,
+                }
+            else:
+                num_bins = min(50, max(5, int(len(vals) ** 0.5)))
+                counts, bin_edges = np.histogram(vals, bins=num_bins)
+
+        bin_labels = [f"{bin_edges[i]:.2f} - {bin_edges[i+1]:.2f}" for i in range(len(counts))]
+        effective_bw = float(bin_edges[1] - bin_edges[0]) if len(bin_edges) > 1 else (val_range if val_range > 0 else 1.0)
 
         return {
             "counts": counts.tolist(),
@@ -78,6 +105,7 @@ async def eda_histogram_route(payload: dict):
             "median": float(vals.median()),
             "min": min_val,
             "max": max_val,
+            "bin_width": round(effective_bw, 2),
             "column": col,
         }
     except Exception as e:
@@ -151,9 +179,11 @@ async def detect_outliers_route(payload: dict):
     try:
         df = _parse_csv(payload["csv_data"])
         col = payload["column"]
-        method = payload.get("method", "iqr")
-        threshold = float(payload.get("threshold", 1.5))
-        return detect_outliers_engine(df, col, method, threshold)
+        method = payload.get("method", "percentile")
+        threshold = float(payload.get("threshold", 3.0))
+        lp = float(payload.get("lower_percentile", 1.0))
+        up = float(payload.get("upper_percentile", 99.0))
+        return detect_outliers_engine(df, col, method, threshold, lp, up)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -163,9 +193,11 @@ async def remove_outliers_route(payload: dict):
     try:
         df = _parse_csv(payload["csv_data"])
         col = payload["column"]
-        method = payload.get("method", "iqr")
-        threshold = float(payload.get("threshold", 1.5))
-        return remove_outliers_engine(df, col, method, threshold)
+        method = payload.get("method", "percentile")
+        threshold = float(payload.get("threshold", 3.0))
+        lp = float(payload.get("lower_percentile", 1.0))
+        up = float(payload.get("upper_percentile", 99.0))
+        return remove_outliers_engine(df, col, method, threshold, lp, up)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

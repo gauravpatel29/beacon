@@ -1,3 +1,6 @@
+"""
+Core processing utilities – pure Python/Polars/Pandas logic.
+"""
 import re
 import math
 from datetime import datetime, timedelta, date
@@ -669,7 +672,7 @@ def combine_clusters(
 
         df_combined[user_col_name] = combined_series
         new_cols_info.append({"combo_name": user_col_name, "features": valid_cluster, "method": method_str})
-        
+
         if drop_original:
             cols_to_drop = [c for c in valid_cluster if c != user_col_name and c in df_combined.columns]
             df_combined = df_combined.drop(columns=cols_to_drop)
@@ -688,7 +691,7 @@ def apply_weighted_sum_columns(
         col_name = cfg["column_name"]
         sel_cols = [c for c in cfg["columns"] if c in df_out.columns]
         w_dict = cfg.get("weights", {})
-        
+
         series = pd.Series(0.0, index=df_out.index)
         for c in sel_cols:
             w = float(w_dict.get(c, 1.0))
@@ -798,172 +801,480 @@ def run_pca(df: pd.DataFrame, columns: List[str], n_components: int = 2) -> dict
     }
 
 
-def _apply_adstock_simple(series, decay, lag):
-    result = np.array(series, dtype=np.float64)
-    arr = np.array(series, dtype=np.float64)
-    for l in range(1, lag + 1):
-        shifted = np.concatenate([np.zeros(l), arr[:-l]]) if l < len(arr) else np.zeros(len(arr))
-        result += (decay ** l) * shifted
-    return result
+def compute_sparsity_stats(df: pd.DataFrame, metric_cols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    cols = metric_cols or df.select_dtypes(include=[np.number]).columns.tolist()
+    total_rows = len(df)
+    results = []
 
-
-def _transform_for_optuna(df, geo_column, channels_cfg, params):
-    df = df.copy()
-    for cfg in channels_cfg:
-        ch = cfg["name"]
-        has_ads = cfg["has_adstock"]
-        sat_method = cfg.get("sat_method")
-
-        if ch not in df.columns:
+    for col in cols:
+        if col not in df.columns:
             continue
+        series = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        non_zero_count = int((series != 0).sum())
+        zero_count = total_rows - non_zero_count
+        non_zero_pct = round((non_zero_count / total_rows) * 100, 2) if total_rows > 0 else 0.0
+        zero_pct = round((zero_count / total_rows) * 100, 2) if total_rows > 0 else 0.0
 
-        decay = params.get(f"{ch}_decay", 0.5)
-        lag = int(params.get(f"{ch}_lag", 1))
-        power = params.get(f"{ch}_power", 0.5)
-
-        if has_ads:
-            transformed = df.groupby(geo_column)[ch].transform(
-                lambda x: _apply_adstock_simple(x.values, decay, lag)
-            )
+        if non_zero_pct < 10.0:
+            risk = "High Sparsity (<10% active)"
+            status = "critical"
+        elif non_zero_pct < 30.0:
+            risk = "Moderate Sparsity (10-30%)"
+            status = "warning"
         else:
-            transformed = df[ch].copy()
+            risk = "Healthy (>30% active)"
+            status = "healthy"
 
-        if sat_method == "Power":
-            df[f"{ch}_transformed"] = np.power(np.abs(transformed), power)
-        elif sat_method == "Log":
-            df[f"{ch}_transformed"] = np.log1p(np.abs(transformed))
-        else:
-            df[f"{ch}_transformed"] = transformed
+        results.append({
+            "tactic": col,
+            "total_rows": total_rows,
+            "non_zero_count": non_zero_count,
+            "zero_count": zero_count,
+            "non_zero_pct": non_zero_pct,
+            "zero_pct": zero_pct,
+            "risk_label": risk,
+            "status": status,
+        })
 
-    return df
-
-
-def sign_penalty(betas, negative_channels):
-    penalty = 0.0
-    for name, beta in betas.items():
-        if name in negative_channels:
-            if beta > 0:
-                penalty += abs(beta)
-        else:
-            if beta < 0:
-                penalty += abs(beta)
-    return penalty
+    results.sort(key=lambda x: x["non_zero_pct"], reverse=True)
+    return results
 
 
-def magnitude_penalty(betas):
-    return sum(b ** 2 for b in betas.values())
+def compute_poor_mans_curve_data(df: pd.DataFrame, x_col: str, y_col: str, n_bins: int = 12) -> Dict[str, Any]:
+    sub = df[[x_col, y_col]].dropna().copy()
+    sub[x_col] = pd.to_numeric(sub[x_col], errors="coerce")
+    sub[y_col] = pd.to_numeric(sub[y_col], errors="coerce")
+    sub = sub.dropna()
 
+    if len(sub) < 5:
+        return {"binned_curve": [], "scatter_sample": [], "shape_indicator": "Insufficient Data", "x_col": x_col, "y_col": y_col}
 
-def stability_penalty(beta_list):
-    if len(beta_list) < 2:
-        return 0.0
-    beta_df = pd.DataFrame(beta_list)
-    return float(beta_df.var().mean())
+    sub = sub.sort_values(x_col)
 
+    try:
+        sub["bin"] = pd.qcut(sub[x_col], q=n_bins, duplicates="drop")
+    except Exception:
+        sub["bin"] = pd.cut(sub[x_col], bins=n_bins)
 
-def run_optuna_optimization(
-    df: pd.DataFrame,
-    geo_column: str,
-    dependent_variable: str,
-    channels_cfg: List[Dict],
-    channel_feature_names: List[str],
-    n_trials: int,
-    cv_splits: int,
-    use_sign_pen: bool,
-    use_mag_pen: bool,
-    use_stab_pen: bool,
-    lambda_sign: float,
-    lambda_mag: float,
-    lambda_stab: float,
-    negative_channels: set,
-    power_choices: List[float],
-    decay_choices: List[float],
-    lag_choices: List[int],
-) -> dict:
-    import optuna
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    binned = (
+        sub.groupby("bin", observed=True)
+        .agg(
+            mean_x=(x_col, "mean"),
+            mean_y=(y_col, "mean"),
+            median_y=(y_col, "median"),
+            min_x=(x_col, "min"),
+            max_x=(x_col, "max"),
+            count=(y_col, "count"),
+        )
+        .reset_index()
+        .dropna()
+    )
 
-    tscv = TimeSeriesSplit(n_splits=cv_splits)
+    binned_curve = []
+    for _, r in binned.iterrows():
+        binned_curve.append({
+            "bin_label": f"{r['min_x']:.1f} - {r['max_x']:.1f}",
+            "spend_x": round(float(r["mean_x"]), 2),
+            "response_y": round(float(r["mean_y"]), 2),
+            "median_y": round(float(r["median_y"]), 2),
+            "record_count": int(r["count"]),
+        })
 
-    def objective(trial):
-        params = {}
-        for cfg in channels_cfg:
-            ch = cfg["name"]
-            if cfg["has_adstock"]:
-                params[f"{ch}_decay"] = trial.suggest_categorical(f"{ch}_decay", decay_choices)
-                params[f"{ch}_lag"] = trial.suggest_categorical(f"{ch}_lag", lag_choices)
-            if cfg.get("sat_method") == "Power":
-                params[f"{ch}_power"] = trial.suggest_categorical(f"{ch}_power", power_choices)
+    shape_indicator = "Linear"
+    if len(binned_curve) >= 3:
+        slopes = []
+        for i in range(1, len(binned_curve)):
+            dx = binned_curve[i]["spend_x"] - binned_curve[i - 1]["spend_x"]
+            dy = binned_curve[i]["response_y"] - binned_curve[i - 1]["response_y"]
+            if dx > 0:
+                slopes.append(dy / dx)
+        if len(slopes) >= 2:
+            if slopes[-1] < slopes[0] * 0.6:
+                shape_indicator = "Diminishing Returns (Log / Saturated)"
+            elif slopes[-1] > slopes[0] * 1.4:
+                shape_indicator = "Accelerating / Convex (Power)"
 
-        df_temp = _transform_for_optuna(df, geo_column, channels_cfg, params)
-        feat_cols = [c for c in channel_feature_names if c in df_temp.columns]
-        df_model = df_temp.dropna(subset=[dependent_variable] + feat_cols)
-
-        if df_model.empty or len(df_model) < cv_splits * 2:
-            return float("inf")
-
-        X = sm.add_constant(df_model[feat_cols].astype(float))
-        y = df_model[dependent_variable].astype(float)
-
-        errors = []
-        beta_list = []
-        for train_idx, test_idx in tscv.split(X):
-            try:
-                X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
-                y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
-                m = sm.OLS(y_tr, X_tr).fit()
-                preds = m.predict(X_te)
-                errors.append(float(np.sqrt(mean_squared_error(y_te, preds))))
-                b = m.params.to_dict()
-                b.pop("const", None)
-                beta_list.append(b)
-            except Exception:
-                errors.append(float("inf"))
-
-        base_error = float(np.mean(errors))
-        if not np.isfinite(base_error):
-            return float("inf")
-
-        avg_betas = pd.DataFrame(beta_list).mean().to_dict() if beta_list else {}
-        total_loss = base_error
-        if use_sign_pen and avg_betas:
-            total_loss += lambda_sign * sign_penalty(avg_betas, negative_channels)
-        if use_mag_pen and avg_betas:
-            total_loss += lambda_mag * magnitude_penalty(avg_betas)
-        if use_stab_pen and beta_list:
-            total_loss += lambda_stab * stability_penalty(beta_list)
-        return total_loss
-
-    sampler = optuna.samplers.TPESampler(seed=42)
-    study = optuna.create_study(direction="minimize", sampler=sampler)
-    study.optimize(objective, n_trials=n_trials)
+    scatter_sample = sub.sample(min(400, len(sub)), random_state=42)[[x_col, y_col]].to_dict(orient="records")
 
     return {
-        "best_params": study.best_params,
-        "best_value": float(study.best_value) if study.best_value != float("inf") else None,
-        "n_trials": n_trials,
+        "binned_curve": binned_curve,
+        "scatter_sample": [{"x": r[x_col], "y": r[y_col]} for r in scatter_sample],
+        "shape_indicator": shape_indicator,
+        "x_col": x_col,
+        "y_col": y_col,
     }
 
 
-def optuna_params_to_transform_rows(channels_cfg: List[Dict], best_params: Dict) -> List[Dict]:
-    rows = []
-    for cfg in channels_cfg:
-        ch = cfg["name"]
-        row = {"Channel Name": ch}
-        if cfg["has_adstock"]:
-            row["Adstock"] = round(float(best_params.get(f"{ch}_decay", 0.5)), 2)
-            row["Lags"] = int(best_params.get(f"{ch}_lag", 1))
+# ---------------------------------------------------------------------------
+# OUTLIER DETECTION (PERCENTILES & Z-SCORE ONLY)
+# ---------------------------------------------------------------------------
+def detect_outliers_engine(
+    df: pd.DataFrame,
+    column: str,
+    method: str = "percentile",
+    threshold: float = 3.0,
+    lower_percentile: float = 1.0,
+    upper_percentile: float = 99.0,
+) -> Dict[str, Any]:
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not in dataset.")
+
+    series = pd.to_numeric(df[column], errors="coerce")
+    valid_idx = series.dropna().index
+    vals = series.dropna()
+
+    m = str(method).strip().lower()
+
+    if m in ("zscore", "z-score", "z_score"):
+        mean_v = vals.mean()
+        std_v = vals.std() if vals.std() != 0 else 1.0
+        z_scores = (vals - mean_v).abs() / std_v
+        outlier_mask = z_scores > float(threshold)
+        lower_bound = float(mean_v - float(threshold) * std_v)
+        upper_bound = float(mean_v + float(threshold) * std_v)
+        method_label = f"Z-Score ({threshold} σ)"
+    else:  # Percentiles
+        lp = max(0.0, min(100.0, float(lower_percentile))) / 100.0
+        up = max(0.0, min(100.0, float(upper_percentile))) / 100.0
+        if lp > up:
+            lp, up = up, lp
+        lower_bound = float(vals.quantile(lp))
+        upper_bound = float(vals.quantile(up))
+        outlier_mask = (vals < lower_bound) | (vals > upper_bound)
+        method_label = f"Percentiles ({lower_percentile}th - {upper_percentile}th %ile)"
+
+    outlier_indices = valid_idx[outlier_mask].tolist()
+    outlier_rows = df.loc[outlier_indices].head(50).to_dict(orient="records")
+
+    return {
+        "column": column,
+        "method": method_label,
+        "threshold": threshold,
+        "lower_percentile": lower_percentile,
+        "upper_percentile": upper_percentile,
+        "total_rows": len(df),
+        "outlier_count": len(outlier_indices),
+        "outlier_pct": round((len(outlier_indices) / len(df)) * 100, 2) if len(df) > 0 else 0.0,
+        "lower_bound": round(lower_bound, 2),
+        "upper_bound": round(upper_bound, 2),
+        "preview_flagged_rows": outlier_rows,
+        "outlier_indices": outlier_indices,
+    }
+
+
+def remove_outliers_engine(
+    df: pd.DataFrame,
+    column: str,
+    method: str = "percentile",
+    threshold: float = 3.0,
+    lower_percentile: float = 1.0,
+    upper_percentile: float = 99.0,
+) -> Dict[str, Any]:
+    detection = detect_outliers_engine(df, column, method, threshold, lower_percentile, upper_percentile)
+    indices_to_drop = set(detection["outlier_indices"])
+    clean_df = df.drop(index=list(indices_to_drop)).reset_index(drop=True)
+
+    return {
+        "clean_csv": clean_df.to_csv(index=False),
+        "original_rows": len(df),
+        "dropped_rows": len(indices_to_drop),
+        "remaining_rows": len(clean_df),
+        "column": column,
+    }
+
+
+def compute_trend_rollup(
+    df: pd.DataFrame,
+    date_col: str,
+    metric_cols: List[str],
+    period: str = "week",
+    date_format: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    if date_col not in df.columns:
+        return []
+
+    df = df.copy()
+    if date_format:
+        parsed_dates = pd.to_datetime(df[date_col], format=date_format, errors="coerce")
+    else:
+        parsed_dates = _parse_dates_robust(df[date_col].astype(str).str.strip())
+
+    df["_date_parsed"] = parsed_dates
+    df = df.dropna(subset=["_date_parsed"])
+
+    if period == "month":
+        df["_period_str"] = df["_date_parsed"].dt.strftime("%Y-%m")
+    else:
+        df["_period_str"] = df["_date_parsed"].dt.to_period("W").dt.start_time.dt.strftime("%Y-%m-%d")
+
+    valid_metrics = [c for c in metric_cols if c in df.columns]
+    for c in valid_metrics:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+    agg = df.groupby("_period_str", as_index=False)[valid_metrics].sum().sort_values("_period_str")
+    agg.rename(columns={"_period_str": "date"}, inplace=True)
+    return agg.to_dict(orient="records")
+
+
+# ---------------------------------------------------------------------------
+# MODULE 5 TRANSFORMATION ENGINE (Normalization, Adstock, Saturation, Arithmetic)
+# ---------------------------------------------------------------------------
+
+def geometric_adstock(series: np.ndarray, lags: int, adstock_coeff: float) -> np.ndarray:
+    series = np.array(series, dtype=np.float64)
+    adstocked = np.zeros_like(series)
+    lags = max(0, int(lags))
+    adstock_coeff = max(0.0, min(0.999, float(adstock_coeff)))
+    for i in range(len(series)):
+        for j in range(lags + 1):
+            if i - j >= 0:
+                adstocked[i] += (adstock_coeff ** j) * series[i - j]
+    return adstocked
+
+
+def apply_saturation(series: np.ndarray, method: str, power_k: float = 0.5, log_k: float = 1.0) -> np.ndarray:
+    series = np.array(series, dtype=np.float64)
+    series_clipped = np.maximum(0.0, np.nan_to_num(series, nan=0.0))
+    if not method:
+        return series_clipped
+    m = str(method).strip().lower()
+    if m == "log":
+        k_val = float(log_k) if log_k else 1.0
+        return np.log1p(k_val * series_clipped)
+    elif m == "power":
+        p_val = float(power_k) if power_k else 0.5
+        return np.power(series_clipped, p_val)
+    return series_clipped
+
+
+def normalize_series_vectorized(
+    series: pd.Series,
+    method: str = "none",
+    pop_series: Optional[pd.Series] = None,
+) -> pd.Series:
+    s = pd.to_numeric(series, errors="coerce").fillna(0.0)
+    m = str(method or "none").strip().lower()
+
+    if m == "population" and pop_series is not None:
+        p = pd.to_numeric(pop_series, errors="coerce").replace(0, np.nan)
+        return (s / p).fillna(0.0)
+    elif m == "minmax":
+        min_v = s.min()
+        max_v = s.max()
+        if max_v > min_v:
+            return (s - min_v) / (max_v - min_v)
+        return pd.Series(0.0, index=s.index)
+    elif m == "zscore":
+        std_v = s.std()
+        if std_v > 0:
+            return (s - s.mean()) / std_v
+        return pd.Series(0.0, index=s.index)
+    return s
+
+
+def transform_single_channel(
+    df: pd.DataFrame,
+    channel: str,
+    geo_column: str,
+    normalization: str = "none",
+    pop_column: Optional[str] = None,
+    adstock_coeff: Optional[float] = None,
+    lags: Optional[int] = None,
+    sat_function: Optional[str] = None,
+    power_k: float = 0.5,
+    log_k: float = 1.0,
+) -> pd.Series:
+    if channel not in df.columns:
+        raise ValueError(f"Channel '{channel}' not in DataFrame.")
+
+    raw_s = df[channel]
+    pop_s = df[pop_column] if (pop_column and pop_column in df.columns) else None
+
+    # Step 1: Normalization
+    norm_s = normalize_series_vectorized(raw_s, normalization, pop_s)
+
+    # Step 2: Adstock across Geo groups
+    if adstock_coeff is not None and float(adstock_coeff) > 0 and lags is not None and int(lags) > 0:
+        if geo_column in df.columns:
+            adstocked = df.groupby(geo_column)[channel].transform(
+                lambda s: geometric_adstock(norm_s.loc[s.index].values, int(lags), float(adstock_coeff))
+            )
         else:
-            row["Adstock"] = None
-            row["Lags"] = None
-        if cfg.get("sat_method") == "Power":
-            row["Saturation Function"] = "Power"
-            row["Power (k)"] = round(float(best_params.get(f"{ch}_power", 0.5)), 2)
+            adstocked = pd.Series(geometric_adstock(norm_s.values, int(lags), float(adstock_coeff)), index=df.index)
+    elif lags is not None and int(lags) > 0 and (adstock_coeff is None or float(adstock_coeff) == 0):
+        if geo_column in df.columns:
+            adstocked = df.groupby(geo_column)[channel].shift(int(lags), fill_value=0.0)
         else:
-            row["Saturation Function"] = None
-            row["Power (k)"] = None
-        rows.append(row)
-    return rows
+            adstocked = norm_s.shift(int(lags), fill_value=0.0)
+    else:
+        adstocked = norm_s
+
+    # Step 3: Saturation Transformation
+    final_s = apply_saturation(adstocked.values, sat_function, power_k=power_k, log_k=log_k)
+    return pd.Series(final_s, index=df.index)
+
+
+def auto_select_channel_params(
+    df: pd.DataFrame,
+    channel: str,
+    geo_column: str,
+    dependent_variable: str,
+    pop_column: Optional[str] = None,
+) -> Dict[str, Any]:
+    if channel not in df.columns or dependent_variable not in df.columns:
+        return {
+            "Channel Name": channel,
+            "Normalization": "none",
+            "Adstock": 0.5,
+            "Lags": 2,
+            "Saturation Function": "Log",
+            "Power (k)": 0.5,
+            "Log (k)": 1.0,
+            "auto_selected": True,
+            "fit_score": 0.0,
+        }
+
+    y = pd.to_numeric(df[dependent_variable], errors="coerce").fillna(0.0)
+    best_score = -1.0
+    best_cfg = {
+        "Channel Name": channel,
+        "Normalization": "none",
+        "Adstock": 0.5,
+        "Lags": 2,
+        "Saturation Function": "Log",
+        "Power (k)": 0.5,
+        "Log (k)": 1.0,
+        "auto_selected": True,
+        "fit_score": 0.0,
+    }
+
+    norm_candidates = ["none", "minmax"]
+    if pop_column and pop_column in df.columns:
+        norm_candidates.append("population")
+
+    adstock_grid = [(0.0, 0), (0.3, 1), (0.5, 2), (0.7, 4)]
+    sat_grid = [
+        (None, 0.5, 1.0),
+        ("Log", 0.5, 1.0),
+        ("Log", 0.5, 2.0),
+        ("Power", 0.3, 1.0),
+        ("Power", 0.5, 1.0),
+        ("Power", 0.7, 1.0),
+    ]
+
+    for norm in norm_candidates:
+        for ads, lag in adstock_grid:
+            for sat_fn, p_k, l_k in sat_grid:
+                try:
+                    cand_s = transform_single_channel(
+                        df=df,
+                        channel=channel,
+                        geo_column=geo_column,
+                        normalization=norm,
+                        pop_column=pop_column,
+                        adstock_coeff=ads,
+                        lags=lag,
+                        sat_function=sat_fn,
+                        power_k=p_k,
+                        log_k=l_k,
+                    )
+                    r = cand_s.corr(y)
+                    score = abs(float(r)) if pd.notna(r) else 0.0
+
+                    if score > best_score:
+                        best_score = score
+                        best_cfg = {
+                            "Channel Name": channel,
+                            "Normalization": norm,
+                            "Adstock": ads if ads > 0 else 0.0,
+                            "Lags": lag if lag > 0 else 1,
+                            "Saturation Function": sat_fn,
+                            "Power (k)": p_k,
+                            "Log (k)": l_k,
+                            "auto_selected": True,
+                            "fit_score": round(score, 4),
+                        }
+                except Exception:
+                    continue
+
+    return best_cfg
+
+
+def apply_full_transformations_pipeline(
+    df: pd.DataFrame,
+    geo_column: str,
+    date_column: str,
+    dependent_variable: str,
+    transformations: List[Dict[str, Any]],
+    derived_variables: Optional[List[Dict[str, Any]]] = None,
+    pop_column: Optional[str] = None,
+    add_carryover: bool = False,
+) -> pd.DataFrame:
+    df_out = df.copy()
+
+    # Enforce sales / KPI variable is excluded from transformations
+    safe_transformations = [
+        t for t in transformations
+        if str(t.get("Channel Name")).strip() != str(dependent_variable).strip()
+    ]
+
+    for t in safe_transformations:
+        channel = t.get("Channel Name")
+        if not channel or channel not in df_out.columns:
+            continue
+
+        transformed_s = transform_single_channel(
+            df=df_out,
+            channel=channel,
+            geo_column=geo_column,
+            normalization=t.get("Normalization", "none"),
+            pop_column=pop_column,
+            adstock_coeff=float(t["Adstock"]) if pd.notna(t.get("Adstock")) else 0.0,
+            lags=int(t["Lags"]) if pd.notna(t.get("Lags")) else 0,
+            sat_function=t.get("Saturation Function"),
+            power_k=float(t.get("Power (k)", 0.5)) if pd.notna(t.get("Power (k)")) else 0.5,
+            log_k=float(t.get("Log (k)", 1.0)) if pd.notna(t.get("Log (k)")) else 1.0,
+        )
+        df_out[f"{channel}_transformed"] = transformed_s
+
+    if add_carryover and dependent_variable in df_out.columns:
+        if geo_column in df_out.columns:
+            df_out["Carryover"] = df_out.groupby(geo_column)[dependent_variable].shift(1, fill_value=0.0)
+        else:
+            df_out["Carryover"] = df_out[dependent_variable].shift(1, fill_value=0.0)
+
+    # Apply Arithmetic Derived Variables
+    if derived_variables:
+        for d in derived_variables:
+            out_name = d.get("name")
+            op = d.get("operator", "+")
+            vars_list = d.get("variables", [])
+            weights = d.get("weights", {})
+
+            if not out_name or len(vars_list) < 2:
+                continue
+
+            available_vars = [v for v in vars_list if v in df_out.columns]
+            if len(available_vars) < 2:
+                continue
+
+            res_series = pd.to_numeric(df_out[available_vars[0]], errors="coerce").fillna(0.0) * float(weights.get(available_vars[0], 1.0))
+            for next_v in available_vars[1:]:
+                w = float(weights.get(next_v, 1.0))
+                s_next = pd.to_numeric(df_out[next_v], errors="coerce").fillna(0.0) * w
+                if op == "+":
+                    res_series = res_series + s_next
+                elif op == "-":
+                    res_series = res_series - s_next
+                elif op == "*":
+                    res_series = res_series * s_next
+                elif op == "/":
+                    res_series = res_series / (s_next.replace(0, np.nan))
+                    res_series = res_series.fillna(0.0)
+
+            df_out[f"{out_name}_transformed"] = res_series
+
+    return df_out
 
 
 def transform_edited_df(df: pd.DataFrame, edited_df: pd.DataFrame, geo_column: str, dependent_variable: str) -> pd.DataFrame:
@@ -1008,24 +1319,152 @@ def transform_edited_df(df: pd.DataFrame, edited_df: pd.DataFrame, geo_column: s
     return transformed_df
 
 
-def geometric_adstock(series: np.ndarray, lags: int, adstock_coeff: float) -> np.ndarray:
-    series = np.array(series, dtype=np.float64)
-    adstocked = np.zeros_like(series)
-    for i in range(len(series)):
-        for j in range(lags + 1):
-            if i - j >= 0:
-                adstocked[i] += (adstock_coeff ** j) * series[i - j]
-    return adstocked
+def run_optuna_optimization(
+    df: pd.DataFrame,
+    geo_column: str,
+    dependent_variable: str,
+    channels_cfg: List[Dict],
+    channel_feature_names: List[str],
+    n_trials: int,
+    cv_splits: int,
+    use_sign_pen: bool,
+    use_mag_pen: bool,
+    use_stab_pen: bool,
+    lambda_sign: float,
+    lambda_mag: float,
+    lambda_stab: float,
+    negative_channels: set,
+    power_choices: List[float],
+    decay_choices: List[float],
+    lag_choices: List[int],
+) -> dict:
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    tscv = TimeSeriesSplit(n_splits=cv_splits)
+
+    def _apply_optuna_adstock(series, decay, lag):
+        result = np.array(series, dtype=np.float64)
+        arr = np.array(series, dtype=np.float64)
+        for l in range(1, lag + 1):
+            shifted = np.concatenate([np.zeros(l), arr[:-l]]) if l < len(arr) else np.zeros(len(arr))
+            result += (decay ** l) * shifted
+        return result
+
+    def objective(trial):
+        params = {}
+        for cfg in channels_cfg:
+            ch = cfg["name"]
+            if cfg["has_adstock"]:
+                params[f"{ch}_decay"] = trial.suggest_categorical(f"{ch}_decay", decay_choices)
+                params[f"{ch}_lag"] = trial.suggest_categorical(f"{ch}_lag", lag_choices)
+            if cfg.get("sat_method") == "Power":
+                params[f"{ch}_power"] = trial.suggest_categorical(f"{ch}_power", power_choices)
+
+        df_temp = df.copy()
+        for cfg in channels_cfg:
+            ch = cfg["name"]
+            if ch not in df_temp.columns:
+                continue
+            has_ads = cfg["has_adstock"]
+            sat_m = cfg.get("sat_method")
+            decay = params.get(f"{ch}_decay", 0.5)
+            lag = int(params.get(f"{ch}_lag", 1))
+            power = params.get(f"{ch}_power", 0.5)
+
+            if has_ads:
+                trans = df_temp.groupby(geo_column)[ch].transform(
+                    lambda x: _apply_optuna_adstock(x.values, decay, lag)
+                )
+            else:
+                trans = df_temp[ch].copy()
+
+            if sat_m == "Power":
+                df_temp[f"{ch}_transformed"] = np.power(np.abs(trans), power)
+            elif sat_m == "Log":
+                df_temp[f"{ch}_transformed"] = np.log1p(np.abs(trans))
+            else:
+                df_temp[f"{ch}_transformed"] = trans
+
+        feat_cols = [c for c in channel_feature_names if c in df_temp.columns]
+        df_model = df_temp.dropna(subset=[dependent_variable] + feat_cols)
+
+        if df_model.empty or len(df_model) < cv_splits * 2:
+            return float("inf")
+
+        X = sm.add_constant(df_model[feat_cols].astype(float))
+        y = df_model[dependent_variable].astype(float)
+
+        errors = []
+        beta_list = []
+        for train_idx, test_idx in tscv.split(X):
+            try:
+                X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
+                y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
+                m = sm.OLS(y_tr, X_tr).fit()
+                preds = m.predict(X_te)
+                errors.append(float(np.sqrt(mean_squared_error(y_te, preds))))
+                b = m.params.to_dict()
+                b.pop("const", None)
+                beta_list.append(b)
+            except Exception:
+                errors.append(float("inf"))
+
+        base_error = float(np.mean(errors))
+        if not np.isfinite(base_error):
+            return float("inf")
+
+        avg_betas = pd.DataFrame(beta_list).mean().to_dict() if beta_list else {}
+        total_loss = base_error
+        if use_sign_pen and avg_betas:
+            for name, beta in avg_betas.items():
+                if name in negative_channels and beta > 0:
+                    total_loss += lambda_sign * abs(beta)
+                elif name not in negative_channels and beta < 0:
+                    total_loss += lambda_sign * abs(beta)
+        if use_mag_pen and avg_betas:
+            total_loss += lambda_mag * sum(b ** 2 for b in avg_betas.values())
+        if use_stab_pen and len(beta_list) >= 2:
+            total_loss += lambda_stab * float(pd.DataFrame(beta_list).var().mean())
+        return total_loss
+
+    sampler = optuna.samplers.TPESampler(seed=42)
+    study = optuna.create_study(direction="minimize", sampler=sampler)
+    study.optimize(objective, n_trials=n_trials)
+
+    return {
+        "best_params": study.best_params,
+        "best_value": float(study.best_value) if study.best_value != float("inf") else None,
+        "n_trials": n_trials,
+    }
 
 
-def apply_saturation(series: np.ndarray, method: str, power_k: float = 0.5) -> np.ndarray:
-    series = np.array(series, dtype=np.float64)
-    if method.lower() == "log":
-        return np.log1p(series)
-    elif method.lower() == "power":
-        return np.power(series, power_k)
-    return series
+def optuna_params_to_transform_rows(channels_cfg: List[Dict], best_params: Dict) -> List[Dict]:
+    rows = []
+    for cfg in channels_cfg:
+        ch = cfg["name"]
+        row = {"Channel Name": ch, "Normalization": "none"}
+        if cfg["has_adstock"]:
+            row["Adstock"] = round(float(best_params.get(f"{ch}_decay", 0.5)), 2)
+            row["Lags"] = int(best_params.get(f"{ch}_lag", 1))
+        else:
+            row["Adstock"] = None
+            row["Lags"] = None
+        if cfg.get("sat_method") == "Power":
+            row["Saturation Function"] = "Power"
+            row["Power (k)"] = round(float(best_params.get(f"{ch}_power", 0.5)), 2)
+            row["Log (k)"] = 1.0
+        else:
+            row["Saturation Function"] = None
+            row["Power (k)"] = None
+            row["Log (k)"] = 1.0
+        rows.append(row)
+    return rows
 
+
+# ---------------------------------------------------------------------------
+# MODELLING REGRESSION ENGINES
+# ---------------------------------------------------------------------------
 
 def run_ols_regression(
     transformed_df: pd.DataFrame,

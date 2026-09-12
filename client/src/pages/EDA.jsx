@@ -261,7 +261,7 @@ export default function EDA() {
     return list;
   }, [statsResult, sparsityMap, sortField, sortAsc, searchVar]);
 
-  // ─── TAB 2: TIME TRENDS & BIVARIATE SCATTER PLOT ──────────────────────────
+  // ─── TAB 2: TIME TRENDS (CRISP LINE GRAPH + SCATTER) ─────────────────────
   const [trendPeriod, setTrendPeriod] = useState("week");
   const [selectedTrendMetrics, setSelectedTrendMetrics] = useState([]);
   const [trendRollupData, setTrendRollupData] = useState([]);
@@ -319,11 +319,16 @@ export default function EDA() {
     });
   }, [trendRollupData, indexedView, selectedTrendMetrics]);
 
-  // ─── TAB 3: DISTRIBUTIONS & OUTLIERS ──────────────────────────────────────
+  // ─── TAB 3: DISTRIBUTIONS & OUTLIERS (CUSTOM BUCKET WIDTH & PERCENTILES) ─
   const [distCol, setDistCol] = useState("");
   const [histData, setHistData] = useState(null);
-  const [outlierMethod, setOutlierMethod] = useState("iqr");
-  const [outlierThreshold, setOutlierThreshold] = useState("1.5");
+  const [customBinWidth, setCustomBinWidth] = useState("");
+  
+  // Outlier detection: Percentiles (default) vs Z-score
+  const [outlierMethod, setOutlierMethod] = useState("percentile");
+  const [lowerPercentile, setLowerPercentile] = useState("1.0");
+  const [upperPercentile, setUpperPercentile] = useState("99.0");
+  const [zScoreThreshold, setZScoreThreshold] = useState("3.0");
   const [outlierResult, setOutlierResult] = useState(null);
   const [outlierModalOpen, setOutlierModalOpen] = useState(false);
   const [distLoading, setDistLoading] = useState(false);
@@ -334,20 +339,35 @@ export default function EDA() {
     }
   }, [statsResult]);
 
-  const loadDistAndOutliers = () => {
+  const loadDistAndOutliers = (binWidthOverride = null) => {
     if (!activeCsv || !distCol) return;
     setDistLoading(true);
-    const parsedThresh = parseFloat(outlierThreshold) || 1.5;
+
+    const bw = binWidthOverride !== null ? binWidthOverride : (parseFloat(customBinWidth) || undefined);
+    const lp = parseFloat(lowerPercentile) || 1.0;
+    const up = parseFloat(upperPercentile) || 99.0;
+    const zThresh = parseFloat(zScoreThreshold) || 3.0;
+
     Promise.all([
-      edaHistogram({ csv_data: activeCsv, column: distCol }),
-      edaDetectOutliers({ csv_data: activeCsv, column: distCol, method: outlierMethod, threshold: parsedThresh }),
+      edaHistogram({ csv_data: activeCsv, column: distCol, bin_width: bw }),
+      edaDetectOutliers({
+        csv_data: activeCsv,
+        column: distCol,
+        method: outlierMethod,
+        lower_percentile: lp,
+        upper_percentile: up,
+        threshold: zThresh,
+      }),
     ])
       .then(([hRes, oRes]) => {
         setHistData(hRes);
+        if (hRes && hRes.bin_width && !customBinWidth) {
+          setCustomBinWidth(String(hRes.bin_width));
+        }
         setOutlierResult(oRes);
       })
       .catch(() => {
-        toast.error("Could not load distribution");
+        toast.error("Could not load distribution diagnostics");
       })
       .finally(() => setDistLoading(false));
   };
@@ -356,18 +376,30 @@ export default function EDA() {
     if (activeMainTab === "distributions" && activeCsv && distCol) {
       loadDistAndOutliers();
     }
-  }, [activeMainTab, activeCsv, distCol, outlierMethod, outlierThreshold]);
+  }, [activeMainTab, activeCsv, distCol, outlierMethod]);
+
+  const handleApplyCustomBucketWidth = () => {
+    const parsed = parseFloat(customBinWidth);
+    if (!parsed || parsed <= 0) return toast.error("Enter a valid positive bucket width.");
+    loadDistAndOutliers(parsed);
+    toast.success(`Bucket width updated to ${parsed}`);
+  };
 
   const handleConfirmRemoveOutliers = async () => {
     setOutlierModalOpen(false);
     setDistLoading(true);
     try {
-      const parsedThresh = parseFloat(outlierThreshold) || 1.5;
+      const lp = parseFloat(lowerPercentile) || 1.0;
+      const up = parseFloat(upperPercentile) || 99.0;
+      const zThresh = parseFloat(zScoreThreshold) || 3.0;
+
       const res = await edaRemoveOutliers({
         csv_data: activeCsv,
         column: distCol,
         method: outlierMethod,
-        threshold: parsedThresh,
+        lower_percentile: lp,
+        upper_percentile: up,
+        threshold: zThresh,
       });
 
       setLoadedCsvMap((prev) => ({ ...prev, [selectedArdId]: res.clean_csv }));
@@ -505,7 +537,7 @@ export default function EDA() {
       });
       setRemovalPreview(res);
       if (res.total_pairs === 0) {
-        toast.info(`No pairs found with |r| ≥ ${parsedThresh}`);
+        toast(`No pairs found with |r| ≥ ${parsedThresh}`, { icon: "ℹ️" });
       } else {
         toast.success(`Found ${res.total_pairs} correlated pair(s)`);
       }
@@ -568,7 +600,7 @@ export default function EDA() {
       setFoundClusters(clusters);
       setClusterNames(clusters.map((c) => `SUM_${c[0].toUpperCase()}_${c[1].toUpperCase()}`));
       if (clusters.length === 0) {
-        toast.info(`No correlated pairs with |r| ≥ ${parsedThresh}. Try lowering threshold.`);
+        toast(`No correlated pairs with |r| ≥ ${parsedThresh}. Try lowering threshold.`, { icon: "ℹ️" });
       } else {
         toast.success(`Found ${clusters.length} correlated 2-variable pair(s)`);
       }
@@ -786,7 +818,7 @@ export default function EDA() {
         </Card>
       )}
 
-      {/* TAB 2: TIME TRENDS & BIVARIATE SCATTER PLOT */}
+      {/* TAB 2: TIME TRENDS (LINEAR LINE GRAPH + BIVARIATE SCATTER) */}
       {activeMainTab === "trends" && (
         <div className="space-y-6">
           <Card title="Time-Series Trend Rollup (WoW & MoM)">
@@ -847,6 +879,7 @@ export default function EDA() {
 
             {displayTrendData.length > 0 && (
               <ResponsiveContainer width="100%" height={340}>
+                {/* type="linear" removes curved smoothing and creates exact straight-line connections */}
                 <LineChart data={displayTrendData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
                   <XAxis dataKey="date" tick={{ fontSize: 10 }} />
@@ -854,7 +887,16 @@ export default function EDA() {
                   <Tooltip formatter={(v) => (indexedView ? `${Number(v).toFixed(1)} (Index)` : Number(v).toLocaleString())} />
                   <Legend verticalAlign="bottom" wrapperStyle={{ paddingTop: "14px", fontSize: "11px" }} />
                   {selectedTrendMetrics.map((m, i) => (
-                    <Line key={m} type="monotone" dataKey={m} stroke={PALETTE[i % PALETTE.length]} strokeWidth={2.5} dot={false} name={m} />
+                    <Line
+                      key={m}
+                      type="linear"
+                      dataKey={m}
+                      stroke={PALETTE[i % PALETTE.length]}
+                      strokeWidth={2.5}
+                      dot={{ r: 3, fill: PALETTE[i % PALETTE.length] }}
+                      activeDot={{ r: 6 }}
+                      name={m}
+                    />
                   ))}
                 </LineChart>
               </ResponsiveContainer>
@@ -913,28 +955,53 @@ export default function EDA() {
         </div>
       )}
 
-      {/* TAB 3: DISTRIBUTIONS & OUTLIERS */}
+      {/* TAB 3: DISTRIBUTIONS & OUTLIERS (CUSTOM BUCKET WIDTH & PERCENTILES) */}
       {activeMainTab === "distributions" && (
         <div className="space-y-6">
-          <Card title="Variable Distribution & Skewness">
-            <div className="w-72 mb-4">
-              <Select label="Select Variable:" value={distCol} onChange={setDistCol} options={statsResult?.numeric_cols || columns} />
+          <Card title="Variable Distribution & Histogram Customization">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
+              <div>
+                <Select label="Select Variable:" value={distCol} onChange={setDistCol} options={statsResult?.numeric_cols || columns} />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Bucket Width (Bin Size):
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    step="any"
+                    min="0.001"
+                    placeholder="e.g. 5, 10, 50"
+                    value={customBinWidth}
+                    onChange={(e) => setCustomBinWidth(e.target.value)}
+                    className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-brand-500"
+                  />
+                  <Btn onClick={handleApplyCustomBucketWidth} className="text-xs py-2 whitespace-nowrap">
+                    Apply Width
+                  </Btn>
+                </div>
+              </div>
             </div>
 
-            {distLoading && <Spinner label="Loading distribution and scanning for outliers..." />}
+            {distLoading && <Spinner label="Loading distribution histogram..." />}
 
             {histData && !distLoading && (
               <div className="space-y-4">
-                <div className="flex gap-4 items-center text-xs bg-slate-50 p-3 rounded-xl border border-slate-200">
+                <div className="flex gap-4 items-center text-xs bg-slate-50 p-3 rounded-xl border border-slate-200 flex-wrap">
                   <span className="font-bold text-slate-700">Mean: {histData.mean?.toFixed(2)}</span>
                   <span className="font-bold text-slate-700">Median: {histData.median?.toFixed(2)}</span>
                   <span className="text-slate-500">Span: {histData.min?.toFixed(1)} to {histData.max?.toFixed(1)}</span>
+                  <span className="font-mono text-brand-700 font-semibold bg-brand-50 px-2 py-0.5 rounded">
+                    Active Bucket Width: {histData.bin_width} ({histData.counts.length} bins)
+                  </span>
                 </div>
 
                 <ResponsiveContainer width="100%" height={280}>
                   <BarChart data={histData.counts.map((c, i) => ({ bin: histData.bin_labels[i], count: c }))}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                    <XAxis dataKey="bin" tick={{ fontSize: 10 }} />
+                    <XAxis dataKey="bin" tick={{ fontSize: 9 }} interval={histData.counts.length > 20 ? 1 : 0} />
                     <YAxis tick={{ fontSize: 11 }} />
                     <Tooltip />
                     <Bar dataKey="count" fill="#001E96" radius={[4, 4, 0, 0]} name="Frequency" />
@@ -944,31 +1011,69 @@ export default function EDA() {
             )}
           </Card>
 
+          {/* Outlier Diagnostics Section (Percentiles & Z-score) */}
           <Card title={`Outlier Diagnostics for ${distCol}`}>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-4">
               <Select
                 label="Detection Strategy:"
                 value={outlierMethod}
                 onChange={setOutlierMethod}
                 options={[
-                  { value: "iqr", label: "IQR (Interquartile Range Box-Plot)" },
+                  { value: "percentile", label: "Percentile Cutoffs (e.g. 1st - 99th %ile)" },
                   { value: "zscore", label: "Z-Score (Standard Deviations)" },
                 ]}
               />
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Threshold Value: ({outlierThreshold} {outlierMethod === "iqr" ? "× IQR" : "σ"})
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g. 1.5, 2.0, 3.0"
-                  value={outlierThreshold}
-                  onChange={(e) => setOutlierThreshold(e.target.value)}
-                  className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-brand-500"
-                />
-              </div>
+
+              {outlierMethod === "percentile" ? (
+                <>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Lower Percentile (%):
+                    </label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      max="49"
+                      value={lowerPercentile}
+                      onChange={(e) => setLowerPercentile(e.target.value)}
+                      className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Upper Percentile (%):
+                    </label>
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="51"
+                      max="100"
+                      value={upperPercentile}
+                      onChange={(e) => setUpperPercentile(e.target.value)}
+                      className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white"
+                    />
+                  </div>
+                </>
+              ) : (
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Z-Score Threshold (σ):
+                  </label>
+                  <input
+                    type="number"
+                    step="0.5"
+                    min="1.0"
+                    max="10.0"
+                    value={zScoreThreshold}
+                    onChange={(e) => setZScoreThreshold(e.target.value)}
+                    className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white"
+                  />
+                </div>
+              )}
+
               <div className="flex items-end">
-                <Btn onClick={loadDistAndOutliers} disabled={distLoading} className="w-full justify-center">
+                <Btn onClick={() => loadDistAndOutliers()} disabled={distLoading} className="w-full justify-center">
                   ↻ Re-Scan Outliers
                 </Btn>
               </div>
@@ -1010,7 +1115,7 @@ export default function EDA() {
                   </>
                 ) : (
                   <div className="flex items-center justify-between bg-emerald-50 border border-emerald-200 p-3 rounded-xl">
-                    <span className="text-xs font-bold text-emerald-800">✅ No extreme outliers detected in {distCol}.</span>
+                    <span className="text-xs font-bold text-emerald-800">✅ No extreme outliers detected in {distCol} with {outlierResult.method}.</span>
                   </div>
                 )}
               </div>
@@ -1051,7 +1156,7 @@ export default function EDA() {
                     <XAxis dataKey="spend_x" label={{ value: `Tactic Level (${relX})`, position: "insideBottom", offset: -5, fontSize: 11 }} tick={{ fontSize: 10 }} />
                     <YAxis dataKey="response_y" label={{ value: `Average ${relY}`, angle: -90, position: "insideLeft", fontSize: 11 }} tick={{ fontSize: 11 }} />
                     <Tooltip formatter={(v) => Number(v).toLocaleString()} />
-                    <Line type="monotone" dataKey="response_y" stroke="#001E96" strokeWidth={3} dot={{ r: 5, fill: "#1ABC9C" }} name={`Binned Mean ${relY}`} />
+                    <Line type="linear" dataKey="response_y" stroke="#001E96" strokeWidth={3} dot={{ r: 5, fill: "#1ABC9C" }} name={`Binned Mean ${relY}`} />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
@@ -1120,21 +1225,11 @@ export default function EDA() {
                 </div>
 
                 {corrMatrix && (
-                  <div className="space-y-2 mb-4">
-                    <span className="text-xs font-bold text-slate-700 uppercase tracking-wider block">
-                      Feature Correlation Heatmap (Highlighted for |r| ≥ {corrThreshold}):
-                    </span>
-                    <CorrelationHeatmap
-                      matrix={corrMatrix.matrix}
-                      columns={corrMatrix.columns}
-                      threshold={corrThreshold}
-                      onCellClick={handleHeatmapJumpToScatter}
-                    />
-                  </div>
+                  <CorrelationHeatmap matrix={corrMatrix.matrix} columns={corrMatrix.columns} threshold={corrThreshold} onCellClick={handleHeatmapJumpToScatter} />
                 )}
 
                 {highPairs.length > 0 && (
-                  <div className="mb-4">
+                  <div className="mt-4">
                     <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">High Collinearity Pairs (|r| ≥ {corrThreshold}):</h4>
                     <DataTable data={highPairs.map((p) => ({ "Tactic 1": p.feature1, "Tactic 2": p.feature2, "Correlation (|r|)": p.corr.toFixed(4) }))} />
                   </div>
@@ -1263,12 +1358,13 @@ export default function EDA() {
         </div>
       )}
 
+      {/* Outlier Confirmation Modal */}
       {outlierModalOpen && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4">
             <h3 className="text-lg font-bold text-slate-800">Confirm Outlier Exclusion</h3>
             <p className="text-xs text-slate-600">
-              Excluding <strong>{outlierResult?.outlier_count} rows</strong> with extreme values in <code>{distCol}</code>.
+              Excluding <strong>{outlierResult?.outlier_count} rows</strong> with extreme values in <code>{distCol}</code> using {outlierResult?.method}.
             </p>
             <div className="flex justify-end gap-2 pt-2">
               <Btn variant="secondary" onClick={() => setOutlierModalOpen(false)}>Cancel</Btn>
@@ -1278,6 +1374,7 @@ export default function EDA() {
         </div>
       )}
 
+      {/* Removal Confirmation Modal */}
       {removalModalOpen && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4">
@@ -1290,6 +1387,7 @@ export default function EDA() {
         </div>
       )}
 
+      {/* Combination Confirmation Modal */}
       {comboModalOpen && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4">
