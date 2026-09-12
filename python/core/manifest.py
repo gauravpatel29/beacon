@@ -154,6 +154,34 @@ class NotNullFilter(BaseModel):
 Filter = NpiLuhnFilter | DateRangeFilter | ValueFilter | RangeFilter | NotNullFilter
 
 
+class FilterCondition(BaseModel):
+    """One condition, whose predicates always combine with AND.
+
+    A condition is the smallest unit the user builds: "not null AND in (East,
+    West)" is one condition on one column, not two alternatives. Keeping that
+    AND implicit here is what lets the level above be either AND or OR without
+    a special case for validity predicates like not_null and npi_luhn.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    filters: List[Filter] = Field(default_factory=list)
+
+
+class FilterGroup(BaseModel):
+    """Several conditions on one column, combined by `mode`.
+
+    "any" is the reason this nesting exists at all: two ranges on one column
+    ("under 10 OR over 500") cannot be written as a flat list of filters, no
+    matter how that list is combined.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["all", "any"] = "all"
+    conditions: List[FilterCondition] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # granularity - grain-shaped operation
 # ---------------------------------------------------------------------------
@@ -276,7 +304,28 @@ class ResolvedSpec(BaseModel):
     # Defaults to "all", which is what the engine did before this field
     # existed - so a spec saved without it replays exactly as it used to.
     filter_mode: Literal["all", "any"] = "all"
+    # The nested form: one group per filtered column. When present it is the
+    # source of truth and `filters` below is derived from it, so validation and
+    # anything else reading the flat list keeps working untouched.
+    filter_groups: List[FilterGroup] = Field(default_factory=list)
     granularity: Optional[Granularity] = None
+
+    @model_validator(mode="after")
+    def _mirror_groups_into_filters(self) -> "ResolvedSpec":
+        """Keep `filters` as the flat projection of `filter_groups`.
+
+        Two fields describing the same filters could disagree; deriving one
+        from the other means they cannot. A spec that sends only `filters`
+        (every spec written before groups existed) is left exactly as it is.
+        """
+        if self.filter_groups:
+            self.filters = [
+                f
+                for group in self.filter_groups
+                for condition in group.conditions
+                for f in condition.filters
+            ]
+        return self
 
 
 # ---------------------------------------------------------------------------

@@ -236,6 +236,8 @@ class SpecBody(BaseModel):
     live_updates: Optional[Dict[str, Any]] = None
     filters: Optional[List[Dict[str, Any]]] = None
     filter_mode: Optional[str] = None
+    # The nested form. When given it wins, and `filters` is re-derived from it.
+    filter_groups: Optional[List[Dict[str, Any]]] = None
     granularity: Optional[Dict[str, Any]] = None
     expected_version: Optional[int] = None
 
@@ -247,6 +249,8 @@ class SpecBody(BaseModel):
             payload["filter_mode"] = self.filter_mode
         if self.filters is not None:
             payload["filters"] = self.filters
+        if self.filter_groups is not None:
+            payload["filter_groups"] = self.filter_groups
         if self.granularity is not None:
             payload["granularity"] = self.granularity
         return ResolvedSpec.model_validate(payload)
@@ -355,6 +359,8 @@ async def detect_granularity(request: Request, workflow_id: str, filename: str,
         payload["live_updates"] = body.live_updates
     if body.filters is not None:
         payload["filters"] = body.filters
+    if body.filter_groups is not None:
+        payload["filter_groups"] = body.filter_groups
     try:
         spec = ResolvedSpec.model_validate(payload)
     except ValidationError as exc:

@@ -26,7 +26,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from core.manifest import AppliedCounts, Granularity, LiveUpdates, ResolvedSpec
+from core.manifest import (
+    AppliedCounts, FilterCondition, FilterGroup, Granularity, LiveUpdates, ResolvedSpec,
+)
 from core.processing import luhn_valid_npi
 
 CSV_EXT = {".csv", ".txt", ".tsv"}
@@ -318,77 +320,114 @@ def _parse_dates(series: pd.Series, fmt: Optional[str]) -> pd.Series:
     return pd.to_datetime(series, errors="coerce")
 
 
-def _apply_filters(
-    filename: str, df: pd.DataFrame, filters: List[Any], errors: List[Dict[str, Any]],
+def _filter_mask(
+    filename: str, df: pd.DataFrame, filt: Any, errors: List[Dict[str, Any]],
     date_formats: Optional[Dict[str, str]] = None,
-    mode: str = "all",
-) -> Tuple[pd.DataFrame, int]:
-    """Keep the rows the filters accept, combined by `mode`.
+) -> Optional[pd.Series]:
+    """One filter's row mask, or None when the filter cannot be applied.
 
-    Every mask is evaluated against the SAME incoming frame and combined at the
-    end, rather than narrowing the frame filter by filter. For "all" the result
-    is identical either way - the masks are row-wise and independent - but "any"
-    is only expressible this way: a row rejected by the first filter has to stay
-    available for the second one to accept it.
+    Always evaluated against the full incoming frame, never against the result
+    of an earlier filter: a row rejected by one filter has to stay available for
+    the next, or "any" could not be expressed at all.
     """
-    masks: List[pd.Series] = []
-    applied = 0
-    for filt in filters:
-        col = df[filt.column]
-        kind = filt.type
+    col = df[filt.column]
+    kind = filt.type
 
-        if kind == "npi_luhn":
-            # Validate each distinct value once, then map back.
-            norm = col.astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-            valid = {v for v in norm.unique() if luhn_valid_npi(v)}
-            if not valid and len(norm):
-                errors.append(_err(
-                    filename, "npi_luhn_no_matches",
-                    f'No value in "{filt.column}" is a valid CMS NPI. Check that '
-                    f"this is the right column before filtering it away.",
-                    filt.column,
-                ))
-                continue
-            mask = norm.isin(valid)
+    if kind == "npi_luhn":
+        # Validate each distinct value once, then map back.
+        norm = col.astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+        valid = {v for v in norm.unique() if luhn_valid_npi(v)}
+        if not valid and len(norm):
+            errors.append(_err(
+                filename, "npi_luhn_no_matches",
+                f'No value in "{filt.column}" is a valid CMS NPI. Check that '
+                f"this is the right column before filtering it away.",
+                filt.column,
+            ))
+            return None
+        mask = norm.isin(valid)
 
-        elif kind == "date_range":
-            parsed = _parse_dates(col, (date_formats or {}).get(filt.column))
-            mask = parsed.notna()
-            if filt.start:
-                mask &= parsed >= pd.Timestamp(filt.start)
-            if filt.end:
-                mask &= parsed <= pd.Timestamp(filt.end)
+    elif kind == "date_range":
+        parsed = _parse_dates(col, (date_formats or {}).get(filt.column))
+        mask = parsed.notna()
+        if filt.start:
+            mask &= parsed >= pd.Timestamp(filt.start)
+        if filt.end:
+            mask &= parsed <= pd.Timestamp(filt.end)
 
-        elif kind in ("value_in", "value_not_in"):
-            wanted = {str(v) for v in filt.values}
-            hit = col.astype(str).str.strip().isin(wanted)
-            mask = hit if kind == "value_in" else ~hit
+    elif kind in ("value_in", "value_not_in"):
+        wanted = {str(v) for v in filt.values}
+        hit = col.astype(str).str.strip().isin(wanted)
+        mask = hit if kind == "value_in" else ~hit
 
-        elif kind == "range":
-            nums = pd.to_numeric(col, errors="coerce")
-            mask = nums.notna()
-            if filt.min is not None:
-                mask &= nums >= filt.min
-            if filt.max is not None:
-                mask &= nums <= filt.max
+    elif kind == "range":
+        nums = pd.to_numeric(col, errors="coerce")
+        mask = nums.notna()
+        if filt.min is not None:
+            mask &= nums >= filt.min
+        if filt.max is not None:
+            mask &= nums <= filt.max
 
-        elif kind == "not_null":
-            mask = ~_blank(col)
+    elif kind == "not_null":
+        mask = ~_blank(col)
 
-        else:  # unreachable: the Literal union constrains `type`
-            continue
+    else:  # unreachable: the Literal union constrains `type`
+        return None
 
-        masks.append(mask.fillna(False))
-        applied += 1
+    return mask.fillna(False)
 
-    if not masks:
-        return df.reset_index(drop=True), applied
 
+def _combine(masks: List[pd.Series], mode: str) -> pd.Series:
+    """Fold masks together with OR for "any", AND for anything else."""
     combined = masks[0]
     for mask in masks[1:]:
         combined = (combined | mask) if mode == "any" else (combined & mask)
+    return combined
 
-    return df[combined].reset_index(drop=True), applied
+
+def _apply_filters(
+    filename: str, df: pd.DataFrame, spec: ResolvedSpec, errors: List[Dict[str, Any]],
+    date_formats: Optional[Dict[str, str]] = None,
+) -> Tuple[pd.DataFrame, int]:
+    """Keep the rows the filter tree accepts.
+
+    Three levels, innermost first:
+
+        filters within a condition  ->  always AND
+        conditions within a group   ->  group.mode      (one group per column)
+        groups                      ->  spec.filter_mode
+
+    A spec carrying only the flat `filters` list becomes one single-filter
+    condition per group, which reduces exactly to the old behaviour under both
+    modes - so specs written before groups existed replay unchanged.
+    """
+    groups = spec.filter_groups or [
+        FilterGroup(mode="all", conditions=[FilterCondition(filters=[f])])
+        for f in spec.filters
+    ]
+
+    applied = 0
+    group_masks: List[pd.Series] = []
+
+    for group in groups:
+        condition_masks: List[pd.Series] = []
+        for condition in group.conditions:
+            masks: List[pd.Series] = []
+            for filt in condition.filters:
+                mask = _filter_mask(filename, df, filt, errors, date_formats)
+                if mask is None:
+                    continue
+                masks.append(mask)
+                applied += 1
+            if masks:
+                condition_masks.append(_combine(masks, "all"))
+        if condition_masks:
+            group_masks.append(_combine(condition_masks, group.mode))
+
+    if not group_masks:
+        return df.reset_index(drop=True), applied
+
+    return df[_combine(group_masks, spec.filter_mode)].reset_index(drop=True), applied
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +530,7 @@ def apply_manifest(
 
     if spec.filters:
         df, counts.filters_applied = _apply_filters(
-            filename, df, spec.filters, errors, date_fmts, spec.filter_mode
+            filename, df, spec, errors, date_fmts
         )
         if errors:
             raise TransformError(errors)
