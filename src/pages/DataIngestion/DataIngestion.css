@@ -380,6 +380,25 @@
   box-shadow: var(--shadow-card);
 }
 
+.summary-stats-info-btn {
+  margin-left: auto;
+  padding: 0.55rem 1rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-primary);
+  background-color: var(--color-white);
+  color: var(--color-primary);
+  font-size: 0.78rem;
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+  flex-shrink: 0;
+  align-self: center;
+  transition: var(--transition-base);
+}
+
+.summary-stats-info-btn:hover {
+  background-color: var(--color-primary-light);
+}
+
 /* ---- Filter tab ---- */
 .filter-grid {
   display: grid;
@@ -1149,3 +1168,74 @@
   font-size: 0.72rem;
   color: var(--color-text-secondary);
 }
+
+/* ─── Status Summary tab ─────────────────────────────────────────────── */
+
+.summary-stats-toolbar-inline {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--spacing-md);
+}
+
+.summary-stats-total-rows {
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+}
+
+.summary-stats-table-wrapper {
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  overflow: auto;
+  max-height: 420px;
+}
+
+.summary-stats-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.summary-stats-table th {
+  position: sticky;
+  top: 0;
+  text-align: left;
+  font-size: 0.68rem;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-light);
+  text-transform: uppercase;
+  padding: 0.55rem 0.7rem;
+  background-color: #f7f9fc;
+  border-bottom: 1px solid var(--color-border-light);
+  white-space: nowrap;
+}
+
+.summary-stats-table td {
+  font-size: 0.78rem;
+  color: var(--color-text-primary);
+  padding: 0.5rem 0.7rem;
+  border-bottom: 1px solid var(--color-border-light);
+  white-space: nowrap;
+}
+
+.role-badge {
+  font-size: 0.68rem;
+  font-weight: var(--font-weight-semibold);
+  padding: 0.15rem 0.55rem;
+  border-radius: var(--radius-pill);
+  background-color: #eef1f6;
+  color: var(--color-text-secondary);
+}
+.role-badge.metric { background-color: var(--color-primary-light); color: var(--color-primary); }
+.role-badge.dimension { background-color: #f3e8ff; color: #7c3aed; }
+.role-badge.date { background-color: #fdf3e3; color: #c07a1f; }
+
+.health-badge {
+  font-size: 0.7rem;
+  font-weight: var(--font-weight-semibold);
+  padding: 0.2rem 0.6rem;
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+}
+.health-badge.good { background-color: #eafaf0; color: #1f8a4c; }
+.health-badge.warn { background-color: #fdf3e3; color: #c07a1f; }
+.health-badge.bad { background-color: #fdecea; color: #c0392b; }
