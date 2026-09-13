@@ -27,7 +27,8 @@ import numpy as np
 import pandas as pd
 
 from core.manifest import (
-    AppliedCounts, FilterCondition, FilterGroup, Granularity, LiveUpdates, ResolvedSpec,
+    AppliedCounts, FilterChain, FilterCondition, FilterGroup, Granularity, LiveUpdates,
+    ResolvedSpec,
 )
 from core.processing import luhn_valid_npi
 
@@ -385,6 +386,49 @@ def _combine(masks: List[pd.Series], mode: str) -> pd.Series:
     return combined
 
 
+def _apply_filter_chain(
+    filename: str, df: pd.DataFrame, chain: FilterChain, errors: List[Dict[str, Any]],
+    date_formats: Optional[Dict[str, str]] = None,
+) -> Tuple[pd.DataFrame, int]:
+    """Fold the chain left to right: ((card1 OP1 card2) OP2 card3) ...
+
+    Deliberately NOT SQL precedence. See `FilterChain` for why the order on
+    screen is the order evaluated.
+
+    A card whose filters all turn out inapplicable - an NPI column with no valid
+    NPI in it, say - drops out along with the operator that led into it, so the
+    remaining chain still has one operator per gap rather than shifting every
+    later operator onto the wrong pair.
+    """
+    applied = 0
+    # (operator leading into this mask, mask). The first entry's operator is
+    # unused; the fold starts from it.
+    parts: List[Tuple[str, pd.Series]] = []
+
+    for index, item in enumerate(chain.items):
+        masks: List[pd.Series] = []
+        for filt in item.filters:
+            mask = _filter_mask(filename, df, filt, errors, date_formats)
+            if mask is None:
+                continue
+            masks.append(mask)
+            applied += 1
+        if not masks:
+            continue
+        # The operator that joins this card to the one before it.
+        op = chain.operators[index - 1] if index else "and"
+        parts.append((op, _combine(masks, "all")))
+
+    if not parts:
+        return df.reset_index(drop=True), applied
+
+    combined = parts[0][1]
+    for op, mask in parts[1:]:
+        combined = (combined | mask) if op == "or" else (combined & mask)
+
+    return df[combined].reset_index(drop=True), applied
+
+
 def _apply_filters(
     filename: str, df: pd.DataFrame, spec: ResolvedSpec, errors: List[Dict[str, Any]],
     date_formats: Optional[Dict[str, str]] = None,
@@ -400,7 +444,15 @@ def _apply_filters(
     A spec carrying only the flat `filters` list becomes one single-filter
     condition per group, which reduces exactly to the old behaviour under both
     modes - so specs written before groups existed replay unchanged.
+
+    A spec carrying a `filter_chain` takes that path instead: an ordered chain
+    with an operator in every gap, folded left to right.
     """
+    if spec.filter_chain is not None and spec.filter_chain.items:
+        return _apply_filter_chain(
+            filename, df, spec.filter_chain, errors, date_formats
+        )
+
     groups = spec.filter_groups or [
         FilterGroup(mode="all", conditions=[FilterCondition(filters=[f])])
         for f in spec.filters

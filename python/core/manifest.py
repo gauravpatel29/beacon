@@ -182,6 +182,38 @@ class FilterGroup(BaseModel):
     conditions: List[FilterCondition] = Field(default_factory=list)
 
 
+class FilterChain(BaseModel):
+    """An ordered chain of filters with an operator between each pair.
+
+    This is what the Filter tab builds: a list of cards, each a condition, with
+    an AND/OR dropdown in every gap. `operators` therefore always has exactly
+    one fewer entry than `items`, and a mismatch is rejected rather than padded
+    - a chain whose operators do not line up with its cards means the screen and
+    the engine disagree about what the user built.
+
+    Evaluated STRICTLY LEFT TO RIGHT, not with SQL's precedence where AND binds
+    tighter than OR. "A and B or C" is therefore "(A and B) or C", and
+    "A or B and C" is "(A or B) and C" - which is not what SQL would do. The
+    chain is a visual sequence and reads top to bottom; regrouping it silently
+    would make the order on screen a lie about the result.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: List[FilterCondition] = Field(default_factory=list)
+    operators: List[Literal["and", "or"]] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _operators_fill_the_gaps(self) -> "FilterChain":
+        expected = max(0, len(self.items) - 1)
+        if len(self.operators) != expected:
+            raise ValueError(
+                f"a chain of {len(self.items)} filters needs exactly {expected} "
+                f"operator(s); got {len(self.operators)}"
+            )
+        return self
+
+
 # ---------------------------------------------------------------------------
 # granularity - grain-shaped operation
 # ---------------------------------------------------------------------------
@@ -308,17 +340,24 @@ class ResolvedSpec(BaseModel):
     # source of truth and `filters` below is derived from it, so validation and
     # anything else reading the flat list keeps working untouched.
     filter_groups: List[FilterGroup] = Field(default_factory=list)
+    # The chain the Filter tab builds. Newest of the three forms and the one
+    # that wins; `filter_groups` and the bare `filters` list are kept because
+    # stored specs still carry them.
+    filter_chain: Optional[FilterChain] = None
     granularity: Optional[Granularity] = None
 
     @model_validator(mode="after")
-    def _mirror_groups_into_filters(self) -> "ResolvedSpec":
-        """Keep `filters` as the flat projection of `filter_groups`.
+    def _mirror_into_filters(self) -> "ResolvedSpec":
+        """Keep `filters` as the flat projection of whichever form was sent.
 
-        Two fields describing the same filters could disagree; deriving one
-        from the other means they cannot. A spec that sends only `filters`
-        (every spec written before groups existed) is left exactly as it is.
+        Several fields describing the same filters could disagree; deriving the
+        flat list from the structured one means they cannot, and validation
+        elsewhere keeps reading `filters` without knowing which form it came
+        from. A spec that sends only `filters` is left exactly as it is.
         """
-        if self.filter_groups:
+        if self.filter_chain is not None and self.filter_chain.items:
+            self.filters = [f for item in self.filter_chain.items for f in item.filters]
+        elif self.filter_groups:
             self.filters = [
                 f
                 for group in self.filter_groups
