@@ -906,7 +906,7 @@ def compute_poor_mans_curve_data(df: pd.DataFrame, x_col: str, y_col: str, n_bin
 
 
 # ---------------------------------------------------------------------------
-# OUTLIER DETECTION (PERCENTILES & Z-SCORE ONLY)
+# OUTLIER DETECTION (PERCENTILES, Z-SCORE & IQR)
 # ---------------------------------------------------------------------------
 def detect_outliers_engine(
     df: pd.DataFrame,
@@ -916,6 +916,15 @@ def detect_outliers_engine(
     lower_percentile: float = 1.0,
     upper_percentile: float = 99.0,
 ) -> Dict[str, Any]:
+    """Flag outlying rows in one column by percentile, z-score, or IQR.
+
+    `threshold` means something different per method - sigmas for z-score, a
+    multiplier of the interquartile range for IQR, and nothing at all for
+    percentiles, which read their bounds from the two percentile arguments.
+
+    The percentile arguments are optional so callers that only offer z-score
+    and IQR, like /v2 review, can leave them out entirely.
+    """
     if column not in df.columns:
         raise ValueError(f"Column '{column}' not in dataset.")
 
@@ -933,6 +942,18 @@ def detect_outliers_engine(
         lower_bound = float(mean_v - float(threshold) * std_v)
         upper_bound = float(mean_v + float(threshold) * std_v)
         method_label = f"Z-Score ({threshold} σ)"
+    elif m == "iqr":
+        # Asked for by name only. It used to fall through to the percentile
+        # branch below, which answered a different question under the label the
+        # caller asked for - the Data Review outlier tab defaults to IQR and was
+        # reading percentile bounds the whole time.
+        q25 = float(vals.quantile(0.25))
+        q75 = float(vals.quantile(0.75))
+        iqr = q75 - q25
+        lower_bound = float(q25 - float(threshold) * iqr)
+        upper_bound = float(q75 + float(threshold) * iqr)
+        outlier_mask = (vals < lower_bound) | (vals > upper_bound)
+        method_label = f"IQR ({threshold} x IQR)"
     else:  # Percentiles
         lp = max(0.0, min(100.0, float(lower_percentile))) / 100.0
         up = max(0.0, min(100.0, float(upper_percentile))) / 100.0
@@ -1922,174 +1943,6 @@ def create_response_curve(channel_name, impactable_sales_nation, beta_coeff, spe
     return pd.DataFrame(rows)
 
 
-def compute_sparsity_stats(df: pd.DataFrame, metric_cols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-    cols = metric_cols or df.select_dtypes(include=[np.number]).columns.tolist()
-    total_rows = len(df)
-    results = []
-
-    for col in cols:
-        if col not in df.columns:
-            continue
-        series = pd.to_numeric(df[col], errors="coerce").fillna(0)
-        non_zero_count = int((series != 0).sum())
-        zero_count = total_rows - non_zero_count
-        non_zero_pct = round((non_zero_count / total_rows) * 100, 2) if total_rows > 0 else 0.0
-        zero_pct = round((zero_count / total_rows) * 100, 2) if total_rows > 0 else 0.0
-
-        if non_zero_pct < 10.0:
-            risk = "High Sparsity (<10% active)"
-            status = "critical"
-        elif non_zero_pct < 30.0:
-            risk = "Moderate Sparsity (10-30%)"
-            status = "warning"
-        else:
-            risk = "Healthy (>30% active)"
-            status = "healthy"
-
-        results.append({
-            "tactic": col,
-            "total_rows": total_rows,
-            "non_zero_count": non_zero_count,
-            "zero_count": zero_count,
-            "non_zero_pct": non_zero_pct,
-            "zero_pct": zero_pct,
-            "risk_label": risk,
-            "status": status,
-        })
-
-    results.sort(key=lambda x: x["non_zero_pct"], reverse=True)
-    return results
-
-
-def compute_poor_mans_curve_data(df: pd.DataFrame, x_col: str, y_col: str, n_bins: int = 12) -> Dict[str, Any]:
-    sub = df[[x_col, y_col]].dropna().copy()
-    sub[x_col] = pd.to_numeric(sub[x_col], errors="coerce")
-    sub[y_col] = pd.to_numeric(sub[y_col], errors="coerce")
-    sub = sub.dropna()
-
-    if len(sub) < 5:
-        return {"binned_curve": [], "scatter_sample": [], "shape_indicator": "Insufficient Data", "x_col": x_col, "y_col": y_col}
-
-    sub = sub.sort_values(x_col)
-    
-    try:
-        sub["bin"] = pd.qcut(sub[x_col], q=n_bins, duplicates="drop")
-    except Exception:
-        sub["bin"] = pd.cut(sub[x_col], bins=n_bins)
-
-    binned = (
-        sub.groupby("bin", observed=True)
-        .agg(
-            mean_x=(x_col, "mean"),
-            mean_y=(y_col, "mean"),
-            median_y=(y_col, "median"),
-            min_x=(x_col, "min"),
-            max_x=(x_col, "max"),
-            count=(y_col, "count"),
-        )
-        .reset_index()
-        .dropna()
-    )
-
-    binned_curve = []
-    for _, r in binned.iterrows():
-        binned_curve.append({
-            "bin_label": f"{r['min_x']:.1f} - {r['max_x']:.1f}",
-            "spend_x": round(float(r["mean_x"]), 2),
-            "response_y": round(float(r["mean_y"]), 2),
-            "median_y": round(float(r["median_y"]), 2),
-            "record_count": int(r["count"]),
-        })
-
-    shape_indicator = "Linear"
-    if len(binned_curve) >= 3:
-        slopes = []
-        for i in range(1, len(binned_curve)):
-            dx = binned_curve[i]["spend_x"] - binned_curve[i - 1]["spend_x"]
-            dy = binned_curve[i]["response_y"] - binned_curve[i - 1]["response_y"]
-            if dx > 0:
-                slopes.append(dy / dx)
-        if len(slopes) >= 2:
-            if slopes[-1] < slopes[0] * 0.6:
-                shape_indicator = "Diminishing Returns (Log / Saturated)"
-            elif slopes[-1] > slopes[0] * 1.4:
-                shape_indicator = "Accelerating / Convex (Power)"
-
-    scatter_sample = sub.sample(min(400, len(sub)), random_state=42)[[x_col, y_col]].to_dict(orient="records")
-
-    return {
-        "binned_curve": binned_curve,
-        "scatter_sample": [{"x": r[x_col], "y": r[y_col]} for r in scatter_sample],
-        "shape_indicator": shape_indicator,
-        "x_col": x_col,
-        "y_col": y_col,
-    }
-
-
-def detect_outliers_engine(
-    df: pd.DataFrame,
-    column: str,
-    method: str = "iqr",
-    threshold: float = 1.5,
-) -> Dict[str, Any]:
-    if column not in df.columns:
-        raise ValueError(f"Column '{column}' not in dataset.")
-
-    series = pd.to_numeric(df[column], errors="coerce")
-    valid_idx = series.dropna().index
-    vals = series.dropna()
-
-    if method.lower() == "zscore":
-        mean_v = vals.mean()
-        std_v = vals.std() if vals.std() != 0 else 1.0
-        z_scores = (vals - mean_v).abs() / std_v
-        outlier_mask = z_scores > threshold
-        lower_bound = float(mean_v - threshold * std_v)
-        upper_bound = float(mean_v + threshold * std_v)
-    else:
-        q25 = float(vals.quantile(0.25))
-        q75 = float(vals.quantile(0.75))
-        iqr = q75 - q25
-        lower_bound = float(q25 - threshold * iqr)
-        upper_bound = float(q75 + threshold * iqr)
-        outlier_mask = (vals < lower_bound) | (vals > upper_bound)
-
-    outlier_indices = valid_idx[outlier_mask].tolist()
-    outlier_rows = df.loc[outlier_indices].head(50).to_dict(orient="records")
-
-    return {
-        "column": column,
-        "method": method.upper(),
-        "threshold": threshold,
-        "total_rows": len(df),
-        "outlier_count": len(outlier_indices),
-        "outlier_pct": round((len(outlier_indices) / len(df)) * 100, 2) if len(df) > 0 else 0.0,
-        "lower_bound": round(lower_bound, 2),
-        "upper_bound": round(upper_bound, 2),
-        "preview_flagged_rows": outlier_rows,
-        "outlier_indices": outlier_indices,
-    }
-
-
-def remove_outliers_engine(
-    df: pd.DataFrame,
-    column: str,
-    method: str = "iqr",
-    threshold: float = 1.5,
-) -> Dict[str, Any]:
-    detection = detect_outliers_engine(df, column, method, threshold)
-    indices_to_drop = set(detection["outlier_indices"])
-    clean_df = df.drop(index=list(indices_to_drop)).reset_index(drop=True)
-
-    return {
-        "clean_csv": clean_df.to_csv(index=False),
-        "original_rows": len(df),
-        "dropped_rows": len(indices_to_drop),
-        "remaining_rows": len(clean_df),
-        "column": column,
-    }
-
-
 def compute_cross_correlation_lags(
     df: pd.DataFrame,
     date_col: str,
@@ -2130,38 +1983,5 @@ def compute_cross_correlation_lags(
         })
 
     return lag_results
-
-
-def compute_trend_rollup(
-    df: pd.DataFrame,
-    date_col: str,
-    metric_cols: List[str],
-    period: str = "week",
-    date_format: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    if date_col not in df.columns:
-        return []
-
-    df = df.copy()
-    if date_format:
-        parsed_dates = pd.to_datetime(df[date_col], format=date_format, errors="coerce")
-    else:
-        parsed_dates = _parse_dates_robust(df[date_col].astype(str).str.strip())
-
-    df["_date_parsed"] = parsed_dates
-    df = df.dropna(subset=["_date_parsed"])
-
-    if period == "month":
-        df["_period_str"] = df["_date_parsed"].dt.strftime("%Y-%m")
-    else:
-        df["_period_str"] = df["_date_parsed"].dt.to_period("W").dt.start_time.dt.strftime("%Y-%m-%d")
-
-    valid_metrics = [c for c in metric_cols if c in df.columns]
-    for c in valid_metrics:
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-
-    agg = df.groupby("_period_str", as_index=False)[valid_metrics].sum().sort_values("_period_str")
-    agg.rename(columns={"_period_str": "date"}, inplace=True)
-    return agg.to_dict(orient="records")
 
 

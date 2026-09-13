@@ -116,6 +116,38 @@ def _numeric_bounds(values: pd.Series) -> Dict[str, Any]:
     }
 
 
+def _numeric_summary(values: pd.Series, total: int) -> Dict[str, Any]:
+    """Distribution of one numeric column, for the ingestion summary table.
+
+    `active_pct` is the share of rows that are NON-ZERO, matching
+    `compute_sparsity_stats` on the Data Review screen. Non-null would be the
+    easier number and the wrong one: a spend column that is present but zero for
+    fifty weeks is sparse, and reporting it as 100% healthy hides exactly the
+    problem this column exists to surface.
+    """
+    nums = _to_numeric(values).dropna()
+    if nums.empty:
+        return {"mean": None, "median": None, "std_dev": None,
+                "p75": None, "p95": None, "active_pct": None}
+
+    # Population of one has no spread; pandas returns NaN, which is not JSON.
+    std = float(nums.std(ddof=1)) if len(nums) > 1 else 0.0
+    non_zero = int((nums != 0).sum())
+
+    return {
+        "mean": round(float(nums.mean()), 2),
+        "median": round(float(nums.median()), 2),
+        "std_dev": round(std, 2),
+        "p75": round(float(nums.quantile(0.75)), 2),
+        "p95": round(float(nums.quantile(0.95)), 2),
+        "active_pct": round(100.0 * non_zero / total, 2) if total else 0.0,
+    }
+
+
+EMPTY_SUMMARY = {"mean": None, "median": None, "std_dev": None,
+                 "p75": None, "p95": None, "active_pct": None}
+
+
 def _date_bounds(values: pd.Series, fmt: Optional[str]) -> Dict[str, Any]:
     """Bounds as ISO `YYYY-MM-DD`, which is what `date_range` accepts.
 
@@ -150,12 +182,22 @@ def column_stats(
         "distinct_count": int(values.nunique()) if len(values) else 0,
     }
 
+    # `numeric` is what the stats pass actually determined, which is not the
+    # same as what the user has typed on the Columns & Types tab yet. The
+    # summary table reads it to decide whether a column is a metric, so a
+    # freshly uploaded file classifies correctly instead of everything landing
+    # under "Dimension" until someone visits that tab.
+    info["numeric"] = False
+    info.update(EMPTY_SUMMARY)
+
     if not len(values):
         info["min"] = info["max"] = info["control_total"] = None
         return info
 
     if kind == "number":
         info.update(_numeric_bounds(values))
+        info.update(_numeric_summary(values, total))
+        info["numeric"] = True
     elif kind == "date":
         info.update(_date_bounds(values, date_fmt))
         info["control_total"] = None
@@ -170,7 +212,17 @@ def column_stats(
         if not _is_identifier(name):
             nums = _to_numeric(values)
             if nums.notna().all():
-                info["control_total"] = _numeric_bounds(values)["control_total"]
+                # The whole distribution, on the same reasoning as the total: a
+                # mean or a minimum is arithmetic on values that are all
+                # numbers, not a claim that the column is meant to be a metric.
+                #
+                # These bounds are safe to report even though they also feed the
+                # filter hints, because the filter picks its control from
+                # `kind`, which is still "string" here - so the numeric branch
+                # that reads min/max never renders for this column.
+                info.update(_numeric_bounds(values))
+                info.update(_numeric_summary(values, total))
+                info["numeric"] = True
 
     return info
 
