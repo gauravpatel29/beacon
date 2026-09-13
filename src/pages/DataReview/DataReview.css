@@ -407,6 +407,13 @@
   min-width: 0;
 }
 
+/* Percentiles need two bounds where z-score needs one threshold, so the row
+   carries five children instead of four. The template is widened here rather
+   than letting the fifth wrap onto an implicit second row. */
+.outlier-controls-row.with-percentiles {
+  grid-template-columns: 1.2fr 1.2fr 1fr 1fr auto;
+}
+
 @media (max-width: 1100px) {
   .outlier-controls-row {
     grid-template-columns: 1fr 1fr;

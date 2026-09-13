@@ -1,0 +1,5 @@
+# BrowserRouter: hand index.html to every path and let the router resolve it.
+# This lives in public/ so Vite copies it into dist/ — netlify.toml sits at the
+# repo root and is NOT part of the build output, so it is ignored by a deploy
+# that uploads the dist folder directly.
+/*    /index.html   200

@@ -102,8 +102,10 @@ function DataReview() {
 
   const [distVariable, setDistVariable] = useState('');
   const [outlierVariable, setOutlierVariable] = useState('');
-  const [outlierThreshold, setOutlierThreshold] = useState(1.5);
-  const [outlierMethod, setOutlierMethod] = useState('iqr');
+  const [outlierThreshold, setOutlierThreshold] = useState(3.0);
+  const [outlierMethod, setOutlierMethod] = useState('percentile');
+  const [outlierLowerPct, setOutlierLowerPct] = useState(1.0);
+  const [outlierUpperPct, setOutlierUpperPct] = useState(99.0);
   const [excludedRowKeys, setExcludedRowKeys] = useState(new Set());
 
   const [xAxisVar, setXAxisVar] = useState('');
@@ -316,12 +318,15 @@ function DataReview() {
     if (activeTab !== 'outliers' || !activeCsv || !outlierVariable) return undefined;
     let cancelled = false;
     edaDetectOutliers({ csv_data: activeCsv, column: outlierVariable,
-                        method: outlierMethod, threshold: Number(outlierThreshold) || 1.5 })
+                        method: outlierMethod, threshold: Number(outlierThreshold) || 3.0,
+                        lower_percentile: Number(outlierLowerPct),
+                        upper_percentile: Number(outlierUpperPct) })
       .then((d) => { if (!cancelled) setOutlierRaw(d); })
       .catch((err) => { if (!cancelled) { setOutlierRaw(null); failed('Outlier detection')(err); } });
     return () => { cancelled = true; };
     // eslint-disable-next-line
-  }, [activeTab, activeCsv, outlierVariable, outlierMethod, outlierThreshold]);
+  }, [activeTab, activeCsv, outlierVariable, outlierMethod, outlierThreshold,
+      outlierLowerPct, outlierUpperPct]);
 
   // ── Tab 4: scatter + poor man's curve, fired together ────────────────────
   useEffect(() => {
@@ -910,7 +915,7 @@ function DataReview() {
                   {outlierResult && (
                     <div className="review-card">
                       <p className="review-card-heading">Outlier Diagnostics for {outlierVariable.toUpperCase()}</p>
-                      <div className="outlier-controls-row">
+                      <div className={`outlier-controls-row${outlierMethod === 'percentile' ? ' with-percentiles' : ''}`}>
                         <div className="ard-select-field">
                           <label>Variable</label>
                           <select value={outlierVariable} onChange={(e) => setOutlierVariable(e.target.value)}>
@@ -920,17 +925,32 @@ function DataReview() {
                         <div className="ard-select-field">
                           <label>Detection Strategy</label>
                           <select value={outlierMethod} onChange={(e) => setOutlierMethod(e.target.value)}>
-                            <option value="iqr">IQR (Interquartile Range)</option>
+                            <option value="percentile">Percentiles</option>
                             <option value="zscore">Z-Score (Standard Deviations)</option>
                           </select>
                         </div>
-                        <div className="ard-select-field">
-                          <label>
-                            Threshold Value: (N &times; {outlierMethod === 'zscore' ? 'σ' : 'IQR'})
-                          </label>
-                          <input type="number" step="0.1" value={outlierThreshold} onChange={(e) => setOutlierThreshold(Number(e.target.value) || 1.5)}
-                            style={{ width: '100%', padding: '0.65rem 0.8rem', border: '1.5px solid var(--color-border)', borderRadius: 'var(--radius-sm)' }} />
-                        </div>
+                        {outlierMethod === 'percentile' ? (
+                          <>
+                            <div className="ard-select-field">
+                              <label>Lower Percentile</label>
+                              <input type="number" step="0.5" min="0" max="100" value={outlierLowerPct}
+                                onChange={(e) => setOutlierLowerPct(Number(e.target.value))}
+                                style={{ width: '100%', padding: '0.65rem 0.8rem', border: '1.5px solid var(--color-border)', borderRadius: 'var(--radius-sm)' }} />
+                            </div>
+                            <div className="ard-select-field">
+                              <label>Upper Percentile</label>
+                              <input type="number" step="0.5" min="0" max="100" value={outlierUpperPct}
+                                onChange={(e) => setOutlierUpperPct(Number(e.target.value))}
+                                style={{ width: '100%', padding: '0.65rem 0.8rem', border: '1.5px solid var(--color-border)', borderRadius: 'var(--radius-sm)' }} />
+                            </div>
+                          </>
+                        ) : (
+                          <div className="ard-select-field">
+                            <label>Threshold Value: (N &times; σ)</label>
+                            <input type="number" step="0.1" value={outlierThreshold} onChange={(e) => setOutlierThreshold(Number(e.target.value) || 3.0)}
+                              style={{ width: '100%', padding: '0.65rem 0.8rem', border: '1.5px solid var(--color-border)', borderRadius: 'var(--radius-sm)' }} />
+                          </div>
+                        )}
                         <button className="recalc-btn">&#8635; Re-Scan Outliers</button>
                       </div>
                       <div className="outlier-stat-row">
