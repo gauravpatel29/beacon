@@ -148,12 +148,14 @@ function suggestCategory(filename) {
 
 // Rows past this many scroll rather than pushing the preview table off screen.
 const NULL_ROWS_BEFORE_SCROLL = 5;
-
-function ControlTotalsRibbon({ stats, isOpen, onToggle }) {
+function ControlTotalsRibbon({ stats, file, isOpen, onToggle }) {
   const { data, isLoading, error } = stats || {};
-  const columns = data?.columns || [];
   const rowCount = data?.row_count ?? 0;
   const duplicates = data?.duplicate_rows ?? 0;
+
+  // Same rows the summary table needs, built from data this component
+  // already receives — no extra network call.
+  const summaryRows = buildSummaryRows(file || {}, stats);
 
   return (
     <div className="control-totals">
@@ -179,8 +181,6 @@ function ControlTotalsRibbon({ stats, isOpen, onToggle }) {
           </span>
         </span>
         <span className="control-totals-toggle">
-          {/* "detail" rather than "null %": the panel carries the control
-              totals and the missing counts as well now. */}
           {error ? 'Unavailable' : isLoading ? 'Loading…' : isOpen ? 'Hide detail' : 'Show detail'}
           {!error && !isLoading && (
             <span className={`control-totals-caret${isOpen ? ' is-open' : ''}`} aria-hidden="true">▾</span>
@@ -191,43 +191,50 @@ function ControlTotalsRibbon({ stats, isOpen, onToggle }) {
       {error && <p className="control-totals-error">{error}</p>}
 
       {isOpen && data && (
-        <div
-          className={`control-totals-panel${columns.length > NULL_ROWS_BEFORE_SCROLL ? ' is-scrollable' : ''}`}
-        >
-          <div className="null-row null-row-head">
-            <span>Column</span>
-            <span>Nulls</span>
-            <span className="null-row-pct">%</span>
-            <span className="null-row-count">Missing</span>
-            <span className="null-row-total">Control total</span>
-          </div>
-          {columns.map((col) => {
-            const { bar, tint } = nullPctColor(col.null_pct);
-            return (
-              <div className="null-row" key={col.column}>
-                <span className="null-row-name" title={col.column}>{col.column}</span>
-                <span className="null-row-track" style={{ backgroundColor: tint }}>
-                  <span
-                    className="null-row-fill"
-                    style={{ width: `${Math.max(0, Math.min(100, col.null_pct))}%`, backgroundColor: bar }}
-                  />
-                </span>
-                <span className="null-row-pct" style={{ color: bar }}>
-                  {col.null_pct}%
-                </span>
-                <span className="null-row-count">
-                  {col.null_count.toLocaleString()} null
-                </span>
-                {/* The same figure the Data Review summary calls a control
-                    total: the column sum, for reconciling against the source
-                    system. Only numeric columns have one. */}
-                <span className="null-row-total" title={col.control_total != null ? 'Sum of this column' : 'Not a numeric column'}>
-                  {col.control_total != null ? col.control_total.toLocaleString() : '\u2014'}
-                </span>
-              </div>
-            );
-          })}
-          {!columns.length && <p className="control-totals-error">No columns to report.</p>}
+        <div className="summary-stats-table-wrapper">
+          <table className="summary-stats-table">
+            <thead>
+              <tr>
+                <th>Variable</th><th>Role</th><th>Distinct (N)</th><th>Control Totals (Sum)</th>
+                <th>Active Sparsity Health</th><th>Mean</th><th>Median</th><th>Std Dev</th>
+                <th>Min</th><th>Max</th><th>75th %ile</th><th>95th %ile</th><th>% Missing</th>
+              </tr>
+            </thead>
+            <tbody>
+              {summaryRows.map((r) => (
+                <tr key={r.column}>
+                  <td><strong>{r.column}</strong></td>
+                  <td><span className={`role-badge ${r.role.toLowerCase()}`}>{r.role}</span></td>
+                  <td>{r.distinct !== null ? r.distinct.toLocaleString() : 'NA'}</td>
+                  <td>{r.controlTotal !== null ? r.controlTotal.toLocaleString() : 'NA'}</td>
+                  <td>
+                    {r.activePct !== null ? (
+                      <span className={`health-badge ${r.activePct >= 40 ? 'good' : r.activePct >= 15 ? 'warn' : 'bad'}`}>
+                        {r.activePct.toFixed(2)}% active
+                      </span>
+                    ) : 'NA'}
+                  </td>
+                  <td>{'NA'}</td>
+                  <td>{'NA'}</td>
+                  <td>{'NA'}</td>
+                  <td>{r.min ?? 'NA'}</td>
+                  <td>{r.max ?? 'NA'}</td>
+                  <td>{'NA'}</td>
+                  <td>{'NA'}</td>
+                  <td>
+                    {r.nullPct !== null ? (
+                      <span className={`health-badge ${r.nullPct <= 5 ? 'good' : r.nullPct <= 20 ? 'warn' : 'bad'}`}>
+                        {r.nullPct.toFixed(2)}%
+                      </span>
+                    ) : 'NA'}
+                  </td>
+                </tr>
+              ))}
+              {!summaryRows.length && (
+                <tr><td colSpan={13} className="control-totals-error">No columns to report.</td></tr>
+              )}
+            </tbody>
+          </table>
         </div>
       )}
     </div>
@@ -239,6 +246,39 @@ function ControlTotalsRibbon({ stats, isOpen, onToggle }) {
 // column the user has not typed yet is a string, and gets the value picker -
 // which is the honest default, since an unconfirmed profile guess is not a
 // fact about the data.
+
+// ─── Summary stats helpers ──────────────────────────────────────────────────
+// Builds per-column summary rows from real fields confirmed on this project:
+//   /profile → column, non_null, null_count, unique_count, suggested_dtype, id_like
+//   /stats   → column, null_pct, control_total, (min/max if present)
+// mean/median/std_dev/p75/p95 do not exist anywhere yet — shown as "—" until
+// the backend adds them.
+function buildSummaryRows(file, statsFor) {
+  const statsByColumn = Object.fromEntries((statsFor?.data?.columns || []).map((c) => [c.column, c]));
+
+  return (file.profile || []).map((p) => {
+    const statEntry = statsByColumn[renamedName(file, p.column)] || {};
+
+    const dtype = p.suggested_dtype || 'string';
+    const isDate = dtype === 'date';
+    const isMetric = !p.id_like && (dtype === 'integer' || dtype === 'float');
+    const role = p.id_like ? 'Dimension' : isDate ? 'Date' : isMetric ? 'Metric' : 'Dimension';
+
+    const total = (p.non_null ?? 0) + (p.null_count ?? 0);
+    const activePct = total ? (p.non_null / total) * 100 : null;
+
+    return {
+      column: p.column,
+      role,
+      distinct: p.unique_count ?? null,
+      controlTotal: statEntry.control_total ?? null,
+      activePct: isMetric ? activePct : null,
+      min: statEntry.min ?? null,
+      max: statEntry.max ?? null,
+      nullPct: statEntry.null_pct ?? null,
+    };
+  });
+}
 
 /** Debounced server-side search over one column's distinct values. */
 function ValuePicker({ workflowId, filename, column, selected, onChange }) {
@@ -845,6 +885,11 @@ function DataIngestion() {
     // eslint-disable-next-line
   }, [statsKey, statsVersion]);
 
+  useEffect(() => {
+  if (selectedFile?.profile?.[0]) {
+    console.log('PROFILE SHAPE:', JSON.stringify(selectedFile.profile[0], null, 2));
+  }
+}, [selectedFile]);
   // Anything not yet resolved for THIS file reads as loading, including the
   // window between selecting a file and its request coming back.
   const statsFor = selectedFile
@@ -1606,6 +1651,7 @@ function DataIngestion() {
                 {/* Shared across every tab: previewing from Standardize, Filter or
                     Granularity should show its result in place, not send the user
                     back to Assign Category. */}
+
                 <hr className="mapping-divider" />
 
                 <div className="mapping-preview-section">
@@ -1617,6 +1663,7 @@ function DataIngestion() {
                   {activeTab === 'mapping' && statsFor && (
                     <ControlTotalsRibbon
                       stats={statsFor}
+                      file={selectedFile}
                       isOpen={statsOpen}
                       onToggle={() => setStatsOpen((open) => !open)}
                     />
