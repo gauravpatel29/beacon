@@ -88,7 +88,7 @@ function WorkflowSwitcher({ collapsed }) {
     <div className="workflow-switcher" ref={rootRef}>
       <button
         type="button"
-        className={`workflow-chip${open ? ' is-open' : ''}`}
+        className={`wf-switch-chip${open ? ' is-open' : ''}`}
         onClick={() => setOpen((prev) => !prev)}
         aria-haspopup="listbox"
         aria-expanded={open}
@@ -96,16 +96,16 @@ function WorkflowSwitcher({ collapsed }) {
       >
         {collapsed ? (
           // Just the first letter when there is no room for a name.
-          <span className="workflow-chip-initial" aria-hidden="true">
+          <span className="wf-switch-chip-initial" aria-hidden="true">
             {label.trim().charAt(0).toUpperCase() || 'W'}
           </span>
         ) : (
           <>
-            <span className="workflow-chip-text">
-              <span className="workflow-chip-label">Workflow</span>
-              <span className="workflow-chip-name">{label}</span>
+            <span className="wf-switch-chip-text">
+              <span className="wf-switch-chip-label">Workflow</span>
+              <span className="wf-switch-chip-name">{label}</span>
             </span>
-            <span className="workflow-chip-caret" aria-hidden="true">▾</span>
+            <span className="wf-switch-chip-caret" aria-hidden="true">▾</span>
           </>
         )}
       </button>

@@ -73,13 +73,13 @@ t('and can shrink to do so', /\.sidebar-nav \{[^}]*min-height: 0/.test(css),
   'a flex child will not scroll without it');
 
 console.log('\n6. collapsed state stays usable');
-t('the chip falls back to an initial', sw.includes('workflow-chip-initial'), 'name is cut off');
+t('the chip falls back to an initial', sw.includes('wf-switch-chip-initial'), 'name is cut off');
 t('the full name is still available as a tooltip',
   /title=\{collapsed \? label/.test(sw), 'no way to read it');
 t('the header stacks when there is no room',
   /\.sidebar\.collapsed \.sidebar-head \{[^}]*flex-direction: column/.test(css), 'controls overlap');
 t('a long name cannot widen the sidebar',
-  /\.workflow-chip-name \{[^}]*text-overflow: ellipsis/.test(css), 'layout would stretch');
+  /\.wf-switch-chip-name \{[^}]*text-overflow: ellipsis/.test(css), 'layout would stretch');
 
 console.log('\n7. the chip and the toggle line up');
 // The chip is two lines tall and the toggle one, so centring left a small

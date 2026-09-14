@@ -80,7 +80,7 @@
   min-width: 0;
 }
 
-.workflow-chip {
+.wf-switch-chip {
   display: flex;
   align-items: center;
   gap: 0.4rem;
@@ -93,24 +93,24 @@
   text-align: left;
 }
 
-.workflow-chip:hover,
-.workflow-chip.is-open {
+.wf-switch-chip:hover,
+.wf-switch-chip.is-open {
   background-color: rgba(255, 255, 255, 0.26);
 }
 
-.workflow-chip:focus-visible {
+.wf-switch-chip:focus-visible {
   outline: 2px solid var(--color-white);
   outline-offset: 2px;
 }
 
-.workflow-chip-text {
+.wf-switch-chip-text {
   display: flex;
   flex-direction: column;
   min-width: 0;
   flex: 1 1 auto;
 }
 
-.workflow-chip-label {
+.wf-switch-chip-label {
   font-size: 0.6rem;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -118,7 +118,7 @@
 }
 
 /* One line, clipped: a long workflow name must not widen the sidebar. */
-.workflow-chip-name {
+.wf-switch-chip-name {
   font-size: 0.78rem;
   font-weight: var(--font-weight-semibold);
   white-space: nowrap;
@@ -126,13 +126,13 @@
   text-overflow: ellipsis;
 }
 
-.workflow-chip-caret {
+.wf-switch-chip-caret {
   flex: 0 0 auto;
   font-size: 0.6rem;
   opacity: 0.8;
 }
 
-.workflow-chip-initial {
+.wf-switch-chip-initial {
   display: flex;
   align-items: center;
   justify-content: center;

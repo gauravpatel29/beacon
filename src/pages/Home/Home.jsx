@@ -9,7 +9,7 @@ import {
   selectWorkflow,
   updateWorkflow,
 } from '../../services/api.js';
-import { resumeRouteFor } from '../../services/workflowStages.js';
+import { STAGES, resumeRouteFor } from '../../services/workflowStages.js';
 import procdna_logo from "../../assets/procdna_logo.png";
 import hero_image from "../../assets/hero_image.jpg";
 import database from "../../assets/database.png";
@@ -83,15 +83,26 @@ const pipelineCards = [
   },
 ];
 
-const WORKFLOW_STAGES = ['Not Started', ...pipelineCards.map((card) => card.title)];
+// The stage filter has to offer the labels a workflow is actually recorded
+// with, not the pipeline card titles. Those two drifted: a workflow on the
+// stitching screen is stored as 'Data Stitching', while the card is titled
+// 'Data Stitching & ARD Creation', so picking it matched nothing - and the
+// list also offered screens that do not exist yet.
+const WORKFLOW_STAGES = ['Not Started', ...Object.values(STAGES).map((s) => s.stage)];
 
+// The four stages the app actually records (see services/workflowStages.js)
+// run amber -> blue -> violet -> green, so the pill reads as progress too.
+// Stitching and Review were missing entirely and fell through to neutral,
+// which made a workflow halfway through look like one never started.
 const STAGE_TONES = {
   'Not Started': 'neutral',
   'Data Ingestion': 'amber',
+  'Data Stitching': 'blue',
+  'Data Review': 'violet',
   'Integrated Analytics': 'blue',
   'Correlation Analysis': 'blue',
   'Exploratory Data Analysis': 'violet',
-  'Data Transformation': 'violet',
+  'Data Transformation': 'green',
   'MMM Modelling': 'red',
   'Response Curves': 'green',
   Optimization: 'green',
