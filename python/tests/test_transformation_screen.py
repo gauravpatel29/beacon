@@ -240,7 +240,41 @@ def main() -> int:
         check("fewer than two columns is an empty answer, not an error",
               r.status_code == 200 and r.json()["columns"] == [], r.text[:200])
 
-        print("\n8. preview-single: the live per-channel panel")
+        print("\n7b. the highlight threshold is a display filter, not a query")
+        # The screen fetches the matrix once with threshold 0 and filters the
+        # pairs itself as the slider moves, because re-querying on every 0.05
+        # step re-uploaded the whole dataset and the connection gave out. This
+        # pins that the local rule reproduces the engine's exactly: upper
+        # triangle, |r| >= threshold, strongest first.
+        full = c.post("/api/transformation/correlation", json={
+            "csv_data": applied["csv_data"],
+            "columns": ["calls_transformed", "emails_transformed"],
+            "threshold": 0,
+        }).json()
+
+        def pairs_from_matrix(matrix, cols, threshold):
+            out = []
+            for i in range(len(cols)):
+                for j in range(i + 1, len(cols)):
+                    r = float(matrix.get(cols[i], {}).get(cols[j], 0.0) or 0.0)
+                    if abs(r) >= threshold:
+                        out.append((cols[i], cols[j], abs(r)))
+            return sorted(out, key=lambda p: p[2], reverse=True)
+
+        for t_val in (0.0, 0.1, 0.5, 0.7, 0.9, 1.0):
+            server = c.post("/api/transformation/correlation", json={
+                "csv_data": applied["csv_data"],
+                "columns": ["calls_transformed", "emails_transformed"],
+                "threshold": t_val,
+            }).json()
+            expected = [(p["feature1"], p["feature2"]) for p in server["pairs"]]
+            local = [(a, b) for a, b, _ in
+                     pairs_from_matrix(full["matrix"], full["columns"], t_val)]
+            check(f"threshold {t_val}: same pairs, same order", local == expected,
+                  {"server": expected, "local": local})
+
+        check("threshold 0 returns every pair, which is what the screen caches",
+              len(full["pairs"]) == 1, len(full["pairs"]))
         # The screen previews ONE channel as its config is edited, before any
         # Apply. Everything the panel renders comes from this one response.
         r = c.post("/api/transformation/preview-single", json={
