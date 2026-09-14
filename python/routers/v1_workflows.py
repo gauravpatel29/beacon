@@ -116,20 +116,18 @@ async def create_workflow(payload: WorkflowCreateRequest):
     query = """
     INSERT INTO workflows (id, workflow_name, state, tag, created_at, updated_at)
     VALUES ($1, $2, $3, $4, $5, $6)
-    RETURNING id, workflow_name, state, tag, created_at, updated_at;
+    RETURNING id, workflow_name, state, tag, created_at, updated_at,
+              current_stage, current_route, module_status, state_data;
     """
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(query, wf_id, name, state_val, tag_val, now, now)
 
-    return {
-        "id": row["id"],
-        "workflow_name": row["workflow_name"],
-        "state": row["state"],
-        "tag": row["tag"],
-        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
-        "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
-    }
+    # Through the shared serializer, so a created workflow reports the same
+    # fields as a fetched one. It used to build its own dict and omit both the
+    # `name` alias and the four resume columns, which meant the object handed
+    # straight to the router after creation had no route to resume to.
+    return _workflow_out(row)
 
 
 # ─── 2. GET /v1/workflows ────────────────────────────────────────────────────
@@ -269,10 +267,17 @@ async def patch_workflow(workflow_id: str, payload: Dict[str, Any]):
                 params.append(str(payload[field])[:100] if payload[field] is not None else None)
                 updates.append(f"{field} = ${len(params)}")
 
+        # Shallow-merged, not replaced. Each screen saves only its own key, so
+        # a full replace meant whichever screen saved last wiped the rest - the
+        # Stitching draft would erase the Transformation config and vice versa.
+        # `||` merges at the top level: keys in the payload win, keys absent
+        # from it survive untouched.
         for field in ("module_status", "state_data"):
             if field in payload:
                 params.append(json.dumps(payload[field] or {}))
-                updates.append(f"{field} = ${len(params)}::jsonb")
+                updates.append(
+                    f"{field} = COALESCE({field}, '{{}}'::jsonb) || ${len(params)}::jsonb"
+                )
 
         returning = ("id, workflow_name, state, tag, created_at, updated_at, "
                      "current_stage, current_route, module_status, state_data")
