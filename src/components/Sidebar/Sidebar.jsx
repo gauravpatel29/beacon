@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { NavLink } from 'react-router-dom';
+import WorkflowSwitcher from './WorkflowSwitcher.jsx';
 import './Sidebar.css';
 import home from "../../assets/sidebar_icon/home.png";
 import cloud from "../../assets/sidebar_icon/cloud.png";
@@ -27,14 +28,21 @@ function Sidebar() {
 
   return (
     <aside className={`sidebar${collapsed ? ' collapsed' : ''}`}>
-      {/* Collapse / expand toggle */}
-      <button
-        className="sidebar-toggle-btn"
-        onClick={() => setCollapsed((prev) => !prev)}
-        aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-      >
-        {collapsed ? '›' : '‹'}
-      </button>
+      {/* Which workflow this is, and the collapse control, on one row. The
+          toggle used to float half outside the sidebar's right edge. */}
+      <div className="sidebar-head">
+        <WorkflowSwitcher collapsed={collapsed} />
+        <button
+          type="button"
+          className="sidebar-toggle-btn"
+          onClick={() => setCollapsed((prev) => !prev)}
+          aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          aria-expanded={!collapsed}
+          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        >
+          <span aria-hidden="true">{collapsed ? '»' : '«'}</span>
+        </button>
+      </div>
 
       <nav className="sidebar-nav">
         {navItems.map((item) => (

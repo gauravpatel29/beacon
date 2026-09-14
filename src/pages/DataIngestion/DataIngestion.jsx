@@ -16,20 +16,21 @@ import {
   storedWorkflowId,
   uploadFiles,
 } from '../../services/api.js';
+import { forgetFile, recordStage } from '../../services/workflowState.js';
+import { useScreenState } from '../../services/useScreenState.js';
 import {
   buildFilters,
   buildLiveUpdates,
   buildSpec,
   clampDtype,
   conditionIsSet,
+  describeChainEntry,
+  emptyChainEntry,
   emptyCondition,
-  emptyRule,
   looksLikeNpi,
-  normalizeRule,
-  restoreFilterGroups,
-  restoreFilterMode,
+  partitionNewFiles,
+  restoreFilterChain,
   restoreGranularity,
-  ruleIsSet,
   humanFormat,
   localProblems,
   localWarnings,
@@ -214,13 +215,13 @@ function ControlTotalsRibbon({ stats, file, isOpen, onToggle }) {
                       </span>
                     ) : 'NA'}
                   </td>
-                  <td>{'NA'}</td>
-                  <td>{'NA'}</td>
-                  <td>{'NA'}</td>
-                  <td>{r.min ?? 'NA'}</td>
-                  <td>{r.max ?? 'NA'}</td>
-                  <td>{'NA'}</td>
-                  <td>{'NA'}</td>
+                  <td>{num(r.mean)}</td>
+                  <td>{num(r.median)}</td>
+                  <td>{num(r.stdDev)}</td>
+                  <td>{num(r.min)}</td>
+                  <td>{num(r.max)}</td>
+                  <td>{num(r.p75)}</td>
+                  <td>{num(r.p95)}</td>
                   <td>
                     {r.nullPct !== null ? (
                       <span className={`health-badge ${r.nullPct <= 5 ? 'good' : r.nullPct <= 20 ? 'warn' : 'bad'}`}>
@@ -253,6 +254,16 @@ function ControlTotalsRibbon({ stats, file, isOpen, onToggle }) {
 //   /stats   → column, null_pct, control_total, (min/max if present)
 // mean/median/std_dev/p75/p95 do not exist anywhere yet — shown as "—" until
 // the backend adds them.
+/**
+ * One summary cell. Numbers get thousands separators; date bounds arrive as
+ * ISO strings and pass through as they are; a column with no such statistic
+ * reads "NA" rather than an empty cell that looks like a loading state.
+ */
+function num(value) {
+  if (value === null || value === undefined) return 'NA';
+  return typeof value === 'number' ? value.toLocaleString() : String(value);
+}
+
 function buildSummaryRows(file, statsFor) {
   const statsByColumn = Object.fromEntries((statsFor?.data?.columns || []).map((c) => [c.column, c]));
 
@@ -260,19 +271,29 @@ function buildSummaryRows(file, statsFor) {
     const statEntry = statsByColumn[renamedName(file, p.column)] || {};
 
     const dtype = p.suggested_dtype || 'string';
-    const isDate = dtype === 'date';
-    const isMetric = !p.id_like && (dtype === 'integer' || dtype === 'float');
+    const isDate = dtype === 'date' || statEntry.kind === 'date';
+    // `numeric` is what /stats determined by reading the values, which is the
+    // better signal than the upload-time guess: a column nobody has typed yet
+    // still has a sum and a mean, and would otherwise sit under "Dimension"
+    // with a control total beside it.
+    const isMetric = !p.id_like && !isDate
+      && (dtype === 'integer' || dtype === 'float' || statEntry.numeric === true);
     const role = p.id_like ? 'Dimension' : isDate ? 'Date' : isMetric ? 'Metric' : 'Dimension';
-
-    const total = (p.non_null ?? 0) + (p.null_count ?? 0);
-    const activePct = total ? (p.non_null / total) * 100 : null;
 
     return {
       column: p.column,
       role,
-      distinct: p.unique_count ?? null,
+      distinct: statEntry.distinct_count ?? p.unique_count ?? null,
       controlTotal: statEntry.control_total ?? null,
-      activePct: isMetric ? activePct : null,
+      // Share of rows that are NON-ZERO, not non-null - the same definition the
+      // Data Review sparsity panel uses. A tactic present but zero for fifty
+      // weeks is sparse, and non-null would report it as perfectly healthy.
+      activePct: statEntry.active_pct ?? null,
+      mean: statEntry.mean ?? null,
+      median: statEntry.median ?? null,
+      stdDev: statEntry.std_dev ?? null,
+      p75: statEntry.p75 ?? null,
+      p95: statEntry.p95 ?? null,
       min: statEntry.min ?? null,
       max: statEntry.max ?? null,
       nullPct: statEntry.null_pct ?? null,
@@ -287,6 +308,8 @@ function ValuePicker({ workflowId, filename, column, selected, onChange }) {
   const [isSearching, setIsSearching] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+
+
 
   useEffect(() => {
     if (!column) return undefined;
@@ -392,15 +415,50 @@ function filterKindOf(file, stats, column) {
 let fileIdCounter = 0;
 
 function DataIngestion() {
-  // TEMP: using plain local state for now instead of global Context/API
-  // persistence. Once workflow-creation APIs are available, swap this back
-  // to useAppState() (see AppContext.jsx) so ingestion progress persists
-  // across pages/sessions.
+  // Per-file configuration lives in each dataset's manifest on the server and
+  // is read back by the resume effect below - it is NOT duplicated into the
+  // workflow's state_data, which would be a second copy free to disagree with
+  // the one that actually derives the frame. What is kept there is the screen
+  // position: which file is open, which tab, and a category picked but not yet
+  // applied.
+  const pendingScreen = useRef(null);
   const [uploadedFiles, setUploadedFiles] = useState([]);
   const [selectedFileId, setSelectedFileId] = useState(null);
   const [isDragging, setIsDragging] = useState(false);
   const [activeTab, setActiveTab] = useState('mapping'); // mapping | standardize | filter | granularity
   const [visitedTabs, setVisitedTabs] = useState(new Set(['mapping']));
+
+  // Remember where the user got to, so Resume reopens this screen instead
+  // of always returning to Data Ingestion.
+  useEffect(() => { recordStage('ingestion'); }, []);
+
+  // Files are keyed by filename, not by the in-memory id: ids are regenerated
+  // on every load, so one stored from a previous session would match nothing.
+  const stateRestored = useScreenState('ingestion', {
+    ready: uploadedFiles.length > 0,
+    deps: [activeTab, selectedFileId, uploadedFiles, visitedTabs],
+    snapshot: () => ({
+      activeTab,
+      openFile: uploadedFiles.find((f) => f.id === selectedFileId)?.filename || null,
+      visitedTabs: Array.from(visitedTabs),
+      // A category chosen but not yet applied. The committed spec wins over
+      // this on restore, so it can only ever fill a gap, never contradict.
+      pendingCategories: Object.fromEntries(
+        uploadedFiles.filter((f) => f.category).map((f) => [f.filename, f.category])
+      ),
+    }),
+    restore: (v) => {
+      if (typeof v.activeTab === 'string') setActiveTab(v.activeTab);
+      if (Array.isArray(v.visitedTabs) && v.visitedTabs.length) {
+        setVisitedTabs(new Set(v.visitedTabs));
+      }
+      pendingScreen.current = {
+        openFile: v.openFile || null,
+        pendingCategories: v.pendingCategories || {},
+      };
+    },
+  });
+
   const [isApplying, setIsApplying] = useState(false);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [isFiltering, setIsFiltering] = useState(false);
@@ -461,6 +519,9 @@ function DataIngestion() {
   // holds only metadata; bytes remain in object storage and are never
   // re-uploaded just to resume this screen.
   useEffect(() => {
+    // Waits for the restore: the stored open file and any uncommitted
+    // category must be known before this builds the list.
+    if (!stateRestored) return undefined;
     const workflowId = storedWorkflowId();
     if (!workflowId) return undefined;
     let cancelled = false;
@@ -519,16 +580,23 @@ function DataIngestion() {
             // refresh: the tabs came up blank, and the next Apply then sent an
             // empty `filters`/`granularity` and wiped what was stored.
             filterConfig: {
-              activeColumn: '',
-              rules: restoreFilterGroups(spec, renameMap),
-              mode: restoreFilterMode(spec),
+              ...restoreFilterChain(spec, renameMap),
+              draft: null,
             },
             granularityConfig: restoreGranularity(spec.granularity, renameMap),
           };
         }));
         if (!cancelled) {
-          setUploadedFiles(files);
-          setSelectedFileId(files[0]?.id || null);
+          const screen = pendingScreen.current || {};
+          pendingScreen.current = null;
+          // A category the user picked but never applied. The spec already
+          // read above takes precedence, so this only fills a blank.
+          const withCategories = files.map((f) => (
+            f.category ? f : { ...f, category: screen.pendingCategories?.[f.filename] || null }
+          ));
+          setUploadedFiles(withCategories);
+          const reopened = withCategories.find((f) => f.filename === screen.openFile);
+          setSelectedFileId((reopened || withCategories[0])?.id || null);
           // The four tabs are a first-run walkthrough: Apply only appears once
           // they have all been seen. That walk already happened in the session
           // that configured these files, and `visitedTabs` does not survive a
@@ -546,7 +614,9 @@ function DataIngestion() {
     };
     hydrate();
     return () => { cancelled = true; };
-  }, []);
+    // Re-runs once the restore lands, which is what makes the stored open file
+    // and any uncommitted category available to it.
+  }, [stateRestored]);
 
   // ─── File upload + parsing ───────────────────────────────────────────
   const addFiles = async (fileList) => {
@@ -555,10 +625,27 @@ function DataIngestion() {
       /\.(csv|tsv|txt|xlsx|xlsm|xls)$/i.test(file.name)
     );
     if (!csvFiles.length) return;
+
+    const { accepted, duplicates } = partitionNewFiles(
+      uploadedFiles.map((f) => f.filename), csvFiles
+    );
+
+    if (duplicates.length) {
+      window.alert(
+        `Already uploaded: ${duplicates.join(', ')}.\n\n`
+        + 'Filenames have to be unique within a workflow. Remove the existing '
+        + 'file first, or rename the new one before uploading.'
+      );
+    }
+    if (!accepted.length) return;
+
     setIsUploadingFiles(true);
     try {
       const workflowId = await ensureWorkflow();
-      const result = await uploadFiles(workflowId, csvFiles);
+      // overwrite:false so the server refuses a collision too. The check above
+      // only sees what this screen has loaded; this is what stops a name that
+      // is in the workflow but not on screen from being overwritten.
+      const result = await uploadFiles(workflowId, accepted, { overwrite: false });
       const newEntries = await Promise.all(result.files.map(async (dataset) => {
         const profileResponse = dataset.profile ? dataset : await getProfile(workflowId, dataset.filename);
         const profile = profileResponse.profile || [];
@@ -580,7 +667,7 @@ function DataIngestion() {
             .map((p) => [p.column, p.suggested_date_from])),
           // The Filter tab edits one column at a time (`activeColumn`) but keeps a
           // rule per column, so switching the dropdown never discards a filter.
-          filterConfig: { activeColumn: '', rules: {}, mode: 'all' },
+          filterConfig: { chain: [], operators: [], draft: null },
           granularityConfig: { dateCol: '', geoCol: '', detected: null, target: '', numOps: {} },
         };
       }));
@@ -626,6 +713,12 @@ function DataIngestion() {
     }
     setUploadedFiles((prev) => prev.filter((f) => f.id !== fileId));
     if (selectedFileId === fileId) setSelectedFileId(null);
+
+    // The dataset is gone, so nothing saved should still point at it: the
+    // joins built on it, the files ticked for an ARD, a category never
+    // applied. Only after the delete succeeded - a failed one leaves the file
+    // in place, and its state with it.
+    if (file?.filename) forgetFile(file.filename);
   };
 
   const handleCategoryChange = (fileId, category) => {
@@ -680,54 +773,57 @@ function DataIngestion() {
       dateConfigs: file.dateConfigs.map((d) => (d.col === col ? { ...d, format } : d)),
     });
 
-  // Filter tab. One rule per column; the dropdown only chooses which one is
-  // being edited, so switching columns never discards a filter.
-  const setActiveFilterColumn = (file, column) =>
-    updateFileConfig(file.id, {
-      filterConfig: { ...file.filterConfig, activeColumn: column },
-    });
+  // ── Filter chain ────────────────────────────────────────────────────────
+  // The tab builds an ordered chain of cards with an operator in every gap.
+  // A draft is the card being composed; it only joins the chain on Add, so a
+  // half-typed filter never changes what Apply would send.
+  const setFilterConfig = (file, updates) =>
+    updateFileConfig(file.id, { filterConfig: { ...file.filterConfig, ...updates } });
 
-  // Every write to the active column's rule goes through here, so the rule is
-  // normalised to the condition shape in exactly one place.
-  const updateActiveRule = (file, change) => {
-    const column = file.filterConfig.activeColumn;
-    if (!column) return;
-    const kind = filterKindOf(file, statsFor, column);
-    const current = normalizeRule(file.filterConfig.rules?.[column], kind);
-    const next = { ...current, kind, ...change(current) };
-    updateFileConfig(file.id, {
-      filterConfig: {
-        ...file.filterConfig,
-        rules: { ...file.filterConfig.rules, [column]: next },
-      },
-    });
+  const startDraft = (file) =>
+    setFilterConfig(file, { draft: emptyChainEntry('', 'string') });
+
+  const cancelDraft = (file) => setFilterConfig(file, { draft: null });
+
+  const setDraftColumn = (file, column) => {
+    // The kind decides which controls render, so it is resolved once here
+    // rather than re-derived at every keystroke.
+    const kind = column ? filterKindOf(file, statsFor, column) : 'string';
+    setFilterConfig(file, { draft: { column, kind, cond: emptyCondition() } });
   };
 
-  const setConditionField = (file, index, key, value) =>
-    updateActiveRule(file, (rule) => ({
-      conditions: rule.conditions.map((c, i) => (i === index ? { ...c, [key]: value } : c)),
-    }));
+  const setDraftField = (file, key, value) => {
+    const draft = file.filterConfig.draft;
+    if (!draft) return;
+    setFilterConfig(file, { draft: { ...draft, cond: { ...draft.cond, [key]: value } } });
+  };
 
-  const addCondition = (file) =>
-    updateActiveRule(file, (rule) => ({ conditions: [...rule.conditions, emptyCondition()] }));
+  const commitDraft = (file) => {
+    const draft = file.filterConfig.draft;
+    if (!draft || !draft.column) return;
+    if (!conditionIsSet(draft.cond, draft.kind)) return;
+    const chain = [...(file.filterConfig.chain || []), draft];
+    const operators = [...(file.filterConfig.operators || [])];
+    // Every gap needs an operator, and a new card creates one gap. AND is the
+    // default because it narrows, which is the safer thing to do silently.
+    if (chain.length > 1) operators.push('and');
+    setFilterConfig(file, { chain, operators, draft: null });
+  };
 
-  // Removing the last one leaves a blank condition rather than none: the column
-  // is still selected, and a rule with no conditions has nothing to render.
-  const removeCondition = (file, index) =>
-    updateActiveRule(file, (rule) => {
-      const kept = rule.conditions.filter((_, i) => i !== index);
-      return { conditions: kept.length ? kept : [emptyCondition()] };
-    });
+  const removeChainEntry = (file, index) => {
+    const chain = (file.filterConfig.chain || []).filter((_, i) => i !== index);
+    const operators = [...(file.filterConfig.operators || [])];
+    // Drop the gap the removed card sat in: the one before it, or - when it was
+    // the first card - the one after. Otherwise later operators shift onto the
+    // wrong pairs.
+    if (operators.length) operators.splice(index ? index - 1 : 0, 1);
+    setFilterConfig(file, { chain, operators });
+  };
 
-  const setColumnFilterMode = (file, mode) => updateActiveRule(file, () => ({ mode }));
-
-  const setFilterMode = (file, mode) =>
-    updateFileConfig(file.id, { filterConfig: { ...file.filterConfig, mode } });
-
-  const clearFilterRule = (file, column) => {
-    const rules = { ...file.filterConfig.rules };
-    delete rules[column];
-    updateFileConfig(file.id, { filterConfig: { ...file.filterConfig, rules } });
+  const setChainOperator = (file, gap, value) => {
+    const operators = [...(file.filterConfig.operators || [])];
+    operators[gap] = value;
+    setFilterConfig(file, { operators });
   };
 
   // Granularity tab
@@ -901,27 +997,19 @@ function DataIngestion() {
   // Post-rename column -> stats entry, because /stats describes the resolved
   // frame while the tab still works in original column names.
   const statsByColumn = Object.fromEntries((statsFor?.data?.columns || []).map((c) => [c.column, c]));
-  const filterKinds = selectedFile
-    ? Object.fromEntries(selectedFile.selectedCols.map((c) => [c, filterKindOf(selectedFile, statsFor, c)]))
-    : {};
 
-  const activeFilterColumn = selectedFile?.filterConfig?.activeColumn || '';
-  const activeFilterKind = activeFilterColumn ? filterKinds[activeFilterColumn] : null;
-  const activeFilterRule = activeFilterColumn
-    ? normalizeRule(selectedFile.filterConfig.rules?.[activeFilterColumn],
-                    activeFilterKind || 'string')
-    : emptyRule(activeFilterKind || 'string');
-  const activeFilterIsNpi = Boolean(activeFilterColumn) && looksLikeNpi(selectedFile, activeFilterColumn);
-  const activeFilterBounds = activeFilterColumn
-    ? statsByColumn[renamedName(selectedFile, activeFilterColumn)] || null
+  const filterChain = selectedFile?.filterConfig?.chain || [];
+  const filterOperators = selectedFile?.filterConfig?.operators || [];
+  const filterDraft = selectedFile?.filterConfig?.draft || null;
+
+  const draftColumn = filterDraft?.column || '';
+  const draftKind = filterDraft?.kind || 'string';
+  const draftIsNpi = Boolean(draftColumn) && looksLikeNpi(selectedFile, draftColumn);
+  const draftBounds = draftColumn
+    ? statsByColumn[renamedName(selectedFile, draftColumn)] || null
     : null;
-
-  // Which columns currently carry a real constraint - what Apply will send.
-  const activeFilterSummary = selectedFile
-    ? Object.keys(selectedFile.filterConfig.rules || {})
-        .filter((c) => ruleIsSet(selectedFile.filterConfig.rules[c]))
-        .map((c) => ({ column: c, label: renamedName(selectedFile, c) }))
-    : [];
+  const draftIsUsable = Boolean(draftColumn)
+    && conditionIsSet(filterDraft?.cond, draftKind);
 
   const previewColumns = selectedFile?.previewColumns || selectedFile?.columns || [];
   const hasFiles = uploadedFiles.length > 0;
@@ -1034,7 +1122,21 @@ function DataIngestion() {
               })}
             </div>
 
-            <p className="file-list-footer">Edit remaps · Delete removes</p>
+            {/* The status belongs beside the list it describes: it counts the
+                files in this panel, and each one that needs a category is
+                already flagged in its own row above. One line, either the work
+                left or the all-clear - never both. */}
+            {unmappedCount > 0 && (
+              <p className="file-list-status" role="status">
+                {unmappedCount} file{unmappedCount > 1 ? 's' : ''} still
+                need{unmappedCount === 1 ? 's' : ''} a category
+              </p>
+            )}
+            {canProceed && (
+              <p className="file-list-status is-ready" role="status">
+                All files mapped, ready to proceed
+              </p>
+            )}
           </div>
 
           {/* ---- Right: mapping configuration ---- */}
@@ -1151,13 +1253,8 @@ function DataIngestion() {
                   </div>
                 )}
 
-                {unmappedCount > 0 && (
-                  <div className="mapping-warning-banner">
-                    {unmappedCount} file{unmappedCount > 1 ? 's' : ''} still
-                    need{unmappedCount === 1 ? 's' : ''} a category
-                  </div>
-                )}
-
+                {/* The "still needs a category" count now lives in the file
+                    list panel, next to the rows it is counting. */}
                 {unmappedCount === 0 && !hasRequiredCategories && (
                   <div className="mapping-warning-banner">
                     Please assign at least one file to:{' '}
@@ -1165,11 +1262,9 @@ function DataIngestion() {
                   </div>
                 )}
 
-                {canProceed && (
-                  <div className="mapping-success-banner">
-                    All files mapped ready to proceed
-                  </div>
-                )}
+                {/* The all-clear now sits with the file list, next to the rows
+                    it is reporting on, alongside the "still needs a category"
+                    count it replaces. */}
                   </>
                 )}
 
@@ -1274,247 +1369,220 @@ function DataIngestion() {
 
                 {activeTab === 'filter' && (
                   <>
-                    {/* Shown from the first filter on. It only changes the result
-                        once there are two, but a control that appears only after
-                        you have already built both is a control nobody finds. */}
-                    {activeFilterSummary.length > 0 && (
-                      <div className="filter-mode-row">
-                        <p className="filter-field-label">
-                          {activeFilterSummary.length > 1
-                            ? `Combine ${activeFilterSummary.length} filtered columns with`
-                            : 'Combine filtered columns with'}
-                        </p>
-                        <div className="filter-mode-toggle">
-                          <button
-                            type="button"
-                            className={selectedFile.filterConfig.mode !== 'any' ? 'active' : ''}
-                            onClick={() => setFilterMode(selectedFile, 'all')}
-                          >AND</button>
-                          <button
-                            type="button"
-                            className={selectedFile.filterConfig.mode === 'any' ? 'active' : ''}
-                            onClick={() => setFilterMode(selectedFile, 'any')}
-                          >OR</button>
-                        </div>
-                        <p className="filter-mode-hint">
-                          {activeFilterSummary.length < 2
-                            ? 'Takes effect once a second column is filtered.'
-                            : selectedFile.filterConfig.mode === 'any'
-                              ? 'Keep a row if it matches at least one of these columns.'
-                              : 'Keep a row only if it matches every one of these columns.'}
-                        </p>
-                      </div>
-                    )}
-
-                    <div className="filter-picker">
-                      <p className="filter-field-label">Column</p>
-                      <select
-                        className="filter-select"
-                        value={activeFilterColumn}
-                        onChange={(e) => setActiveFilterColumn(selectedFile, e.target.value)}
-                      >
-                        <option value="">Select a column to filter</option>
-                        {selectedFile.selectedCols.map((c) => (
-                          <option key={c} value={c}>
-                            {renamedName(selectedFile, c)}
-                            {ruleIsSet(selectedFile.filterConfig.rules?.[c]) ? '  •' : ''}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    {!activeFilterColumn && (
-                      <p className="tab-placeholder-note">
-                        Pick a column above. The controls shown depend on its type: a range for
-                        numbers, a start and end for dates, and a searchable value list for text.
-                      </p>
-                    )}
-
-                    {activeFilterColumn && activeFilterRule.conditions.map((condition, index) => (
-                      <div className="filter-rule" key={index}>
-                        {activeFilterRule.conditions.length > 1 && (
-                          <div className="filter-condition-head">
-                            <p className="filter-condition-label">Condition {index + 1}</p>
-                            <button
-                              type="button"
-                              className="filter-condition-remove"
-                              onClick={() => removeCondition(selectedFile, index)}
+                    {/* The chain, in the order it is evaluated. */}
+                    {filterChain.map((entry, index) => (
+                      <div key={index}>
+                        {index > 0 && (
+                          <div className="chain-gap">
+                            <span className="chain-gap-line" aria-hidden="true" />
+                            <select
+                              className="chain-operator"
+                              value={filterOperators[index - 1] === 'or' ? 'or' : 'and'}
+                              onChange={(e) => setChainOperator(selectedFile, index - 1, e.target.value)}
+                              aria-label={`How filter ${index} combines with filter ${index + 1}`}
                             >
-                              Remove
-                            </button>
+                              <option value="and">AND</option>
+                              <option value="or">OR</option>
+                            </select>
+                            <span className="chain-gap-line" aria-hidden="true" />
                           </div>
                         )}
 
-                        {activeFilterKind === 'number' && (
-                          <>
-                            <div className="filter-grid">
-                              <div>
-                                <p className="filter-field-label">Minimum</p>
-                                <input
-                                  type="number"
-                                  className="filter-input"
-                                  placeholder={activeFilterBounds?.min ?? 'No lower bound'}
-                                  value={condition.min}
-                                  onChange={(e) => setConditionField(selectedFile, index, 'min', e.target.value)}
-                                />
-                              </div>
-                              <div>
-                                <p className="filter-field-label">Maximum</p>
-                                <input
-                                  type="number"
-                                  className="filter-input"
-                                  placeholder={activeFilterBounds?.max ?? 'No upper bound'}
-                                  value={condition.max}
-                                  onChange={(e) => setConditionField(selectedFile, index, 'max', e.target.value)}
-                                />
-                              </div>
-                            </div>
-                            {activeFilterBounds && activeFilterBounds.min !== null && activeFilterBounds.max !== null && (
-                              <p className="filter-bounds-hint">
-                                This column runs {Number(activeFilterBounds.min).toLocaleString()} to{' '}
-                                {Number(activeFilterBounds.max).toLocaleString()}. Leave a box empty for no bound.
-                              </p>
-                            )}
-                          </>
-                        )}
-
-                        {activeFilterKind === 'date' && (
-                          <>
-                            <div className="filter-grid">
-                              <div>
-                                <p className="filter-field-label">Start Date</p>
-                                <input
-                                  type="date"
-                                  className="filter-input"
-                                  value={condition.start}
-                                  onChange={(e) => setConditionField(selectedFile, index, 'start', e.target.value)}
-                                />
-                              </div>
-                              <div>
-                                <p className="filter-field-label">End Date</p>
-                                <input
-                                  type="date"
-                                  className="filter-input"
-                                  value={condition.end}
-                                  onChange={(e) => setConditionField(selectedFile, index, 'end', e.target.value)}
-                                />
-                              </div>
-                            </div>
-                            {activeFilterBounds && activeFilterBounds.min && activeFilterBounds.max && (
-                              <p className="filter-bounds-hint">
-                                This column runs {activeFilterBounds.min} to {activeFilterBounds.max}.
-                                Both bounds are inclusive.
-                              </p>
-                            )}
-                          </>
-                        )}
-
-                        {activeFilterKind === 'string' && (
-                          <ValuePicker
-                            workflowId={selectedFile.workflowId}
-                            filename={selectedFile.filename}
-                            column={renamedName(selectedFile, activeFilterColumn)}
-                            selected={condition.values}
-                            onChange={(values) => setConditionField(selectedFile, index, 'values', values)}
-                          />
-                        )}
-
-                        <label className="filter-checkbox-row">
-                          <input
-                            type="checkbox"
-                            checked={condition.notNull}
-                            onChange={(e) => setConditionField(selectedFile, index, 'notNull', e.target.checked)}
-                          />
-                          Drop rows where this column is empty
-                        </label>
-
-                        {activeFilterIsNpi && (
-                          <label className="filter-checkbox-row">
-                            <input
-                              type="checkbox"
-                              checked={condition.luhn}
-                              onChange={(e) => setConditionField(selectedFile, index, 'luhn', e.target.checked)}
-                            />
-                            Apply Luhn algorithm validation (checks 10-digit US NPI numbers)
-                          </label>
-                        )}
+                        <div className="chain-card">
+                          <span className="chain-card-index">{index + 1}</span>
+                          <span className="chain-card-text">
+                            {describeChainEntry(selectedFile, entry)}
+                          </span>
+                          <button
+                            type="button"
+                            className="chain-card-remove"
+                            aria-label={`Remove filter ${index + 1}`}
+                            onClick={() => removeChainEntry(selectedFile, index)}
+                          >
+                            Remove
+                          </button>
+                        </div>
                       </div>
                     ))}
 
-                    {activeFilterColumn && (
-                      <div className="filter-condition-foot">
-                        <button
-                          type="button"
-                          className="filter-add-condition"
-                          onClick={() => addCondition(selectedFile)}
-                        >
-                          Add another condition
-                        </button>
+                    {filterChain.length > 1 && (
+                      <p className="chain-precedence-note">
+                        Read top to bottom: each step applies to the result of the one above it,
+                        so mixing AND and OR follows this order rather than AND binding tighter.
+                      </p>
+                    )}
 
-                        {/* Within one column. Two conditions on the same column
-                            are almost always alternatives, but the choice is the
-                            user's and AND stays the default. */}
-                        {activeFilterRule.conditions.length > 1 && (
-                          <div className="filter-mode-inline">
-                            <span className="filter-mode-inline-label">
-                              Combine these on {renamedName(selectedFile, activeFilterColumn)} with
-                            </span>
-                            <div className="filter-mode-toggle">
-                              <button
-                                type="button"
-                                className={activeFilterRule.mode !== 'any' ? 'active' : ''}
-                                onClick={() => setColumnFilterMode(selectedFile, 'all')}
-                              >AND</button>
-                              <button
-                                type="button"
-                                className={activeFilterRule.mode === 'any' ? 'active' : ''}
-                                onClick={() => setColumnFilterMode(selectedFile, 'any')}
-                              >OR</button>
-                            </div>
+                    {/* The card being composed. It joins the chain on Add, so a
+                        half-typed filter never changes what Apply sends. */}
+                    {filterDraft && (
+                      <div className="chain-draft">
+                        {filterChain.length > 0 && (
+                          <p className="chain-draft-heading">
+                            New filter, joined with{' '}
+                            <strong>{(filterOperators[filterChain.length - 1] || 'and').toUpperCase()}</strong>
+                            {' '}once added
+                          </p>
+                        )}
+
+                        <div className="filter-picker">
+                          <p className="filter-field-label">Column</p>
+                          <select
+                            className="filter-select"
+                            value={draftColumn}
+                            onChange={(e) => setDraftColumn(selectedFile, e.target.value)}
+                          >
+                            <option value="">Select a column to filter</option>
+                            {selectedFile.selectedCols.map((c) => (
+                              <option key={c} value={c}>{renamedName(selectedFile, c)}</option>
+                            ))}
+                          </select>
+                        </div>
+
+                        {!draftColumn && (
+                          <p className="tab-placeholder-note">
+                            Pick a column. The controls shown depend on its type: a range for
+                            numbers, a start and end for dates, and a searchable value list for
+                            text. The same column can appear more than once in the chain.
+                          </p>
+                        )}
+
+                        {draftColumn && (
+                          <div className="filter-rule">
+                            {draftKind === 'number' && (
+                              <>
+                                <div className="filter-grid">
+                                  <div>
+                                    <p className="filter-field-label">Minimum</p>
+                                    <input
+                                      type="number"
+                                      className="filter-input"
+                                      placeholder={draftBounds?.min ?? 'No lower bound'}
+                                      value={filterDraft.cond.min}
+                                      onChange={(e) => setDraftField(selectedFile, 'min', e.target.value)}
+                                    />
+                                  </div>
+                                  <div>
+                                    <p className="filter-field-label">Maximum</p>
+                                    <input
+                                      type="number"
+                                      className="filter-input"
+                                      placeholder={draftBounds?.max ?? 'No upper bound'}
+                                      value={filterDraft.cond.max}
+                                      onChange={(e) => setDraftField(selectedFile, 'max', e.target.value)}
+                                    />
+                                  </div>
+                                </div>
+                                {draftBounds && draftBounds.min !== null && draftBounds.max !== null && (
+                                  <p className="filter-bounds-hint">
+                                    This column runs {Number(draftBounds.min).toLocaleString()} to{' '}
+                                    {Number(draftBounds.max).toLocaleString()}. Leave a box empty for no bound.
+                                  </p>
+                                )}
+                              </>
+                            )}
+
+                            {draftKind === 'date' && (
+                              <>
+                                <div className="filter-grid">
+                                  <div>
+                                    <p className="filter-field-label">Start Date</p>
+                                    <input
+                                      type="date"
+                                      className="filter-input"
+                                      value={filterDraft.cond.start}
+                                      onChange={(e) => setDraftField(selectedFile, 'start', e.target.value)}
+                                    />
+                                  </div>
+                                  <div>
+                                    <p className="filter-field-label">End Date</p>
+                                    <input
+                                      type="date"
+                                      className="filter-input"
+                                      value={filterDraft.cond.end}
+                                      onChange={(e) => setDraftField(selectedFile, 'end', e.target.value)}
+                                    />
+                                  </div>
+                                </div>
+                                {draftBounds && draftBounds.min && draftBounds.max && (
+                                  <p className="filter-bounds-hint">
+                                    This column runs {draftBounds.min} to {draftBounds.max}.
+                                    Both bounds are inclusive.
+                                  </p>
+                                )}
+                              </>
+                            )}
+
+                            {draftKind === 'string' && (
+                              <ValuePicker
+                                workflowId={selectedFile.workflowId}
+                                filename={selectedFile.filename}
+                                column={renamedName(selectedFile, draftColumn)}
+                                selected={filterDraft.cond.values}
+                                onChange={(values) => setDraftField(selectedFile, 'values', values)}
+                              />
+                            )}
+
+                            <label className="filter-checkbox-row">
+                              <input
+                                type="checkbox"
+                                checked={filterDraft.cond.notNull}
+                                onChange={(e) => setDraftField(selectedFile, 'notNull', e.target.checked)}
+                              />
+                              Drop rows where this column is empty
+                            </label>
+
+                            {draftIsNpi && (
+                              <label className="filter-checkbox-row">
+                                <input
+                                  type="checkbox"
+                                  checked={filterDraft.cond.luhn}
+                                  onChange={(e) => setDraftField(selectedFile, 'luhn', e.target.checked)}
+                                />
+                                Apply Luhn algorithm validation (checks 10-digit US NPI numbers)
+                              </label>
+                            )}
                           </div>
                         )}
+
+                        <div className="chain-draft-actions">
+                          <button
+                            type="button"
+                            className="mapping-btn primary"
+                            disabled={!draftIsUsable}
+                            onClick={() => commitDraft(selectedFile)}
+                          >
+                            Add
+                          </button>
+                          <button
+                            type="button"
+                            className="mapping-btn"
+                            onClick={() => cancelDraft(selectedFile)}
+                          >
+                            Cancel
+                          </button>
+                          {draftColumn && !draftIsUsable && (
+                            <span className="chain-draft-hint">
+                              Set a value above before adding this filter.
+                            </span>
+                          )}
+                        </div>
                       </div>
                     )}
 
-                    {activeFilterColumn
-                      && activeFilterRule.conditions.length > 1
-                      && activeFilterRule.mode !== 'any'
-                      && activeFilterRule.conditions.filter((c) => conditionIsSet(c, activeFilterRule.kind)).length > 1
-                      && (
-                        <p className="filter-bounds-hint">
-                          With AND a row must satisfy every condition above. Two ranges on one
-                          column rarely overlap, so this often matches nothing. Switch to OR to
-                          keep rows matching either.
-                        </p>
-                      )}
+                    {!filterDraft && (
+                      <button
+                        type="button"
+                        className="chain-add-btn"
+                        onClick={() => startDraft(selectedFile)}
+                      >
+                        {filterChain.length ? 'Add another filter' : 'Add filter'}
+                      </button>
+                    )}
 
-                    {/* Every configured rule is sent on Apply, not just the one on
-                        screen, so the ones out of view have to stay visible somewhere. */}
-                    {activeFilterSummary.length > 0 && (
-                      <div className="filter-active">
-                        <p className="filter-field-label">Active filters</p>
-                        <div className="filter-active-list">
-                          {activeFilterSummary.map((item) => (
-                            <span className="filter-active-chip" key={item.column}>
-                              <button
-                                type="button"
-                                className="filter-active-name"
-                                onClick={() => setActiveFilterColumn(selectedFile, item.column)}
-                              >
-                                {item.label}
-                              </button>
-                              <button
-                                type="button"
-                                className="filter-active-remove"
-                                aria-label={`Remove filter on ${item.label}`}
-                                onClick={() => clearFilterRule(selectedFile, item.column)}
-                              >
-                                ×
-                              </button>
-                            </span>
-                          ))}
-                        </div>
-                      </div>
+                    {!filterChain.length && !filterDraft && (
+                      <p className="tab-placeholder-note">
+                        No filters yet. Every row is kept.
+                      </p>
                     )}
 
                     <div className="filter-actions">

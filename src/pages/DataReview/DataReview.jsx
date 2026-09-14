@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Papa from 'papaparse';
 import {
@@ -10,11 +10,12 @@ import {
   edaStats, edaSparsity, edaHistogram, edaScatter, edaPoorMansCurve,
   edaDetectOutliers, edaTrendRollup,
   correlationMatrix as fetchCorrelationMatrix,
-  getHighCorrPairs,
   computeVIF as fetchVIF,
   previewRemoval, applyRemoval,
   findClusters, applyCombination,
 } from '../../services/api.js';
+import { recordStage } from '../../services/workflowState.js';
+import { useScreenState } from '../../services/useScreenState.js';
 import './DataReview.css';
 
 const TABS = [
@@ -164,7 +165,74 @@ function DataReview() {
   const [dropOriginalAfterCombination, setDropOriginalAfterCombination] = useState(true);
   const [clusterResults, setClusterResults] = useState(null);
 
+  // The ARD a restored configuration belongs to. Consumed once by the loader,
+  // so only that first load keeps the selections instead of re-guessing them.
+  const restoredArd = useRef(null);
+
+  // Remember where the user got to, so Resume reopens this screen instead
+  // of always returning to Data Ingestion.
+  useEffect(() => { recordStage('review'); }, []);
+
+  // Every choice made on this screen. Results (stats, charts, correlation) are
+  // not stored: they are recomputed from the ARD and these selections, and a
+  // saved copy would outlive the data it described.
+  const stateRestored = useScreenState('review', {
+    ready: Boolean(columns.length),
+    deps: [selectedArdFilename, activeTab, corrSubTab, dateKey, geoKey, kpiColumn,
+           selectedMetrics, aggregation, indexedView, distVariable, outlierVariable,
+           outlierMethod, outlierThreshold, outlierLowerPct, outlierUpperPct,
+           xAxisVar, yAxisVar, bivarX, bivarY, corrThreshold, corrSelectedCols,
+           removalTargetKpi, removalThreshold, clusterThreshold, sortField, sortAsc],
+    snapshot: () => ({
+      ard: selectedArdFilename,
+      activeTab, corrSubTab,
+      dateKey, geoKey, kpiColumn,
+      selectedMetrics, aggregation, indexedView,
+      distVariable,
+      outlierVariable, outlierMethod, outlierThreshold, outlierLowerPct, outlierUpperPct,
+      xAxisVar, yAxisVar, bivarX, bivarY,
+      corrThreshold, corrSelectedCols,
+      removalTargetKpi, removalThreshold, clusterThreshold,
+      sortField, sortAsc,
+    }),
+    restore: (v) => {
+      const str = (x) => typeof x === 'string';
+      const num = (x) => typeof x === 'number';
+      const arr = Array.isArray;
+      if (str(v.activeTab)) setActiveTab(v.activeTab);
+      if (str(v.corrSubTab)) setCorrSubTab(v.corrSubTab);
+      if (str(v.dateKey)) setDateKey(v.dateKey);
+      if (str(v.geoKey)) setGeoKey(v.geoKey);
+      if (str(v.kpiColumn)) setKpiColumn(v.kpiColumn);
+      if (arr(v.selectedMetrics)) setSelectedMetrics(v.selectedMetrics);
+      if (str(v.aggregation)) setAggregation(v.aggregation);
+      if (typeof v.indexedView === 'boolean') setIndexedView(v.indexedView);
+      if (str(v.distVariable)) setDistVariable(v.distVariable);
+      if (str(v.outlierVariable)) setOutlierVariable(v.outlierVariable);
+      if (str(v.outlierMethod)) setOutlierMethod(v.outlierMethod);
+      if (num(v.outlierThreshold)) setOutlierThreshold(v.outlierThreshold);
+      if (num(v.outlierLowerPct)) setOutlierLowerPct(v.outlierLowerPct);
+      if (num(v.outlierUpperPct)) setOutlierUpperPct(v.outlierUpperPct);
+      if (str(v.xAxisVar)) setXAxisVar(v.xAxisVar);
+      if (str(v.yAxisVar)) setYAxisVar(v.yAxisVar);
+      if (str(v.bivarX)) setBivarX(v.bivarX);
+      if (str(v.bivarY)) setBivarY(v.bivarY);
+      if (num(v.corrThreshold)) setCorrThreshold(v.corrThreshold);
+      if (arr(v.corrSelectedCols)) setCorrSelectedCols(v.corrSelectedCols);
+      if (str(v.removalTargetKpi)) setRemovalTargetKpi(v.removalTargetKpi);
+      if (num(v.removalThreshold)) setRemovalThreshold(v.removalThreshold);
+      if (num(v.clusterThreshold)) setClusterThreshold(v.clusterThreshold);
+      if (str(v.sortField)) setSortField(v.sortField);
+      if (typeof v.sortAsc === 'boolean') setSortAsc(v.sortAsc);
+      restoredArd.current = v.ard || null;
+    },
+  });
+
+
   useEffect(() => {
+    // Waits for the restore. Running concurrently would let this pick the
+    // first ARD in the list before the saved choice had arrived.
+    if (!stateRestored) return;
     (async () => {
       setIsLoadingArds(true);
       setLoadError(null);
@@ -172,15 +240,19 @@ function DataReview() {
         const id = await ensureWorkflow();
         setWorkflowId(id);
         const data = await v2ListArds(id);
-        setArds(data.items || []);
-        if (data.items?.length) setSelectedArdFilename(data.items[0].filename);
+        const items = data.items || [];
+        setArds(items);
+        if (items.length) {
+          const wanted = items.find((x) => x.filename === restoredArd.current);
+          setSelectedArdFilename((wanted || items[0]).filename);
+        }
       } catch (err) {
         setLoadError(problemMessage(err, 'Could not load ARDs for this workflow.'));
       } finally {
         setIsLoadingArds(false);
       }
     })();
-  }, []);
+  }, [stateRestored]);
 
   const loadArdData = async (filename) => {
     if (!filename || !workflowId) return;
@@ -197,18 +269,59 @@ function DataReview() {
       setColumns(cols);
       setRows(parsed.data);
 
+      // A DIFFERENT ARD gets fresh guesses, because column names chosen
+      // against one dataset rarely mean anything in another. The ARD a
+      // restored config belongs to must not: that is the resume path, and
+      // re-guessing would overwrite the selections a moment after restoring
+      // them.
+      // Not consumed: StrictMode mounts twice, so this runs twice for the same
+      // file. Clearing it on the first pass let the second re-guess and wipe
+      // the configuration that had just been restored. Comparing without
+      // clearing is idempotent - and selecting a genuinely different ARD still
+      // falls through to fresh guesses, which is the intended behaviour.
+      const keepConfig = restoredArd.current === filename;
+
       const guessedDate = cols.find(isDateLike) || '';
       const guessedGeo = cols.find(isDimensionLike) || '';
-      setDateKey(guessedDate);
-      setGeoKey(guessedGeo);
       // Never the date or geo key: the API cannot group a column by itself.
       const guessedKpi =
         cols.find((c) => c !== guessedDate && c !== guessedGeo && /sale|trx|nrx|kpi|revenue/i.test(c)) ||
         cols.find((c) => c !== guessedDate && c !== guessedGeo && isNumericColumn(parsed.data, c)) ||
         '';
-      setKpiColumn(guessedKpi);
-
       const metricCols = cols.filter((c) => c !== guessedDate && c !== guessedGeo && isNumericColumn(parsed.data, c));
+
+      // A saved selection is only honoured for columns this dataset still has.
+      // Files removed on the ingestion screen take their columns with them, and
+      // a restored name like "SALES_QTY" then reached the API as a column that
+      // does not exist - which came back as "None of [...] are in the
+      // [columns]" and left the screen stuck until the selection was cleared
+      // by hand.
+      const present = new Set(cols);
+      const keepOne = (saved, fallback) => (present.has(saved) ? saved : fallback);
+      const keepMany = (saved, fallback) => {
+        const kept = (saved || []).filter((c) => present.has(c));
+        return kept.length ? kept : fallback;
+      };
+
+      if (keepConfig) {
+        setDateKey((prev) => keepOne(prev, guessedDate));
+        setGeoKey((prev) => keepOne(prev, guessedGeo));
+        setKpiColumn((prev) => keepOne(prev, guessedKpi));
+        setSelectedMetrics((prev) => keepMany(prev, metricCols.slice(0, 2)));
+        setCorrSelectedCols((prev) => keepMany(prev, metricCols.slice(0, 8)));
+        setOutlierVariable((prev) => keepOne(prev, metricCols[0] || ''));
+        setDistVariable((prev) => keepOne(prev, metricCols[0] || ''));
+        setXAxisVar((prev) => keepOne(prev, metricCols[0] || ''));
+        setYAxisVar((prev) => keepOne(prev, metricCols[1] || metricCols[0] || ''));
+        setBivarX((prev) => keepOne(prev, metricCols[0] || ''));
+        setBivarY((prev) => keepOne(prev, metricCols[1] || metricCols[0] || ''));
+        setRemovalTargetKpi((prev) => keepOne(prev, metricCols[metricCols.length - 1] || ''));
+        return;
+      }
+
+      setDateKey(guessedDate);
+      setGeoKey(guessedGeo);
+      setKpiColumn(guessedKpi);
       setSelectedMetrics(metricCols.slice(0, 2));
       setOutlierVariable(metricCols[0] || '');
       setDistVariable(metricCols[0] || '');
@@ -463,7 +576,26 @@ function DataReview() {
   const [corrRaw, setCorrRaw] = useState(null);
   // Which pairs clear the highlight threshold. Listed under the heatmap so the
   // cells a reader has to hunt for are also spelled out.
-  const [highPairs, setHighPairs] = useState([]);
+  //
+  // Derived from the matrix rather than fetched: the same upper-triangle,
+  // |r| >= threshold, strongest-first rule the engine's compute_corr_pairs
+  // applies, so the list matches what the server would have returned without
+  // a request per slider step.
+  const highPairs = useMemo(() => {
+    const cols = corrRaw?.columns || [];
+    const out = [];
+    for (let i = 0; i < cols.length; i += 1) {
+      for (let j = i + 1; j < cols.length; j += 1) {
+        const r = Number(corrRaw.matrix?.[cols[i]]?.[cols[j]] ?? 0);
+        if (Number.isNaN(r)) continue;
+        if (Math.abs(r) >= corrThreshold) {
+          out.push({ feature1: cols[i], feature2: cols[j], corr: r });
+        }
+      }
+    }
+    return out.sort((a, b) => Math.abs(b.corr) - Math.abs(a.corr));
+  }, [corrRaw, corrThreshold]);
+
   const correlationMatrix = useMemo(() => {
     if (!corrRaw) return [];
     const { matrix, columns } = corrRaw;
@@ -481,12 +613,13 @@ function DataReview() {
     fetchCorrelationMatrix({ csv_data: activeCsv, columns: corrSelectedCols })
       .then((d) => { if (!cancelled) setCorrRaw(d); })
       .catch((err) => { if (!cancelled) { setCorrRaw(null); failed('Correlation matrix')(err); } });
-    getHighCorrPairs({ csv_data: activeCsv, columns: corrSelectedCols, threshold: corrThreshold })
-      .then((d) => { if (!cancelled) setHighPairs(d.pairs || []); })
-      .catch(() => { if (!cancelled) setHighPairs([]); });
     return () => { cancelled = true; };
+    // Deliberately NOT keyed on corrThreshold. The threshold decides which
+    // pairs are highlighted, not what the correlations are, so re-running this
+    // on every 0.05 step of the slider re-uploaded the whole dataset twenty
+    // times per drag. The pairs are filtered from the matrix below instead.
     // eslint-disable-next-line
-  }, [activeTab, activeCsv, corrSelectedCols, corrThreshold]);
+  }, [activeTab, activeCsv, corrSelectedCols]);
 
   // VIF from the server. The browser version solved the normal equations by
   // hand, which goes singular on exactly the collinear inputs VIF exists to
@@ -826,7 +959,17 @@ function DataReview() {
                     ))}
                   </div>
                   <div className="trend-chart-wrapper">
-                    <TrendChart labels={trendData.labels} series={trendData.series} indexed={indexedView} />
+                    <TrendChart
+                      labels={trendData.labels}
+                      series={trendData.series}
+                      indexed={indexedView}
+                      xLabel={aggregation === 'mom' ? 'Month' : 'Week ending'}
+                      // Several metrics can share this axis, so it is named
+                      // generically unless exactly one is plotted.
+                      yLabel={indexedView
+                        ? 'Indexed (first period = 100)'
+                        : (selectedMetrics.length === 1 ? selectedMetrics[0] : 'Value')}
+                    />
                     <div className="trend-legend">
                       {selectedMetrics.map((m, i) => (
                         <div key={m} className="trend-legend-item">
@@ -907,7 +1050,12 @@ function DataReview() {
                           <strong>Median:</strong> {histogramData.median.toFixed(2)} &nbsp;&nbsp;
                           Span: {histogramData.min.toFixed(1)} to {histogramData.max.toFixed(1)}
                         </div>
-                        <HistogramChart bins={histogramData.bins} labels={histogramData.labels} />
+                        <HistogramChart
+                          bins={histogramData.bins}
+                          labels={histogramData.labels}
+                          xLabel={`${distVariable} (binned)`}
+                          yLabel="Records"
+                        />
                       </>
                     )}
                   </div>
@@ -1450,7 +1598,12 @@ function ChartTooltip({ active, payload, label, title, rows, indexed = false }) 
   );
 }
 
-function TrendChart({ labels, series, indexed = false }) {
+// Axis titles sit in the margin the chart reserves for them, so adding one
+// never lands on top of the tick labels underneath.
+const X_LABEL = { position: 'insideBottom', offset: -12, fontSize: 10, fill: '#8a94a3' };
+const Y_LABEL = { angle: -90, position: 'insideLeft', fontSize: 10, fill: '#8a94a3' };
+
+function TrendChart({ labels, series, indexed = false, xLabel = 'Period', yLabel = 'Value' }) {
   const seriesKeys = Object.keys(series);
   if (labels.length === 0 || seriesKeys.length === 0) {
     return <p className="review-empty">No data to plot for the selected metrics.</p>;
@@ -1465,12 +1618,13 @@ function TrendChart({ labels, series, indexed = false }) {
 
   return (
     <ResponsiveContainer width="100%" height={280}>
-      <LineChart data={data} margin={{ top: 10, right: 20, bottom: 5, left: 0 }}>
+      <LineChart data={data} margin={{ top: 10, right: 20, bottom: 22, left: 8 }}>
         <CartesianGrid stroke={GRID} vertical={false} />
         <XAxis dataKey="date" tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
-               minTickGap={24} />
+               minTickGap={24} label={{ value: xLabel, ...X_LABEL }} />
         <YAxis tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
-               tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${Math.round(v / 1000)}k` : v)} />
+               tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${Math.round(v / 1000)}k` : v)}
+               label={{ value: yLabel, ...Y_LABEL }} />
         <Tooltip
           content={<ChartTooltip indexed={indexed} />}
           cursor={{ stroke: '#c7d2e5', strokeWidth: 1 }}
@@ -1491,18 +1645,20 @@ function TrendChart({ labels, series, indexed = false }) {
   );
 }
 
-function HistogramChart({ bins, labels }) {
+function HistogramChart({ bins, labels, xLabel = 'Value range', yLabel = 'Records' }) {
   if (!bins.length) return <p className="review-empty">No distribution to plot.</p>;
   const total = bins.reduce((a, b) => a + b, 0);
   const data = bins.map((count, i) => ({ bin: labels[i], count }));
 
   return (
     <ResponsiveContainer width="100%" height={260}>
-      <BarChart data={data} margin={{ top: 10, right: 20, bottom: 5, left: 0 }}>
+      <BarChart data={data} margin={{ top: 10, right: 20, bottom: 22, left: 8 }}>
         <CartesianGrid stroke={GRID} vertical={false} />
         <XAxis dataKey="bin" tick={{ fontSize: 8, fill: '#8a94a3' }} tickLine={false}
-               axisLine={{ stroke: GRID }} minTickGap={16} />
-        <YAxis tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }} />
+               axisLine={{ stroke: GRID }} minTickGap={16}
+               label={{ value: xLabel, ...X_LABEL }} />
+        <YAxis tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
+               label={{ value: yLabel, ...Y_LABEL }} />
         <Tooltip
           cursor={{ fill: 'rgba(29, 42, 107, 0.08)' }}
           content={
@@ -1534,19 +1690,17 @@ function HistogramChart({ bins, labels }) {
 function BinnedCurveChart({ data, xLabel, yLabel }) {
   return (
     <ResponsiveContainer width="100%" height={300}>
-      <LineChart data={data} margin={{ top: 10, right: 24, bottom: 18, left: 4 }}>
+      <LineChart data={data} margin={{ top: 10, right: 24, bottom: 22, left: 8 }}>
         <CartesianGrid stroke={GRID} strokeDasharray="3 3" />
         <XAxis
           dataKey="spend_x" tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
           tickFormatter={(v) => fmt(v)}
-          label={{ value: `Tactic Level (${xLabel})`, position: 'insideBottom', offset: -10,
-                   fontSize: 10, fill: '#8a94a3' }}
+          label={{ value: `Tactic Level (${xLabel})`, ...X_LABEL }}
         />
         <YAxis
           tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
           tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${Math.round(v / 1000)}k` : v)}
-          label={{ value: `Average ${yLabel}`, angle: -90, position: 'insideLeft',
-                   fontSize: 10, fill: '#8a94a3' }}
+          label={{ value: `Average ${yLabel}`, ...Y_LABEL }}
         />
         <Tooltip
           cursor={{ stroke: '#c7d2e5', strokeWidth: 1 }}
@@ -1584,17 +1738,17 @@ function ScatterChart({ points, binnedLine, trendline = [], xLabel, yLabel }) {
 
   return (
     <ResponsiveContainer width="100%" height={320}>
-      <ComposedChart margin={{ top: 10, right: 24, bottom: 18, left: 4 }}>
+      <ComposedChart margin={{ top: 10, right: 24, bottom: 22, left: 8 }}>
         <CartesianGrid stroke={GRID} />
         <XAxis
           type="number" dataKey="x" name={xLabel} tick={AXIS_TICK} tickLine={false}
           axisLine={{ stroke: GRID }} domain={['dataMin', 'dataMax']}
-          label={{ value: xLabel, position: 'insideBottom', offset: -10, fontSize: 10, fill: '#8a94a3' }}
+          label={{ value: xLabel, ...X_LABEL }}
         />
         <YAxis
           type="number" dataKey="y" name={yLabel} tick={AXIS_TICK} tickLine={false}
           axisLine={{ stroke: GRID }}
-          label={{ value: yLabel, angle: -90, position: 'insideLeft', fontSize: 10, fill: '#8a94a3' }}
+          label={{ value: yLabel, ...Y_LABEL }}
         />
         <Tooltip
           cursor={{ strokeDasharray: '3 3', stroke: '#c7d2e5' }}

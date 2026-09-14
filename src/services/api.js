@@ -183,6 +183,36 @@ export const edaTrendRollup = (payload) => edaPost('trend-rollup', payload);
 /** Cross-correlation of X against Y across time lags. */
 export const edaLagCorrelation = (payload) => edaPost('lag-correlation', payload);
 
+// ─── Data Transformation ─────────────────────────────────────────────────
+// Same csv_data contract as the EDA engines. Adstock and saturation are
+// sequence maths over grouped time series; computing them in the browser means
+// a second implementation to keep in step with the one the model actually
+// fits, which is how two screens quietly stop agreeing.
+const transformationPost = (endpoint, payload) =>
+  request(`/api/transformation/${endpoint}`, { method: 'POST', ...json(payload) });
+
+/**
+ * Run the full pipeline: derived variables first, then normalization ->
+ * adstock -> saturation per channel, then the optional carryover column.
+ *
+ * `transformations` entries are keyed the way the engine reads them:
+ * "Channel Name", "Normalization", "Adstock", "Lags", "Saturation Function",
+ * "Power (k)", "Log (k)".
+ */
+export const transformationApply = (payload) => transformationPost('apply', payload);
+
+/** Recommended adstock and saturation per channel, fitted against the KPI. */
+export const transformationAutoSelect = (payload) =>
+  transformationPost('auto-select', payload);
+
+/** One channel's raw vs transformed series, for the inspector. */
+export const transformationPreviewSingle = (payload) =>
+  transformationPost('preview-single', payload);
+
+/** Correlation over the transformed columns, plus the pairs above a threshold. */
+export const transformationCorrelation = (payload) =>
+  transformationPost('correlation', payload);
+
 // ─── Correlation & multicollinearity ─────────────────────────────────────
 // Same csv_data contract as the EDA engines. These replace a browser-side
 // implementation: VIF in particular needs a real least-squares fit, and the

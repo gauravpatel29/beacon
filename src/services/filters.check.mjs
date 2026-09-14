@@ -11,7 +11,17 @@ const t = (label, cond, got) => {
   console.log((cond ? '  PASS  ' : '  FAIL  ') + label + (cond ? '' : `  :: got ${JSON.stringify(got)}`));
 };
 
-const file = (rules, renameMap = {}) => ({ renameMap, filterConfig: { activeColumn: '', rules } });
+// A rules-map fixture, expressed as the chain the Filter tab now holds: one
+// card per condition, joined by AND (the default when no operator is chosen).
+const file = (rules, renameMap = {}) => ({
+  renameMap,
+  filterConfig: {
+    chain: Object.entries(rules).flatMap(([column, r]) =>
+      r.conditions.map((cond) => ({ column, kind: r.kind, cond }))),
+    operators: [],
+    draft: null,
+  },
+});
 
 console.log('\n1. a column picked but left blank is not a filter');
 t('empty rule sends nothing', buildFilters(file({ trx: emptyRule('number') })).length === 0);

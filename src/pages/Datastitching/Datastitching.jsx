@@ -1,11 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { v2ListFiles, v2BuildArd, problemMessage, ensureWorkflow } from '../../services/api.js';
+import { loadScreenState, recordStage, saveScreenState } from '../../services/workflowState.js';
 import './Datastitching.css';
 
-const DEFAULT_TABS = [
-  { id: 'hcp', title: 'HCP-Level ARD', grain: 'hcp', removable: false, editing: false },
-  { id: 'dma', title: 'DMA-Level ARD', grain: 'dma', removable: false, editing: false },
-];
+// No ARD until the user adds one. The screen used to open with an HCP and a
+// DMA tab already present, claiming two ARDs nobody had asked for and which
+// could not be removed.
+const DEFAULT_TABS = [];
 
 // The five join_type values the build endpoint accepts. Labels deliberately
 // carry no file name — the guide warns that a label like "Left Join (Keep all
@@ -22,11 +23,14 @@ const JOIN_LABELS = Object.fromEntries(
   JOIN_TYPES.map((j) => [j.value, j.label.split(' | ')[0]])
 );
 
-const CUSTOM_GRAIN_OPTIONS = [
-  { value: 'geo', label: 'Geo-Level ARD' },
-  { value: 'zip', label: 'ZIP-Level ARD' },
-  { value: 'national', label: 'National-Level ARD' },
-];
+
+/** A tab title as a filename: "ARD 1" -> "ard_1". */
+function slugify(title) {
+  return String(title || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
 
 function makeEmptyStep() {
   return {
@@ -39,7 +43,6 @@ function makeEmptyStep() {
 
 function makeDefaultDraft() {
   return {
-    customGrain: 'geo',
     // Blank means "use the grain-based default". Kept per tab so each ARD in
     // the workflow can be named separately.
     ardName: '',
@@ -57,85 +60,244 @@ function makeDefaultDraft() {
   };
 }
 
-let tabCounter = 1;
+// Starts at zero so the first ARD added is "ARD 1". It began at one when two
+// tabs already existed and the counter only ever named the extras.
+let tabCounter = 0;
 
 function Datastitching() {
   const [workflowId, setWorkflowId] = useState(null);
+  // Saves are armed only after the restore has run, so the blank initial
+  // state cannot overwrite work being fetched.
+  const hasRestored = useRef(false);
   const [files, setFiles] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
 
   const [tabs, setTabs] = useState(DEFAULT_TABS);
-  const [activeTabId, setActiveTabId] = useState('hcp');
-  const [drafts, setDrafts] = useState(() => ({
-    hcp: makeDefaultDraft(), dma: makeDefaultDraft(),
-  }));
+  const [activeTabId, setActiveTabId] = useState('');
+  const [drafts, setDrafts] = useState({});
 
   // Modal now edits exactly ONE step at a time.
   const [modal, setModal] = useState(null); // { mode: 'add'|'edit', stepIndex, step }
 
-  const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0];
-  const draft = drafts[activeTabId] || makeDefaultDraft();
+  // The name being typed into the tab that is currently being renamed. Only
+  // one tab can be in edit mode, so a single value is enough - and holding it
+  // here is what lets a button outside the input submit it.
+  const [renameValue, setRenameValue] = useState('');
 
-  const setDraft = (updates) =>
-    setDrafts((prev) => ({ ...prev, [activeTabId]: { ...prev[activeTabId], ...updates } }));
+  // Null until an ARD is added. Everything below either guards on it or is
+  // rendered only when it exists.
+  const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0] || null;
+  const draft = drafts[activeTab?.id] || makeDefaultDraft();
 
-  const updateDraft = (updaterFn) =>
-    setDrafts((prev) => ({ ...prev, [activeTabId]: updaterFn(prev[activeTabId]) }));
+  // No-ops with no ARD open, rather than creating a draft under an empty key
+  // that nothing would ever render.
+  const setDraft = (updates) => {
+    if (!activeTab) return;
+    setDrafts((prev) => ({ ...prev, [activeTab.id]: { ...prev[activeTab.id], ...updates } }));
+  };
 
-  const targetGrain = activeTab.grain === 'custom' ? draft.customGrain : activeTab.grain;
-  const grainLabel = activeTab.grain === 'custom'
-    ? CUSTOM_GRAIN_OPTIONS.find((g) => g.value === draft.customGrain)?.label.replace(' ARD', '')
-    : activeTab.title.replace(' ARD', '');
+  const updateDraft = (updaterFn) => {
+    if (!activeTab) return;
+    setDrafts((prev) => ({ ...prev, [activeTab.id]: updaterFn(prev[activeTab.id]) }));
+  };
 
-  const loadEverything = async () => {
+  // The build endpoint requires a target_grain and validates it, but never
+  // passes it to the join: `execute_pipeline` takes only the steps, the frames
+  // and a preview size. It is a label, so it is no longer asked for - the tab's
+  // own name identifies the ARD instead.
+  const targetGrain = 'hcp';
+  const ardLabel = activeTab?.title || 'this ARD';
+
+  // What gets written to the workflow: the recipe, not the rendered result.
+  // Join cards, previews and row counts are all things the server can rebuild
+  // from the steps, and storing them would mean a stale copy of a preview
+  // outliving the data it described.
+  const persistableState = () => ({
+    activeTabId,
+    tabs: tabs.map(({ id, title, grain, removable }) => ({ id, title, grain, removable })),
+    drafts: Object.fromEntries(Object.entries(drafts).map(([id, d]) => [id, {
+      ardName: d.ardName,
+      steps: d.steps,
+      // A Set does not survive JSON.
+      selectedFiles: Array.from(d.selectedFiles || []),
+      generatedArdName: d.generatedArd?.filename || null,
+    }])),
+  });
+
+  const restoreDrafts = (saved) => {
+    if (!saved || !Array.isArray(saved.tabs) || !saved.tabs.length) return false;
+
+    // Sessions saved while the screen still opened with fixed HCP and DMA tabs
+    // carry those two in `state_data`, so they would come straight back however
+    // empty the defaults are now. An unused one is dropped; one holding real
+    // joins is kept, because that is work the user did.
+    const isUnusedLegacyTab = (tab) => tab.removable === false
+      && !(saved.drafts?.[tab.id]?.steps || []).length;
+
+    const tabsToKeep = saved.tabs
+      .filter((tab) => !isUnusedLegacyTab(tab))
+      // A kept legacy tab becomes an ordinary one: removable and renameable
+      // like any other. Its stored grain is dropped along with the picker.
+      .map((tab) => ({ ...tab, removable: true, editing: false }));
+
+    if (!tabsToKeep.length) return false;
+
+    const restored = {};
+    for (const tab of tabsToKeep) {
+      const d = saved.drafts?.[tab.id] || {};
+      restored[tab.id] = {
+        ...makeDefaultDraft(),
+        ardName: d.ardName || '',
+        steps: Array.isArray(d.steps) ? d.steps : [],
+        selectedFiles: new Set(d.selectedFiles || []),
+      };
+    }
+
+    setTabs(tabsToKeep);
+    setDrafts(restored);
+    setActiveTabId(restored[saved.activeTabId] ? saved.activeTabId : tabsToKeep[0].id);
+    return true;
+  };
+
+  const loadEverything = async (isCancelled = () => false) => {
     setIsLoading(true);
     setLoadError(null);
     try {
       const id = await ensureWorkflow();
+      if (isCancelled()) return;
       setWorkflowId(id);
       const filesData = await v2ListFiles(id);
+      if (isCancelled()) return;
       setFiles((filesData.items || []).filter((f) => f.kind !== 'ard'));
+
+      // Joins the user added last time. Restored before the save effect is
+      // armed, so an empty starting state is never written over real work.
+      const saved = await loadScreenState('stitching');
+      // A second restore would rebuild every draft from makeDefaultDraft(),
+      // which resets `joinCards` - so cards already replayed from these steps
+      // would blank out, and the rebuild effect would not fire again because
+      // the step count had not changed. That is what made restored joins flash
+      // up and vanish.
+      if (isCancelled()) return;
+      restoreDrafts(saved);
     } catch (err) {
-      setLoadError(problemMessage(err, 'Could not load this workflow.'));
+      if (!isCancelled()) setLoadError(problemMessage(err, 'Could not load this workflow.'));
     } finally {
-      setIsLoading(false);
+      if (!isCancelled()) {
+        hasRestored.current = true;
+        setIsLoading(false);
+      }
     }
   };
 
-  useEffect(() => { loadEverything(); }, []);
+  // Remember where the user got to, so Resume reopens this screen instead
+  // of always returning to Data Ingestion.
+  useEffect(() => { recordStage('stitching'); }, []);
+
+  // Cancelled on unmount, which under StrictMode's deliberate double-mount
+  // means only the second pass restores. Without this both passes did, and the
+  // second wiped the cards the first had just built.
+  useEffect(() => {
+    let cancelled = false;
+    loadEverything(() => cancelled);
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Save the recipe whenever it changes, debounced so dragging through a
+  // multi-step join is one write rather than one per keystroke. Gated on the
+  // restore having finished: without that, the empty initial state would be
+  // saved over the joins still being fetched.
+  useEffect(() => {
+    if (!hasRestored.current) return undefined;
+    const timer = setTimeout(() => { saveScreenState('stitching', persistableState()); }, 600);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabs, drafts, activeTabId]);
+
+  // Rebuild the join cards for whichever tab is open. The steps are restored
+  // from the workflow; the cards, row counts and previews come from replaying
+  // them against the current files, so a card can never describe a dataset
+  // that has changed underneath it.
+  useEffect(() => {
+    if (!workflowId || !hasRestored.current) return;
+    // `joinCards.length` is a dependency, not just a condition: a draft whose
+    // cards get cleared while its steps stand must rebuild them. Keying only
+    // on the step count left that state stuck, because the count had not moved.
+    // Not while one is in flight, and not after one has failed: a failed
+    // rebuild leaves the cards empty, which would otherwise satisfy this
+    // condition again and retry forever. The error stays on screen and editing
+    // a step clears it, which is the retry.
+    if (draft.steps.length && !draft.joinCards.length
+        && !draft.isSavingPipeline && !draft.pipelineError) {
+      rebuildCardsFromSteps(draft.steps);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workflowId, activeTabId, draft.steps.length, draft.joinCards.length,
+      draft.isSavingPipeline, draft.pipelineError]);
 
   const addNewArdTab = () => {
     tabCounter += 1;
     const newId = `ard-${Date.now()}`;
+    const suggested = `ARD ${tabCounter}`;
     setTabs((prev) => [
       ...prev,
-      { id: newId, title: `New ARD ${tabCounter}`, grain: 'custom', removable: true, editing: true },
+      { id: newId, title: suggested, grain: 'custom', removable: true, editing: true },
     ]);
     setDrafts((prev) => ({ ...prev, [newId]: makeDefaultDraft() }));
     setActiveTabId(newId);
+    // Seeds the name box with the suggestion, so Enter or the tick accepts it
+    // and typing replaces it.
+    setRenameValue(suggested);
   };
 
   const startRenameTab = (tabId, e) => {
     e.stopPropagation();
+    const current = tabs.find((t) => t.id === tabId)?.title || '';
+    setRenameValue(current);
     setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, editing: true } : t)));
   };
 
   const finishRenameTab = (tabId, newTitle) => {
     setTabs((prev) => prev.map((t) => (
-      t.id === tabId ? { ...t, title: newTitle.trim() || t.title, editing: false } : t
+      t.id === tabId ? { ...t, title: String(newTitle).trim() || t.title, editing: false } : t
     )));
+  };
+
+  // Leaves the name as it was. Used by Escape, so an accidental edit can be
+  // abandoned without having to remember what the tab was called.
+  const cancelRenameTab = (tabId) => {
+    setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, editing: false } : t)));
   };
 
   const removeTab = (tabId, e) => {
     e.stopPropagation();
-    setTabs((prev) => prev.filter((t) => t.id !== tabId));
+
+    // Deleting a tab discards the joins in it, and the save that follows takes
+    // them out of the workflow too - so an ARD with work in it asks first. An
+    // empty one goes without ceremony, since there is nothing to lose.
+    const tab = tabs.find((t) => t.id === tabId);
+    const stepCount = (drafts[tabId]?.steps || []).length;
+    if (stepCount > 0) {
+      const label = tab?.title || 'this ARD';
+      const joins = stepCount === 1 ? '1 join' : `${stepCount} joins`;
+      const ok = window.confirm(
+        `Delete ${label}?\n\nIts ${joins} will be removed from this workflow. `
+        + 'Any ARD already generated from it stays where it is.'
+      );
+      if (!ok) return;
+    }
+
+    const remaining = tabs.filter((t) => t.id !== tabId);
+    setTabs(remaining);
     setDrafts((prev) => {
       const next = { ...prev };
       delete next[tabId];
       return next;
     });
-    if (activeTabId === tabId) setActiveTabId('hcp');
+    // Fall back to whatever is left, which may be nothing at all.
+    if (activeTabId === tabId) setActiveTabId(remaining[0]?.id || '');
   };
 
   const toggleFile = (filename) => {
@@ -172,7 +334,13 @@ function Datastitching() {
 
   // Shown as the placeholder and used when the field is left blank. Matches
   // what the API would pick on its own, so the two never disagree.
-  const defaultArdName = `__ard_${targetGrain}__.csv`;
+  // Derived from the tab name rather than the grain: with no grain to vary,
+  // every ARD would otherwise default to the same filename and the second
+  // build would replace the first.
+  // Derived from the tab name rather than the grain. With no grain to vary,
+  // every ARD would otherwise default to the same filename and the second
+  // build would replace the first.
+  const defaultArdName = `${slugify(activeTab?.title) || 'ard'}.csv`;
 
   const payloadFor = (steps) => ({
     steps: steps.map((s) => {
@@ -398,43 +566,82 @@ function Datastitching() {
                 tabIndex={0}
               >
                 {t.editing ? (
-                  <input
-                    className="tab-rename-input"
-                    defaultValue={t.title}
-                    autoFocus
-                    onClick={(e) => e.stopPropagation()}
-                    onBlur={(e) => finishRenameTab(t.id, e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
-                  />
+                  <span className="tab-rename-row">
+                    <input
+                      className="tab-rename-input"
+                      value={renameValue}
+                      autoFocus
+                      aria-label="ARD name"
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => setRenameValue(e.target.value)}
+                      onBlur={() => finishRenameTab(t.id, renameValue)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') finishRenameTab(t.id, renameValue);
+                        if (e.key === 'Escape') cancelRenameTab(t.id);
+                      }}
+                    />
+                    {/* Enter still works; this is for anyone who expects to
+                        click. onMouseDown is prevented so the input does not
+                        blur out from under the click and commit twice. */}
+                    <button
+                      type="button"
+                      className="tab-rename-save"
+                      aria-label="Save ARD name"
+                      title="Save name"
+                      disabled={!renameValue.trim()}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        finishRenameTab(t.id, renameValue);
+                      }}
+                    >
+                      ✓
+                    </button>
+                  </span>
                 ) : (
                   <>
                     {t.title}
-                    {t.removable && (
-                      <span className="tab-remove-x" onClick={(e) => removeTab(t.id, e)}>✕</span>
-                    )}
+                    {/* Rename and delete, revealed on hover so the tab reads as
+                        a name until you go looking for them. Double-clicking
+                        the tab still starts a rename. */}
+                    <button
+                      type="button"
+                      className="tab-edit-btn"
+                      aria-label={`Rename ${t.title}`}
+                      title="Rename"
+                      onClick={(e) => startRenameTab(t.id, e)}
+                    >
+                      ✎
+                    </button>
+                    <button
+                      type="button"
+                      className="tab-remove-x"
+                      aria-label={`Delete ${t.title}`}
+                      title="Delete"
+                      onClick={(e) => removeTab(t.id, e)}
+                    >
+                      ✕
+                    </button>
                   </>
                 )}
               </div>
             ))}
           </div>
 
-          {activeTab.grain === 'custom' && (
-            <select
-              className="custom-grain-select"
-              value={draft.customGrain}
-              onChange={(e) => setDraft({ customGrain: e.target.value })}
-            >
-              {CUSTOM_GRAIN_OPTIONS.map((g) => (
-                <option key={g.value} value={g.value}>{g.label}</option>
-              ))}
-            </select>
+          {/* Nothing is configured until an ARD exists. */}
+          {!activeTab && (
+            <div className="stitching-empty">
+              No ARD yet. Use <strong>+ Add New ARD</strong> above to create one.
+            </div>
           )}
 
+          {activeTab && (
+            <>
           {/* ---- Source files ---- */}
           <div className="source-files-card">
             <p className="section-heading">Source Files</p>
             <p className="section-desc">
-              Select the mapped source files to include in this <strong>{grainLabel}</strong> ARD pipeline:
+              Select the mapped source files to include in <strong>{ardLabel}</strong>:
             </p>
             <div className="file-checkbox-grid">
               {files.map((f) => (
@@ -611,6 +818,8 @@ function Datastitching() {
               </button>
             </div>
           </div>
+            </>
+          )}
         </div>
       )}
 
@@ -618,7 +827,7 @@ function Datastitching() {
         <SingleJoinModal
           files={files}
           selectedFileList={selectedFileList}
-          grainLabel={grainLabel}
+          ardLabel={ardLabel}
           mode={modal.mode}
           stepIndex={modal.stepIndex}
           existingSteps={draft.steps}
@@ -636,7 +845,7 @@ function Datastitching() {
 }
 
 // ─── Modal: configure exactly ONE join step (add or edit) ──────────────────
-function SingleJoinModal({ files, selectedFileList, grainLabel, mode, stepIndex, existingSteps, stepResultColumns = {}, step, error, isSaving, onChange, onDone, onClose }) {
+function SingleJoinModal({ files, selectedFileList, ardLabel, mode, stepIndex, existingSteps, stepResultColumns = {}, step, error, isSaving, onChange, onDone, onClose }) {
   // A real dataset first, then a previous step's result. Returns null only when
   // neither is known yet - the first time a step is configured, before any dry
   // run has reported what it produces - and the key field falls back to free
@@ -701,7 +910,7 @@ function SingleJoinModal({ files, selectedFileList, grainLabel, mode, stepIndex,
         <div className="create-ard-header">
           <div>
             <p className="create-ard-title">{mode === 'edit' ? 'Edit Join' : 'Add New Join'}</p>
-            <p className="create-ard-subtitle">Building a {grainLabel} ARD from {selectedFileList.length} selected file(s)</p>
+            <p className="create-ard-subtitle">Building {ardLabel} from {selectedFileList.length} selected file(s)</p>
           </div>
           <button className="create-ard-close-btn" onClick={onClose} aria-label="Close">✕</button>
         </div>

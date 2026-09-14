@@ -1,0 +1,201 @@
+/* ==========================================================================
+   WorkflowDialog.css — create / manage workflows over the current screen
+   ========================================================================== */
+
+.wf-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(15, 23, 41, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--spacing-lg);
+  /* Above the sidebar, which sits at z-index 20 for its own menu. */
+  z-index: 100;
+}
+
+.wf-dialog {
+  width: 100%;
+  max-width: 560px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--color-white);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card-hover);
+}
+
+.wf-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--spacing-md) var(--spacing-lg);
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.wf-dialog-head h2 {
+  font-size: 1rem;
+  font-weight: var(--font-weight-bold);
+  color: var(--color-text-primary);
+}
+
+.wf-dialog-close {
+  font-size: 0.8rem;
+  color: var(--color-text-light);
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+}
+
+.wf-dialog-close:hover {
+  color: var(--color-text-primary);
+  background-color: #eef1f6;
+}
+
+.wf-dialog-body {
+  padding: var(--spacing-md) var(--spacing-lg) var(--spacing-lg);
+  overflow-y: auto;
+}
+
+.wf-dialog-error {
+  margin: var(--spacing-sm) var(--spacing-lg) 0;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid #f3b6ae;
+  background-color: #fdecea;
+  color: #c0392b;
+  border-radius: var(--radius-sm);
+  font-size: 0.78rem;
+}
+
+.wf-field-label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-secondary);
+  margin-bottom: 0.3rem;
+}
+
+.wf-input {
+  width: 100%;
+  min-width: 0;
+  padding: 0.55rem 0.7rem;
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+}
+
+.wf-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+}
+
+.wf-dialog-actions {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: var(--spacing-md);
+}
+
+/* ---- The list ---- */
+.wf-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.wf-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+}
+
+.wf-row.active {
+  border-color: var(--color-primary);
+  background-color: var(--color-primary-light);
+}
+
+.wf-row-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.wf-row-name {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wf-row-current {
+  font-size: 0.6rem;
+  font-weight: var(--font-weight-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-primary);
+  background-color: var(--color-white);
+  border-radius: var(--radius-pill);
+  padding: 0.05rem 0.4rem;
+}
+
+.wf-row-stage {
+  font-size: 0.68rem;
+  color: var(--color-text-secondary);
+}
+
+.wf-empty {
+  font-size: 0.8rem;
+  color: var(--color-text-light);
+  text-align: center;
+  padding: var(--spacing-lg) 0;
+}
+
+/* ---- Buttons ---- */
+.wf-btn {
+  flex: 0 0 auto;
+  padding: 0.5rem 0.9rem;
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-white);
+  color: var(--color-text-primary);
+  font-size: 0.8rem;
+  font-weight: var(--font-weight-semibold);
+}
+
+.wf-btn.small {
+  padding: 0.3rem 0.6rem;
+  font-size: 0.72rem;
+}
+
+.wf-btn:not(:disabled):hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.wf-btn.primary {
+  background-color: var(--color-primary);
+  border-color: var(--color-primary);
+  color: var(--color-white);
+}
+
+.wf-btn.primary:not(:disabled):hover {
+  background-color: var(--color-primary-dark);
+  border-color: var(--color-primary-dark);
+  color: var(--color-white);
+}
+
+.wf-btn.danger:not(:disabled):hover {
+  border-color: #c0392b;
+  color: #c0392b;
+}
+
+.wf-btn:disabled {
+  opacity: 0.5;
+}

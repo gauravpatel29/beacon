@@ -1,6 +1,6 @@
 import "./Home.css";
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   ApiError,
   createWorkflow,
@@ -9,6 +9,7 @@ import {
   selectWorkflow,
   updateWorkflow,
 } from '../../services/api.js';
+import { resumeRouteFor } from '../../services/workflowStages.js';
 import procdna_logo from "../../assets/procdna_logo.png";
 import hero_image from "../../assets/hero_image.jpg";
 import database from "../../assets/database.png";
@@ -122,17 +123,21 @@ const formatRelativeTime = (value) => {
 
 function Home() {
   const navigate = useNavigate();
-  const [showWorkflowDialog, setShowWorkflowDialog] = useState(false);
+  const location = useLocation();
+  // True when the sidebar sent us here to create one, so the dialog is open
+  // on the first paint instead of appearing a frame later.
+  const openCreateOnArrival = Boolean(location.state?.openCreate);
+  const [showWorkflowDialog, setShowWorkflowDialog] = useState(openCreateOnArrival);
   const [workflowName, setWorkflowName] = useState('');
   const [workflows, setWorkflows] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [isCreatingWorkflow, setIsCreatingWorkflow] = useState(false);
+  const [isCreatingWorkflow, setIsCreatingWorkflow] = useState(openCreateOnArrival);
   const [workflowQuery, setWorkflowQuery] = useState('');
   const [workflowStage, setWorkflowStage] = useState('all');
   const [editingWorkflowId, setEditingWorkflowId] = useState(null);
   const [editingWorkflowName, setEditingWorkflowName] = useState('');
   const [workflowActionId, setWorkflowActionId] = useState(null);
-  const [onlyCreateForm, setOnlyCreateForm] = useState(false);
+  const [onlyCreateForm, setOnlyCreateForm] = useState(openCreateOnArrival);
 
   const loadWorkflows = async () => {
     setLoading(true);
@@ -181,6 +186,17 @@ function Home() {
     // there's no need to fetch it.
   };
 
+  // Arriving from the sidebar's "Create new workflow" opens the dialog on the
+  // first render (see the initial state above) rather than through an effect,
+  // which would paint Home once and then the dialog over it. All this does is
+  // drop the flag from history, so going back or refreshing does not reopen it.
+  useEffect(() => {
+    if (location.state?.openCreate) {
+      navigate(location.pathname, { replace: true, state: null });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.state]);
+
   const startWorkflow = async (event) => {
     event.preventDefault();
     const name = workflowName.trim();
@@ -198,10 +214,13 @@ function Home() {
     }
   };
 
+  // Reopen the screen the workflow was last on, not always ingestion. An
+  // unrecognised or missing route falls back to ingestion, so a workflow saved
+  // by an older build still opens somewhere useful.
   const resumeWorkflow = (workflow) => {
     selectWorkflow(workflow.id);
     closeWorkflowDialog();
-    navigate('/data-ingestion');
+    navigate(resumeRouteFor(workflow));
   };
 
   const startRename = (workflow) => {

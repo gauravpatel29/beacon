@@ -204,9 +204,9 @@
   padding: 0.3rem;
 }
 
-/* Same as the review tabs: clickable divs and spans, not buttons. */
-.grain-tab,
-.tab-remove-x {
+/* A clickable div, so it gets no cursor from the button rule in App.css.
+   The delete control beside it IS a button now and needs nothing here. */
+.grain-tab {
   cursor: pointer;
 }
 
@@ -231,18 +231,60 @@
   box-shadow: var(--shadow-card);
 }
 
+/* Real buttons, for the keyboard and for screen readers. App.css already
+   strips the border and background; only the default padding has to go, so
+   they sit inline with the tab title the way the old span did. */
+.tab-edit-btn,
 .tab-remove-x {
   font-size: 0.65rem;
   color: var(--color-text-light);
-  margin-left: 0.3rem;
+  margin-left: 0.25rem;
+  padding: 0.15rem 0.25rem;
+  line-height: 1;
+  border-radius: 3px;
+  /* Hidden until the tab is hovered, so it reads as a name rather than a
+     toolbar. Opacity rather than display, so revealing them cannot shift the
+     tab's width and make the thing you were aiming at move. */
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.grain-tab:hover .tab-edit-btn,
+.grain-tab:hover .tab-remove-x,
+/* Keyboard users never hover, so focus has to reveal them too. */
+.tab-edit-btn:focus-visible,
+.tab-remove-x:focus-visible {
+  opacity: 1;
+}
+
+.tab-edit-btn:hover {
+  color: var(--color-primary);
 }
 
 .tab-remove-x:hover {
   color: #c0392b;
 }
 
+.tab-edit-btn:focus-visible,
+.tab-remove-x:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+/* Sized to the name, not to the tab. A tab is flex:1, so a full-width box
+   stretched the whole row when only one ARD existed. */
+.tab-rename-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  max-width: 100%;
+}
+
 .tab-rename-input {
-  width: 100%;
+  width: 9rem;
+  max-width: 100%;
+  min-width: 0;
   padding: 0.2rem 0.4rem;
   border: 1px solid var(--color-primary);
   border-radius: 4px;
@@ -250,6 +292,26 @@
   font-weight: var(--font-weight-semibold);
   text-align: center;
   background-color: var(--color-white);
+}
+
+.tab-rename-save {
+  flex: 0 0 auto;
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: var(--font-weight-bold);
+  color: var(--color-white);
+  background-color: var(--color-primary);
+  line-height: 1;
+}
+
+.tab-rename-save:disabled {
+  background-color: var(--color-border);
+  color: var(--color-text-light);
+}
+
+.tab-rename-save:not(:disabled):hover {
+  background-color: var(--color-primary-dark);
 }
 
 /* ---- Current Joins section (directly under Source Files) ---- */
@@ -414,15 +476,6 @@
   font-weight: var(--font-weight-semibold);
   color: var(--color-text-primary);
   margin-bottom: var(--spacing-sm);
-}
-
-.custom-grain-select {
-  width: 100%;
-  padding: 0.6rem 0.8rem;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  font-size: 0.8rem;
-  margin-bottom: var(--spacing-md);
 }
 
 /* ---- Body: scrollable ---- */

@@ -181,6 +181,7 @@
   color: var(--color-text-secondary);
   font-size: 0.75rem;
   font-weight: var(--font-weight-medium);
+  cursor: pointer;
 }
 
 .col-pill:hover {
@@ -769,4 +770,65 @@
   .detail-grid {
     grid-template-columns: 1fr;
   }
+}
+/* ---- Derived variable builder ---- */
+.derived-builder {
+  margin: var(--spacing-md) 0;
+  padding: 0.9rem;
+  border: 1.5px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: #fbfcfe;
+}
+
+.derived-builder-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 0.7rem;
+  margin-bottom: var(--spacing-sm);
+}
+
+.derived-builder-field label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-secondary);
+  margin-bottom: 0.25rem;
+}
+
+.derived-builder-field input,
+.derived-builder-field select {
+  width: 100%;
+  padding: 0.5rem 0.7rem;
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-white);
+  font-size: 0.78rem;
+}
+
+.derived-builder-label {
+  font-size: 0.72rem;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-secondary);
+  margin-bottom: 0.4rem;
+}
+
+.derived-part-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: var(--spacing-sm);
+}
+
+/* The expression as it will be sent, so the operator and the order of the
+   parts are visible before the column is created. */
+.derived-builder-preview {
+  font-size: 0.75rem;
+  font-family: var(--font-mono, monospace);
+  color: var(--color-primary-dark);
+  margin-bottom: var(--spacing-sm);
+}
+
+.derived-builder-actions {
+  display: flex;
+  gap: 0.6rem;
 }

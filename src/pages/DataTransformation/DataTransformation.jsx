@@ -1,45 +1,35 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import Papa from 'papaparse';
-import { v2ListArds, v2GetCsv, problemMessage, ensureWorkflow } from '../../services/api.js';
+import {
+  ensureWorkflow, problemMessage, transformationApply, transformationAutoSelect,
+  transformationCorrelation, transformationPreviewSingle, v2GetCsv, v2ListArds,
+} from '../../services/api.js';
+import { recordStage } from '../../services/workflowState.js';
+import { useScreenState } from '../../services/useScreenState.js';
 import PageFooterNav from '../../components/PageFooterNav/PageFooterNav.jsx';
 import './DataTransformation.css';
 
-// ─── Stats helpers (same approach as Data Review) ───────────────────────────
-function mean(nums) { return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : 0; }
-function median(nums) {
-  if (!nums.length) return 0;
-  const sorted = [...nums].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-}
-function stdDev(nums, m) {
-  if (nums.length < 2) return 0;
-  return Math.sqrt(nums.reduce((s, x) => s + (x - m) ** 2, 0) / nums.length);
-}
-function percentile(nums, p) {
-  if (!nums.length) return 0;
-  const sorted = [...nums].sort((a, b) => a - b);
-  const idx = (p / 100) * (sorted.length - 1);
-  const lo = Math.floor(idx), hi = Math.ceil(idx);
-  return lo === hi ? sorted[lo] : sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
-}
-function pearsonCorrelation(xs, ys) {
-  const n = xs.length;
-  if (n === 0) return 0;
-  const mx = mean(xs), my = mean(ys);
-  let num = 0, dx2 = 0, dy2 = 0;
-  for (let i = 0; i < n; i++) {
-    const dx = xs[i] - mx, dy = ys[i] - my;
-    num += dx * dy; dx2 += dx * dx; dy2 += dy * dy;
-  }
-  const denom = Math.sqrt(dx2 * dy2);
-  return denom === 0 ? 0 : num / denom;
-}
+// Statistics, histograms and response curves all come from the engine now;
+// the local implementations of them were removed with the adstock maths.
 function isNumericColumn(rows, col) {
   return rows.some((r) => typeof r[col] === 'number');
 }
 
-const ADSTOCK_OPTIONS = [0.3, 0.5, 0.7, 0.9];
+// Every method `normalize_series_vectorized` implements. Population scaling
+// needs a Population column chosen in Step 1; without one the engine leaves the
+// series alone, so the option says as much rather than failing quietly.
+const NORMALIZATION_OPTIONS = [
+  { value: 'none', label: 'None (Raw Volume)' },
+  { value: 'population', label: 'Population Based (per Universe)' },
+  { value: 'minmax', label: 'Min-Max Scaling [0, 1]' },
+  { value: 'zscore', label: 'Z-Score (Standardized)' },
+  { value: 'iqr', label: 'Robust / IQR Scaling' },
+];
+
+// The full range the engine accepts. 0.0 is not "no adstock": with a Horizon
+// above zero the engine reads it as a pure shift by that many weeks, which is
+// why it is labelled as a lag rather than as nothing.
+const ADSTOCK_OPTIONS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
 const HORIZON_OPTIONS = [
   { value: 1, label: '1 week' },
   { value: 2, label: '2 weeks' },
@@ -52,34 +42,11 @@ const SATURATION_OPTIONS = [
   { value: 'power', label: 'Power: x^p' },
 ];
 
-// Real Adstock decay (geometric, applied within each geo group over time,
-// truncated to the chosen horizon window) followed by a saturation curve.
-function applyAdstockAndSaturation(rowsSorted, geoKey, valueGetter, decay, horizon, saturation, param) {
-  // Group indices by geo key, preserving original order (already sorted by date).
-  const groups = {};
-  rowsSorted.forEach((r, i) => {
-    const g = r[geoKey];
-    (groups[g] = groups[g] || []).push(i);
-  });
-
-  const adstocked = new Array(rowsSorted.length).fill(0);
-  Object.values(groups).forEach((indices) => {
-    // geometric decay with a horizon cutoff: weight_j = decay^j for j < horizon
-    for (let t = 0; t < indices.length; t++) {
-      let acc = 0;
-      for (let j = 0; j < horizon && t - j >= 0; j++) {
-        acc += (decay ** j) * (valueGetter(rowsSorted[indices[t - j]]) || 0);
-      }
-      adstocked[indices[t]] = acc;
-    }
-  });
-
-  return adstocked.map((v) => {
-    if (saturation === 'log') return Math.log(1 + (param || 1) * v);
-    if (saturation === 'power') return Math.pow(v, param || 1);
-    return v;
-  });
-}
+// Adstock, saturation and correlation are computed by the engine in
+// core/processing.py, not here. They used to be reimplemented in this file; a
+// second copy of the maths is a second thing to keep in step with the version
+// the model is actually fitted with, and the two drift silently because both
+// produce plausible numbers.
 
 let derivedIdCounter = 0;
 
@@ -90,6 +57,9 @@ function DataTransformation() {
   const [isLoadingArds, setIsLoadingArds] = useState(true);
   const [loadError, setLoadError] = useState(null);
 
+  // The CSV text exactly as stored, kept because the transformation engines
+  // take the dataset rather than a parsed copy of it.
+  const [activeCsv, setActiveCsv] = useState('');
   const [rows, setRows] = useState([]);
   const [columns, setColumns] = useState([]);
   const [isLoadingData, setIsLoadingData] = useState(false);
@@ -106,7 +76,8 @@ function DataTransformation() {
 
   // Step 2
   const [selectedVars, setSelectedVars] = useState(new Set());
-  const [derivedVars, setDerivedVars] = useState([]); // [{id, name, parts}]
+  const [derivedVars, setDerivedVars] = useState([]); // [{id, name, operator, parts}]
+  const [derivedDraft, setDerivedDraft] = useState(null); // {name, operator, parts}
 
   // Step 3: per-variable config
   const [configs, setConfigs] = useState({}); // { [varName]: {decay, horizon, saturation, param, source} }
@@ -119,8 +90,65 @@ function DataTransformation() {
   const [transformResult, setTransformResult] = useState(null); // { rows, transformedCols, corrThreshold... }
   const [inspectVar, setInspectVar] = useState('');
   const [corrThreshold, setCorrThreshold] = useState(0.7);
+  const [isAutoSelecting, setIsAutoSelecting] = useState(false);
+  const [correlation, setCorrelation] = useState(null);
+  const [corrError, setCorrError] = useState(null);
+  const [isScoringCorr, setIsScoringCorr] = useState(false);
+  const [preview, setPreview] = useState(null);
+  const [previewError, setPreviewError] = useState(null);
+  const [isPreviewing, setIsPreviewing] = useState(false);
+  // The ARD a restored configuration belongs to. Consumed once by the loader,
+  // so only that first load keeps the config instead of resetting it.
+  const restoredArd = useRef(null);
+
+  // Remember where the user got to, so Resume reopens this screen instead
+  // of always returning to Data Ingestion.
+  useEffect(() => { recordStage('transformation'); }, []);
+
+  // Everything the user chose on this screen. The transformed dataset itself
+  // is not stored: it is reproducible from this config plus the ARD, and a
+  // stale copy of it would outlive the data it was computed from.
+  const stateRestored = useScreenState('transformation', {
+    ready: Boolean(columns.length),
+    deps: [selectedArdFilename, dateKeys, geoKeys, dependentVars, zipKeys, dmaKeys,
+           popKeys, carryover, selectedVars, derivedVars, configs, transformSetName,
+           corrThreshold, inspectVar],
+    snapshot: () => ({
+      ard: selectedArdFilename,
+      dateKeys, geoKeys, dependentVars, zipKeys, dmaKeys, popKeys,
+      carryover,
+      // A Set does not survive JSON.
+      selectedVars: Array.from(selectedVars),
+      derivedVars,
+      configs,
+      transformSetName,
+      corrThreshold,
+      inspectVar: activeInspectVar,
+    }),
+    restore: (s) => {
+      // The ARD is restored by the loader effect below, which also refetches
+      // its rows; setting it here would race that.
+      if (Array.isArray(s.dateKeys)) setDateKeys(s.dateKeys);
+      if (Array.isArray(s.geoKeys)) setGeoKeys(s.geoKeys);
+      if (Array.isArray(s.dependentVars)) setDependentVars(s.dependentVars);
+      if (Array.isArray(s.zipKeys)) setZipKeys(s.zipKeys);
+      if (Array.isArray(s.dmaKeys)) setDmaKeys(s.dmaKeys);
+      if (Array.isArray(s.popKeys)) setPopKeys(s.popKeys);
+      if (typeof s.carryover === 'boolean') setCarryover(s.carryover);
+      if (Array.isArray(s.selectedVars)) setSelectedVars(new Set(s.selectedVars));
+      if (Array.isArray(s.derivedVars)) setDerivedVars(s.derivedVars);
+      if (s.configs && typeof s.configs === 'object') setConfigs(s.configs);
+      if (typeof s.transformSetName === 'string') setTransformSetName(s.transformSetName);
+      if (typeof s.corrThreshold === 'number') setCorrThreshold(s.corrThreshold);
+      if (typeof s.inspectVar === 'string') setInspectVar(s.inspectVar);
+      restoredArd.current = s.ard || null;
+    },
+  });
 
   useEffect(() => {
+    // Waits for the restore. Running concurrently would let this pick the
+    // first ARD in the list before the saved choice had arrived.
+    if (!stateRestored) return;
     (async () => {
       setIsLoadingArds(true);
       setLoadError(null);
@@ -128,15 +156,20 @@ function DataTransformation() {
         const id = await ensureWorkflow();
         setWorkflowId(id);
         const data = await v2ListArds(id);
-        setArds(data.items || []);
-        if (data.items?.length) setSelectedArdFilename(data.items[0].filename);
+        const items = data.items || [];
+        setArds(items);
+        if (items.length) {
+          // Reopen the ARD the user was working on, when it still exists.
+          const wanted = items.find((x) => x.filename === restoredArd.current);
+          setSelectedArdFilename((wanted || items[0]).filename);
+        }
       } catch (err) {
         setLoadError(problemMessage(err, 'Could not load ARDs for this workflow.'));
       } finally {
         setIsLoadingArds(false);
       }
     })();
-  }, []);
+  }, [stateRestored]);
 
   const loadArdData = async (filename) => {
     if (!filename || !workflowId) return;
@@ -145,22 +178,38 @@ function DataTransformation() {
     setTransformResult(null);
     try {
       const csvText = await v2GetCsv(workflowId, filename);
+      setActiveCsv(csvText);
       const parsed = Papa.parse(csvText, { header: true, dynamicTyping: true, skipEmptyLines: true });
       const cols = parsed.meta.fields || [];
       setColumns(cols);
       setRows(parsed.data);
 
-      const guessedDate = cols.find((c) => /date|week|month/i.test(c));
-      const guessedGeo = cols.find((c) => /npi|dma|zip|id$/i.test(c));
-      setDateKeys(guessedDate ? [guessedDate] : []);
-      setGeoKeys(guessedGeo ? [guessedGeo] : []);
-      setDependentVars([]);
-      setZipKeys([]); setDmaKeys([]); setPopKeys([]);
-      setSelectedVars(new Set());
-      setDerivedVars([]);
-      setConfigs({});
+      // Loading a DIFFERENT ARD clears the configuration, because column names
+      // chosen against one dataset rarely mean anything in another. Loading
+      // the ARD a restored config was saved against must not: that is the
+      // resume path, and resetting here would wipe the work a moment after
+      // putting it back.
+      // Not consumed: StrictMode mounts twice, so this runs twice for the same
+      // file. Clearing it on the first pass let the second re-guess and wipe
+      // the configuration that had just been restored. Comparing without
+      // clearing is idempotent - and selecting a genuinely different ARD still
+      // falls through to fresh guesses, which is the intended behaviour.
+      const keepConfig = restoredArd.current === filename;
+      if (!keepConfig) {
+        const guessedDate = cols.find((c) => /date|week|month/i.test(c));
+        const guessedGeo = cols.find((c) => /npi|dma|zip|id$/i.test(c));
+        setDateKeys(guessedDate ? [guessedDate] : []);
+        setGeoKeys(guessedGeo ? [guessedGeo] : []);
+        setDependentVars([]);
+        setZipKeys([]); setDmaKeys([]); setPopKeys([]);
+        setSelectedVars(new Set());
+        setDerivedVars([]);
+        setDerivedDraft(null);
+        setConfigs({});
+      }
     } catch (err) {
       setDataError(problemMessage(err, 'Could not load this dataset.'));
+      setActiveCsv('');
       setRows([]);
       setColumns([]);
     } finally {
@@ -199,13 +248,45 @@ function DataTransformation() {
   const selectAllEligible = () => setSelectedVars(new Set(eligibleColumns));
   const deselectAll = () => setSelectedVars(new Set());
 
-  const addDerivedVariable = () => {
+  // The builder stays a draft until Add: a half-specified derived variable
+  // would otherwise reach the engine, which needs at least two real columns.
+  const openDerivedBuilder = () => {
     if (eligibleColumns.length < 2) return;
+    setDerivedDraft({ name: '', operator: '+', parts: eligibleColumns.slice(0, 2) });
+  };
+
+  const cancelDerivedBuilder = () => setDerivedDraft(null);
+
+  const toggleDerivedPart = (col) => {
+    setDerivedDraft((prev) => {
+      if (!prev) return prev;
+      const parts = prev.parts.includes(col)
+        ? prev.parts.filter((c) => c !== col)
+        : [...prev.parts, col];
+      return { ...prev, parts };
+    });
+  };
+
+  // The default name spells out the expression, which is what makes a column
+  // called "CALLS+EMAILS" readable three screens later in the model output.
+  const derivedDefaultName = (draft) => draft.parts.join(draft.operator).toUpperCase();
+
+  const commitDerivedVariable = () => {
+    if (!derivedDraft || derivedDraft.parts.length < 2) return;
+    const name = (derivedDraft.name.trim() || derivedDefaultName(derivedDraft)).toUpperCase();
+    // A derived name that collides with a real column would shadow it in the
+    // frame the engine builds, so the two cannot share one.
+    if (columns.includes(name) || derivedVars.some((d) => d.name === name)) {
+      setApplyError(`"${name}" is already a column. Give the derived variable another name.`);
+      return;
+    }
+    setApplyError(null);
     derivedIdCounter += 1;
-    const parts = eligibleColumns.slice(0, 2);
-    const name = parts.join('+').toUpperCase();
-    setDerivedVars((prev) => [...prev, { id: derivedIdCounter, name, parts }]);
+    setDerivedVars((prev) => [...prev, {
+      id: derivedIdCounter, name, operator: derivedDraft.operator, parts: derivedDraft.parts,
+    }]);
     setSelectedVars((prev) => new Set(prev).add(name));
+    setDerivedDraft(null);
   };
 
   const removeDerivedVariable = (id, name) => {
@@ -222,25 +303,94 @@ function DataTransformation() {
     });
   };
 
-  const configFor = (name) => configs[name] || { decay: 0.5, horizon: 2, saturation: 'log', param: 1, source: 'manual' };
+  const configFor = (name) => configs[name]
+    || { normalization: 'none', decay: 0.5, horizon: 2, saturation: 'log', param: 1, source: 'manual' };
 
   const updateConfig = (name, updates) => {
     setConfigs((prev) => ({ ...prev, [name]: { ...configFor(name), ...updates, source: 'manual' } }));
   };
 
-  const autoFillConfig = (name) => {
-    // Sensible default: dependent-variable-like carryover gets a gentler
-    // decay + linear response; everything else gets a log-saturated curve.
-    setConfigs((prev) => ({ ...prev, [name]: { decay: 0.7, horizon: 4, saturation: 'none', param: 1, source: 'auto' } }));
+  // ── Engine payloads ─────────────────────────────────────────────────────
+  // The engine keys its config by these exact names. `param` is one control in
+  // the UI but two fields on the wire, because log and power take different
+  // constants; the one the chosen curve does not use keeps its default rather
+  // than being overwritten with the other curve's value.
+  const toTransformation = (name) => {
+    const c = configFor(name);
+    const sat = c.saturation === 'log' ? 'Log' : c.saturation === 'power' ? 'Power' : 'none';
+    return {
+      'Channel Name': name,
+      'Normalization': c.normalization || 'none',
+      'Adstock': Number(c.decay),
+      'Lags': Number(c.horizon),
+      'Saturation Function': sat,
+      'Power (k)': c.saturation === 'power' ? Number(c.param) : 0.5,
+      'Log (k)': c.saturation === 'log' ? Number(c.param) : 1.0,
+    };
   };
 
-  const autoSelectAllVariables = () => {
-    const next = {};
-    Array.from(selectedVars).forEach((name) => { next[name] = { decay: 0.7, horizon: 4, saturation: 'none', param: 1, source: 'auto' }; });
-    setConfigs(next);
+  // Weights are left empty: the builder offers an operator across whole
+  // columns, not per-column coefficients, and the engine defaults each to 1.
+  const toDerivedVariables = () => derivedVars.map((d) => ({
+    name: d.name, operator: d.operator || '+', variables: d.parts, weights: {},
+  }));
+
+  const fromRecommendation = (rec) => {
+    const sat = String(rec['Saturation Function'] || 'none').toLowerCase();
+    return {
+      decay: Number(rec['Adstock'] ?? 0.5),
+      horizon: Number(rec['Lags'] ?? 2),
+      saturation: sat === 'log' || sat === 'power' ? sat : 'none',
+      param: sat === 'power' ? Number(rec['Power (k)'] ?? 0.5) : Number(rec['Log (k)'] ?? 1),
+      normalization: rec['Normalization'] || 'none',
+      source: 'auto',
+    };
   };
+
+  const runAutoSelect = async (names) => {
+    if (!activeCsv || !names.length) return;
+    if (!geoKeys.length || !dependentVars.length) {
+      setApplyError('Set Geo and Dependent Variable columns in Step 1 first.');
+      return;
+    }
+    setApplyError(null);
+    setIsAutoSelecting(true);
+    try {
+      const data = await transformationAutoSelect({
+        csv_data: activeCsv,
+        geo_column: geoKeys[0],
+        date_column: dateKeys[0] || '',
+        dependent_variable: dependentVars[0],
+        channels: names,
+        derived_variables: toDerivedVariables(),
+        pop_column: popKeys[0] || null,
+      });
+      setConfigs((prev) => {
+        const next = { ...prev };
+        (data.recommendations || []).forEach((rec) => {
+          if (rec['Channel Name']) next[rec['Channel Name']] = fromRecommendation(rec);
+        });
+        return next;
+      });
+    } catch (err) {
+      setApplyError(problemMessage(err, 'Auto-selection failed.'));
+    } finally {
+      setIsAutoSelecting(false);
+    }
+  };
+
+  const autoFillConfig = (name) => runAutoSelect([name]);
+
+  const autoSelectAllVariables = () => runAutoSelect(Array.from(selectedVars));
 
   const selectedList = Array.from(selectedVars);
+
+  // Derived rather than synced through an effect: the inspected channel is
+  // always one of the currently selected variables, falling back to the first
+  // when the chosen one is deselected. No extra render, nothing to keep in step.
+  const activeInspectVar = selectedList.includes(inspectVar)
+    ? inspectVar
+    : (selectedList[0] || '');
 
   const handleSaveApply = async () => {
     if (!dateKeys.length || !geoKeys.length || !dependentVars.length) {
@@ -254,115 +404,187 @@ function DataTransformation() {
     setApplyError(null);
     setIsApplying(true);
 
-    // Real transform, computed client-side on the actual ARD rows.
-    const dateKey = dateKeys[0];
-    const geoKey = geoKeys[0];
-    const sorted = [...rows].sort((a, b) => (a[dateKey] > b[dateKey] ? 1 : -1));
-
-    const transformedCols = [];
-    const outputRows = sorted.map((r) => ({ ...r }));
-
-    // Derived variables first (simple sum of parts), so they can also be
-    // transformed downstream the same as any base channel.
-    derivedVars.forEach((d) => {
-      outputRows.forEach((r) => {
-        r[d.name] = d.parts.reduce((s, p) => s + (Number(r[p]) || 0), 0);
+    try {
+      // Run on the server: derived variables, then normalization -> adstock ->
+      // saturation per channel, then the optional carryover column. This is the
+      // same engine the model is fitted with, so what is previewed here is what
+      // gets modelled.
+      const data = await transformationApply({
+        csv_data: activeCsv,
+        geo_column: geoKeys[0],
+        date_column: dateKeys[0],
+        dependent_variable: dependentVars[0],
+        transformations: selectedList.map(toTransformation),
+        derived_variables: toDerivedVariables(),
+        pop_column: popKeys[0] || null,
+        add_carryover: carryover,
       });
-      if (!columns.includes(d.name)) columns.push(d.name);
-    });
 
-    selectedList.forEach((varName) => {
-      const cfg = configFor(varName);
-      const values = applyAdstockAndSaturation(
-        outputRows, geoKey, (r) => Number(r[varName]) || 0,
-        cfg.decay, cfg.horizon, cfg.saturation, cfg.param
-      );
-      const outName = `${varName}_transformed`;
-      outputRows.forEach((r, i) => { r[outName] = values[i]; });
-      transformedCols.push({ raw: varName, transformed: outName, config: cfg });
-    });
-
-    if (carryover) {
-      const depVar = dependentVars[0];
-      const groups = {};
-      outputRows.forEach((r, i) => { (groups[r[geoKey]] = groups[r[geoKey]] || []).push(i); });
-      Object.values(groups).forEach((indices) => {
-        indices.forEach((idx, t) => {
-          outputRows[idx][`${depVar}_carryover_lag1`] = t > 0 ? outputRows[indices[t - 1]][depVar] : 0;
-        });
+      // The full transformed dataset comes back as CSV; the `preview` field is
+      // only the first 60 rows, which would quietly make the correlation panel
+      // and the inspector chart describe a sample rather than the data.
+      const parsed = Papa.parse(data.csv_data, {
+        header: true, dynamicTyping: true, skipEmptyLines: true,
       });
+      const outputRows = parsed.data;
+
+      const transformedCols = selectedList
+        .map((raw) => ({ raw, transformed: `${raw}_transformed`, config: configFor(raw) }))
+        .filter((c) => (data.columns || []).includes(c.transformed));
+
+      setTransformResult({
+        rows: outputRows,
+        transformedCols,
+        dependentVar: dependentVars[0],
+        columns: data.columns || [],
+        rowCount: data.rows ?? outputRows.length,
+        csv: data.csv_data,
+      });
+      setInspectVar(transformedCols[0]?.raw || '');
+    } catch (err) {
+      setApplyError(problemMessage(err, 'Could not apply the transformations.'));
+      setTransformResult(null);
+    } finally {
+      setIsApplying(false);
     }
-
-    setTransformResult({ rows: outputRows, transformedCols, dependentVar: dependentVars[0] });
-    setInspectVar(transformedCols[0]?.raw || '');
-    setIsApplying(false);
   };
 
-  // ---- Validation section computations ----
-  const correlationMatrix = useMemo(() => {
-    if (!transformResult) return [];
-    const cols = transformResult.transformedCols.map((c) => c.transformed).slice(0, 8);
-    return cols.map((c1) => ({
-      col: c1,
-      values: cols.map((c2) => pearsonCorrelation(
-        transformResult.rows.map((r) => Number(r[c1]) || 0),
-        transformResult.rows.map((r) => Number(r[c2]) || 0)
-      )),
-    }));
+  // ---- Validation section ----
+  // Correlation over the transformed columns, computed by the same engine the
+  // Data Review screen uses, so the two screens cannot disagree about the same
+  // pair of channels.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const columnsToScore = (transformResult?.transformedCols || [])
+        .map((c) => c.transformed).slice(0, 8);
+      if (!transformResult?.csv || !columnsToScore.length) {
+        if (!cancelled) setCorrelation(null);
+        return;
+      }
+      setIsScoringCorr(true);
+      try {
+        const data = await transformationCorrelation({
+          csv_data: transformResult.csv,
+          columns: columnsToScore,
+          // 0 so the response carries every pair. The slider filters what is
+          // shown; it does not change the correlations themselves, so it must
+          // not cause another upload of the whole dataset.
+          threshold: 0,
+        });
+        if (!cancelled) { setCorrelation(data); setCorrError(null); }
+      } catch (err) {
+        if (!cancelled) {
+          setCorrelation(null);
+          setCorrError(problemMessage(err, 'Could not score correlation.'));
+        }
+      } finally {
+        if (!cancelled) setIsScoringCorr(false);
+      }
+    })();
+    return () => { cancelled = true; };
+    // Deliberately NOT keyed on corrThreshold. The slider steps in 0.05, so
+    // dragging it once re-ran this twenty times, each posting the entire
+    // transformed dataset; the connection gave out and the screen reported the
+    // backend as unreachable.
   }, [transformResult]);
 
+  // The server returns the matrix column-major ({ colA: { colB: r } }); the
+  // table renders rows, so it is pivoted once here.
+  const correlationMatrix = useMemo(() => {
+    if (!correlation?.columns?.length) return [];
+    const cols = correlation.columns;
+    return cols.map((c1) => ({
+      col: c1,
+      values: cols.map((c2) => Number(correlation.matrix?.[c2]?.[c1] ?? 0)),
+    }));
+  }, [correlation]);
+
+  // Filtered here, from the matrix already in hand, using the same rule the
+  // engine applies: upper triangle only, |r| at or above the threshold,
+  // strongest first. The value shown keeps its sign, which the matrix cells
+  // above it also show; the threshold compares the magnitude.
   const highCorrPairs = useMemo(() => {
+    const cols = correlation?.columns || [];
     const pairs = [];
-    for (let i = 0; i < correlationMatrix.length; i++) {
-      for (let j = i + 1; j < correlationMatrix.length; j++) {
-        const r = correlationMatrix[i].values[j];
-        if (Math.abs(r) >= corrThreshold) {
-          pairs.push({ a: correlationMatrix[i].col, b: correlationMatrix[j].col, r });
-        }
+    for (let i = 0; i < cols.length; i += 1) {
+      for (let j = i + 1; j < cols.length; j += 1) {
+        const r = Number(correlation.matrix?.[cols[i]]?.[cols[j]] ?? 0);
+        if (Number.isNaN(r)) continue;
+        if (Math.abs(r) >= corrThreshold) pairs.push({ a: cols[i], b: cols[j], r });
       }
     }
-    return pairs.sort((a, b) => Math.abs(b.r) - Math.abs(a.r));
-  }, [correlationMatrix, corrThreshold]);
+    return pairs.sort((x, y) => Math.abs(y.r) - Math.abs(x.r));
+  }, [correlation, corrThreshold]);
 
+  // Live preview of ONE channel, computed by the engine. It re-runs whenever
+  // the config for that channel changes, so the effect of a decay or a
+  // saturation curve is visible before committing anything with Save & Apply.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!activeCsv || !activeInspectVar || !geoKeys.length || !dependentVars.length) {
+        if (!cancelled) setPreview(null);
+        return;
+      }
+      setIsPreviewing(true);
+      try {
+        const data = await transformationPreviewSingle({
+          csv_data: activeCsv,
+          channel: activeInspectVar,
+          geo_column: geoKeys[0],
+          date_column: dateKeys[0] || '',
+          dependent_variable: dependentVars[0],
+          config: toTransformation(activeInspectVar),
+          derived_variables: toDerivedVariables(),
+          pop_column: popKeys[0] || null,
+        });
+        if (!cancelled) { setPreview(data); setPreviewError(null); }
+      } catch (err) {
+        if (!cancelled) {
+          setPreview(null);
+          setPreviewError(problemMessage(err, 'Could not preview this channel.'));
+        }
+      } finally {
+        if (!cancelled) setIsPreviewing(false);
+      }
+    })();
+    return () => { cancelled = true; };
+    // `configs` is a dependency so editing the inspected channel re-previews.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCsv, activeInspectVar, configs, derivedVars, geoKeys, dateKeys, dependentVars, popKeys]);
+
+  // The server response, reshaped for the panels below. Statistics, bins and
+  // curves all come from the engine, so what is shown here is what the model
+  // will be fitted on rather than a second approximation of it.
   const inspectDetail = useMemo(() => {
-    if (!transformResult || !inspectVar) return null;
-    const entry = transformResult.transformedCols.find((c) => c.raw === inspectVar);
-    if (!entry) return null;
-    const before = transformResult.rows.map((r) => Number(r[entry.raw]) || 0);
-    const after = transformResult.rows.map((r) => Number(r[entry.transformed]) || 0);
-    const dep = transformResult.rows.map((r) => Number(r[transformResult.dependentVar]) || 0);
-
-    const statsFor = (arr) => ({
-      mean: mean(arr), median: median(arr), std: stdDev(arr, mean(arr)),
-      min: Math.min(...arr), max: Math.max(...arr),
-      p25: percentile(arr, 25), p75: percentile(arr, 75),
+    if (!preview) return null;
+    const byMetric = Object.fromEntries(
+      (preview.stats_table || []).map((s) => [s.metric, s])
+    );
+    const side = (key) => ({
+      mean: Number(byMetric.Mean?.[key] ?? 0),
+      median: Number(byMetric.Median?.[key] ?? 0),
+      std: Number(byMetric['Standard Deviation']?.[key] ?? 0),
+      min: Number(byMetric.Minimum?.[key] ?? 0),
+      max: Number(byMetric.Maximum?.[key] ?? 0),
+      p25: Number(byMetric['25th Percentile']?.[key] ?? 0),
+      p75: Number(byMetric['75th Percentile']?.[key] ?? 0),
     });
-
-    const histogram = (arr) => {
-      const min = Math.min(...arr), max = Math.max(...arr);
-      const binCount = 8;
-      const binWidth = (max - min) / binCount || 1;
-      const bins = Array.from({ length: binCount }, () => 0);
-      arr.forEach((v) => { const idx = Math.min(binCount - 1, Math.floor((v - min) / binWidth)); bins[idx]++; });
-      return bins;
-    };
-
-    const binnedCurve = (xArr, yArr) => {
-      const minX = Math.min(...xArr), maxX = Math.max(...xArr);
-      const binCount = 8;
-      const binWidth = (maxX - minX) / binCount || 1;
-      const buckets = Array.from({ length: binCount }, () => []);
-      xArr.forEach((x, i) => { const idx = Math.min(binCount - 1, Math.floor((x - minX) / binWidth)); buckets[idx].push(yArr[i]); });
-      return buckets.map((ys, i) => ({ x: minX + (i + 0.5) * binWidth, y: ys.length ? mean(ys) : 0 }));
-    };
+    const counts = (hist) => (hist || []).map((h) => Number(h.count) || 0);
+    const curve = (c) => (c?.binned_curve || [])
+      .map((p) => ({ x: Number(p.spend_x) || 0, y: Number(p.response_y) || 0 }));
 
     return {
-      config: entry.config,
-      before: statsFor(before), after: statsFor(after),
-      histBefore: histogram(before), histAfter: histogram(after),
-      curveBefore: binnedCurve(before, dep), curveAfter: binnedCurve(after, dep),
+      config: configFor(activeInspectVar),
+      before: side('original'), after: side('transformed'),
+      histBefore: counts(preview.raw_hist), histAfter: counts(preview.trans_hist),
+      curveBefore: curve(preview.raw_curve), curveAfter: curve(preview.trans_curve),
+      shapeBefore: preview.raw_curve?.shape_indicator || null,
+      shapeAfter: preview.trans_curve?.shape_indicator || null,
     };
-  }, [transformResult, inspectVar]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preview, activeInspectVar, configs]);
 
   const downloadTransformed = () => {
     if (!transformResult) return;
@@ -514,8 +736,77 @@ function DataTransformation() {
                   <span className="step-toolbar-link" onClick={selectAllEligible}>Select All Eligible</span>
                   <div className="step-toolbar-divider" />
                   <span className="step-toolbar-link muted" onClick={deselectAll}>Deselect All</span>
-                  <button className="add-derived-btn" onClick={addDerivedVariable}>+ Add Derived Variable</button>
+                  <button className="add-derived-btn" onClick={openDerivedBuilder} disabled={eligibleColumns.length < 2}>Add Derived Variable</button>
                 </div>
+
+                {derivedDraft && (
+                  <div className="derived-builder">
+                    <p className="transform-card-heading">Create Arithmetic Derived Variable</p>
+                    <div className="derived-builder-row">
+                      <div className="derived-builder-field">
+                        <label>Derived Channel Name</label>
+                        <input
+                          type="text"
+                          value={derivedDraft.name}
+                          placeholder={derivedDraft.parts.length >= 2
+                            ? derivedDefaultName(derivedDraft) : 'e.g. TOTAL_PERSONAL_PROMO'}
+                          onChange={(e) => setDerivedDraft({ ...derivedDraft, name: e.target.value })}
+                        />
+                      </div>
+                      <div className="derived-builder-field">
+                        <label>Operator</label>
+                        <select
+                          value={derivedDraft.operator}
+                          onChange={(e) => setDerivedDraft({ ...derivedDraft, operator: e.target.value })}
+                        >
+                          <option value="+">Addition (+)</option>
+                          <option value="-">Subtraction (-)</option>
+                          <option value="*">Multiplication (*)</option>
+                          <option value="/">Division (/)</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <p className="derived-builder-label">
+                      Source Variables (pick at least two, applied in the order shown)
+                    </p>
+                    <div className="derived-part-pills">
+                      {eligibleColumns.map((c) => {
+                        const position = derivedDraft.parts.indexOf(c);
+                        return (
+                          <button
+                            type="button"
+                            key={c}
+                            className={`col-pill${position >= 0 ? ' selected' : ''}`}
+                            onClick={() => toggleDerivedPart(c)}
+                          >
+                            {position >= 0 ? `${position + 1}. ${c}` : c}
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <p className="derived-builder-preview">
+                      {derivedDraft.parts.length >= 2
+                        ? `${derivedDraft.name.trim().toUpperCase() || derivedDefaultName(derivedDraft)} = ${derivedDraft.parts.join(` ${derivedDraft.operator} `)}`
+                        : 'Pick a second variable to complete the expression.'}
+                    </p>
+
+                    <div className="derived-builder-actions">
+                      <button
+                        type="button"
+                        className="mapping-btn primary"
+                        disabled={derivedDraft.parts.length < 2}
+                        onClick={commitDerivedVariable}
+                      >
+                        Add
+                      </button>
+                      <button type="button" className="mapping-btn" onClick={cancelDerivedBuilder}>
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
                 <div className="var-grid-table-wrapper">
                   <table className="var-grid-table">
                     <thead>
@@ -562,13 +853,14 @@ function DataTransformation() {
                   <p className="transform-section-desc">
                     Configure Normalization, Adstock Decay, Horizon smoothing (weeks), and Functional Saturation (Log/Power) per channel.
                   </p>
-                  <button className="auto-select-all-btn" onClick={autoSelectAllVariables}>Auto Select All Variables</button>
+                  <button className="auto-select-all-btn" onClick={autoSelectAllVariables} disabled={isAutoSelecting}>{isAutoSelecting ? 'Selecting…' : 'Auto Select All Variables'}</button>
 
                   <div className="config-table-wrapper">
                     <table className="config-table">
                       <thead>
                         <tr>
-                          <th>Variable</th><th>Adstock (Decay)</th><th>Horizon (Time Horizon)</th>
+                          <th>Variable</th><th>Normalization</th><th>Adstock (Decay)</th>
+                          <th>Horizon (Time Horizon)</th>
                           <th>Saturation Curve</th><th>Param (k / p)</th><th>Source</th><th>Actions</th>
                         </tr>
                       </thead>
@@ -580,8 +872,25 @@ function DataTransformation() {
                             <tr key={name}>
                               <td><strong>{name}</strong></td>
                               <td>
+                                <select
+                                  value={cfg.normalization || 'none'}
+                                  onChange={(e) => updateConfig(name, { normalization: e.target.value })}
+                                  title={!popKeys.length && (cfg.normalization === 'population')
+                                    ? 'Choose a Population column in Step 1 for this to have an effect.'
+                                    : undefined}
+                                >
+                                  {NORMALIZATION_OPTIONS.map((o) => (
+                                    <option key={o.value} value={o.value}>{o.label}</option>
+                                  ))}
+                                </select>
+                              </td>
+                              <td>
                                 <select value={cfg.decay} onChange={(e) => updateConfig(name, { decay: Number(e.target.value) })}>
-                                  {ADSTOCK_OPTIONS.map((v) => <option key={v} value={v}>{v}</option>)}
+                                  {ADSTOCK_OPTIONS.map((v) => (
+                                    <option key={v} value={v}>
+                                      {v === 0 ? '0.0 (pure lag)' : v.toFixed(1)}
+                                    </option>
+                                  ))}
                                 </select>
                               </td>
                               <td>
@@ -602,7 +911,7 @@ function DataTransformation() {
                               <td><span className={`source-badge ${cfg.source}`}>{cfg.source.toUpperCase()}</span></td>
                               <td>
                                 <div className="config-action-btns">
-                                  <button className="auto-fill-btn" onClick={() => autoFillConfig(name)}>Auto</button>
+                                  <button className="auto-fill-btn" onClick={() => autoFillConfig(name)} disabled={isAutoSelecting}>{isAutoSelecting ? '…' : 'Auto'}</button>
                                   {derived && (
                                     <button className="remove-derived-btn" onClick={() => removeDerivedVariable(derived.id, name)}>✕</button>
                                   )}
@@ -641,6 +950,12 @@ function DataTransformation() {
                       <input type="range" min="0" max="1" step="0.05" value={corrThreshold} onChange={(e) => setCorrThreshold(Number(e.target.value))} />
                       <span className="ready-badge">{selectedList.length} Features Ready for Regression</span>
                     </div>
+                    {isScoringCorr && (
+                      <p className="transform-section-desc" role="status">Scoring correlation…</p>
+                    )}
+                    {corrError && (
+                      <p className="transform-section-desc" role="alert">{corrError}</p>
+                    )}
                     <div className="config-table-wrapper">
                       <table className="corr-table-t">
                         <thead><tr><th>Variable</th>{correlationMatrix.map((r) => <th key={r.col}>{r.col.replace('_transformed', '')}</th>)}</tr></thead>
@@ -713,7 +1028,7 @@ function DataTransformation() {
 
                     <div className="inspect-select-row">
                       <p className="transform-card-heading">Select Variable to Inspect:</p>
-                      <select value={inspectVar} onChange={(e) => setInspectVar(e.target.value)}>
+                      <select value={activeInspectVar} onChange={(e) => setInspectVar(e.target.value)}>
                         {transformResult.transformedCols.map((c) => (
                           <option key={c.raw} value={c.raw}>
                             {c.raw} ({geoKeys[0]?.toUpperCase() || 'HCP'} • none • {SATURATION_OPTIONS.find((o) => o.value === c.config.saturation)?.label.split(':')[0].trim()})
@@ -722,11 +1037,18 @@ function DataTransformation() {
                       </select>
                     </div>
 
+                    {isPreviewing && (
+                      <p className="transform-section-desc" role="status">Previewing this channel…</p>
+                    )}
+                    {previewError && (
+                      <p className="transform-section-desc" role="alert">{previewError}</p>
+                    )}
+
                     {inspectDetail && (
                       <>
                         <div className="inspect-layout">
                           <div className="transform-detail-card">
-                            <p className="transform-detail-title">Transformation Details: {inspectVar.toUpperCase()}</p>
+                            <p className="transform-detail-title">Transformation Details: {activeInspectVar.toUpperCase()}</p>
                             <div className="detail-grid">
                               <div><p className="detail-item-label">Normalization</p><p className="detail-item-value">none</p></div>
                               <div><p className="detail-item-label">Adstock Decay (α)</p><p className="detail-item-value">{inspectDetail.config.decay}</p></div>
@@ -738,7 +1060,7 @@ function DataTransformation() {
                           </div>
 
                           <div>
-                            <p className="transform-card-heading">Before vs. After Summary Statistics ({inspectVar}):</p>
+                            <p className="transform-card-heading">Before vs. After Summary Statistics ({activeInspectVar}):</p>
                             <table className="before-after-table">
                               <thead><tr><th>Metric</th><th>Original</th><th>Transformed</th></tr></thead>
                               <tbody>
@@ -769,11 +1091,11 @@ function DataTransformation() {
                         <p className="transform-card-heading">Relationship with KPI (Poor Man's Curve): Before vs. After Transformation</p>
                         <div className="curve-compare-row">
                           <div className="dist-chart-box">
-                            <p className="dist-chart-title">Before: {inspectVar} vs {transformResult.dependentVar}</p>
+                            <p className="dist-chart-title">Before: {activeInspectVar} vs {dependentVars[0]}</p>
                             <MiniLineChart points={inspectDetail.curveBefore} color="#94a3b8" />
                           </div>
                           <div className="dist-chart-box">
-                            <p className="dist-chart-title after-title">After: {inspectVar} (Transformed) vs {transformResult.dependentVar}</p>
+                            <p className="dist-chart-title after-title">After: {activeInspectVar} (Transformed) vs {dependentVars[0]}</p>
                             <MiniLineChart points={inspectDetail.curveAfter} color="#1d4ed8" />
                           </div>
                         </div>

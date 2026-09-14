@@ -400,8 +400,171 @@ export function buildFilterGroups(file) {
  * Sent alongside the groups so nothing that reads the flat list has to know
  * about the nesting.
  */
+/**
+ * Split an incoming selection into what may be uploaded and what collides.
+ *
+ * A filename is the identity of a dataset in a workflow: its manifest, its
+ * derived copy and every ARD that joins it are keyed by that name. Uploading a
+ * second file of the same name replaces the stored one and discards the
+ * configuration committed against it, so the collision is refused instead.
+ *
+ * Case-insensitive, because the store treats the two names as one. Collisions
+ * inside a single selection count too - picking the same file twice, or two
+ * files of the same name from different folders.
+ */
+export function partitionNewFiles(existingNames, incoming) {
+  const taken = new Set((existingNames || []).map((n) => String(n).toLowerCase()));
+  const seen = new Set();
+  const accepted = [];
+  const duplicates = [];
+
+  for (const file of incoming || []) {
+    const key = String(file.name).toLowerCase();
+    if (taken.has(key) || seen.has(key)) {
+      duplicates.push(file.name);
+      continue;
+    }
+    seen.add(key);
+    accepted.push(file);
+  }
+
+  return { accepted, duplicates };
+}
+
+/** One link in the chain: a column, its kind, and the condition on it. */
+export function emptyChainEntry(column = '', kind = 'string') {
+  return { column, kind, cond: emptyCondition() };
+}
+
+/**
+ * Build `filter_chain`: the cards in order, with the operator from each gap.
+ *
+ * `operators` must end up with exactly one fewer entry than `items` or the API
+ * rejects it, so a card that is not actually configured takes the operator
+ * leading into it out of the chain along with itself.
+ */
+export function buildFilterChain(file) {
+  const cfg = file.filterConfig || {};
+  const chain = cfg.chain || [];
+  const chosen = cfg.operators || [];
+
+  const items = [];
+  const operators = [];
+
+  chain.forEach((entry, index) => {
+    if (!entry || !entry.column) return;
+    if (!conditionIsSet(entry.cond, entry.kind)) return;
+    const filters = conditionFilters(file, entry.column, entry.kind, entry.cond);
+    if (!filters.length) return;
+    // The operator in the gap before this card. Only needed once something is
+    // already in the chain for it to join onto.
+    if (items.length) operators.push(chosen[index - 1] === 'or' ? 'or' : 'and');
+    items.push({ filters });
+  });
+
+  return { items, operators };
+}
+
+/**
+ * The flat projection of the chain, which is what the API stores as `filters`.
+ * Sent alongside it so nothing reading the flat list needs to know the shape.
+ */
 export function buildFilters(file) {
-  return buildFilterGroups(file).flatMap((g) => g.conditions.flatMap((c) => c.filters));
+  return buildFilterChain(file).items.flatMap((item) => item.filters);
+}
+
+/** A card's condition in words, for the chain summary. */
+export function describeChainEntry(file, entry) {
+  const name = renamedName(file, entry.column) || entry.column;
+  const c = entry.cond || {};
+  const parts = [];
+
+  if (entry.kind === 'number') {
+    if (c.min !== '' && c.max !== '') parts.push(`between ${c.min} and ${c.max}`);
+    else if (c.min !== '') parts.push(`at least ${c.min}`);
+    else if (c.max !== '') parts.push(`at most ${c.max}`);
+  } else if (entry.kind === 'date') {
+    if (c.start && c.end) parts.push(`from ${c.start} to ${c.end}`);
+    else if (c.start) parts.push(`on or after ${c.start}`);
+    else if (c.end) parts.push(`on or before ${c.end}`);
+  } else if ((c.values || []).length) {
+    const shown = c.values.slice(0, 3).join(', ');
+    parts.push((c.values.length > 3)
+      ? `is one of ${shown} and ${c.values.length - 3} more`
+      : `is ${c.values.length > 1 ? 'one of ' : ''}${shown}`);
+  }
+
+  if (c.notNull) parts.push('is not empty');
+  if (c.luhn) parts.push('passes NPI check');
+
+  return `${name} ${parts.join(' and ') || 'is unfiltered'}`;
+}
+
+/**
+ * Read a committed spec back into the chain, whichever form it was stored in.
+ *
+ * Older specs carry `filter_groups` (nested per column) or a bare `filters`
+ * list with a single `filter_mode`. Both are flattened into a chain, which is
+ * exact whenever the stored filter used one operator throughout - the case
+ * every spec the previous UI could produce with its defaults. A stored spec
+ * that genuinely mixed AND and OR across groups cannot always be written as a
+ * flat chain, and converts to the nearest left-to-right reading.
+ */
+export function restoreFilterChain(spec, renameMap) {
+  const originalOf = Object.fromEntries(
+    Object.entries(renameMap || {}).map(([from, to]) => [to, from])
+  );
+  const entryOf = (filters) => {
+    const first = (filters || [])[0];
+    if (!first) return null;
+    const { condition, kind } = conditionFromFilters(filters);
+    return { column: originalOf[first.column] || first.column, kind, cond: condition };
+  };
+
+  const stored = spec?.filter_chain;
+  if (stored && Array.isArray(stored.items) && stored.items.length) {
+    const chain = [];
+    const operators = [];
+    stored.items.forEach((item, index) => {
+      const entry = entryOf(item.filters);
+      if (!entry) return;
+      if (chain.length) operators.push(stored.operators?.[index - 1] === 'or' ? 'or' : 'and');
+      chain.push(entry);
+    });
+    return { chain, operators };
+  }
+
+  // Legacy: groups nested per column.
+  if (Array.isArray(spec?.filter_groups) && spec.filter_groups.length) {
+    const across = spec.filter_mode === 'any' ? 'or' : 'and';
+    const chain = [];
+    const operators = [];
+    spec.filter_groups.forEach((group) => {
+      const within = group.mode === 'any' ? 'or' : 'and';
+      (group.conditions || []).forEach((cond, i) => {
+        const entry = entryOf(cond.filters);
+        if (!entry) return;
+        if (chain.length) operators.push(i === 0 ? across : within);
+        chain.push(entry);
+      });
+    });
+    return { chain, operators };
+  }
+
+  // Legacy: a flat list under one mode.
+  const rules = restoreFilters(spec?.filters, renameMap);
+  const op = spec?.filter_mode === 'any' ? 'or' : 'and';
+  const chain = [];
+  const operators = [];
+  Object.keys(rules).forEach((col) => {
+    const rule = normalizeRule(rules[col]);
+    rule.conditions.forEach((cond) => {
+      if (!conditionIsSet(cond, rule.kind)) return;
+      if (chain.length) operators.push(op);
+      chain.push({ column: col, kind: rule.kind, cond });
+    });
+  });
+  return { chain, operators };
 }
 
 /**
@@ -467,14 +630,12 @@ export function buildSpec(file) {
   const spec = {
     config_metadata: file.category ? { category: file.category } : {},
     live_updates: buildLiveUpdates(file),
-    // Both forms are sent: the groups drive the engine, and the flat list is
-    // their projection, so a backend that predates groups still filters - just
-    // without the per-column nesting.
+    // The chain drives the engine; the flat list is its projection, sent so a
+    // backend that predates the chain still filters - just without the
+    // per-gap operators. Always sent, both of them, so clearing every filter
+    // is recorded rather than leaving what was committed before in place.
     filters: buildFilters(file),
-    filter_groups: buildFilterGroups(file),
-    // Always sent, so switching back to "all" is recorded rather than leaving
-    // the previously committed "any" in place.
-    filter_mode: buildFilterMode(file),
+    filter_chain: buildFilterChain(file),
   };
   const granularity = buildGranularity(file);
   if (granularity) spec.granularity = granularity;

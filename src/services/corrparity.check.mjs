@@ -89,7 +89,11 @@ const SECTIONS = {
     // the sub-tab must not spend that time on a result nobody requested.
     ['removal scans only on request',  null],
     ['picker will not drop below 2',   'prev.length <= 2 ? prev'],
-    ['high pairs follow the slider',   'corrSelectedCols, corrThreshold]'],
+    // The slider must NOT be a fetch dependency: re-querying on every 0.05
+    // step re-uploaded the whole dataset and the connection gave out. The
+    // pairs are filtered from the matrix already in hand instead.
+    ['matrix fetch ignores the slider', 'activeCsv, corrSelectedCols]'],
+    ['high pairs derived from the matrix', 'Math.abs(r) >= corrThreshold'],
   ],
   'sub-tab labels': [
     ['1. numbered',                "'1. Analysis (Heatmap & VIF)'"],
@@ -110,7 +114,6 @@ const SECTIONS = {
   'backed by the server, not the browser': [
     ['matrix endpoint',            'fetchCorrelationMatrix('],
     ['VIF endpoint',               'fetchVIF('],
-    ['high-pairs endpoint',        'getHighCorrPairs('],
     ['preview-removal endpoint',   'previewRemoval('],
     ['apply-removal endpoint',     'applyRemoval('],
     ['find-clusters endpoint',     'findClusters('],

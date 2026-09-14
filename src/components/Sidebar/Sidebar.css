@@ -12,7 +12,10 @@
   width: 240px;
   min-height: 100%;
   height: 100%;
-  overflow-y: auto;
+  /* Deliberately not scrollable: any overflow value other than visible makes
+     this a clipping box, and the workflow menu drops out of the header. The
+     nav list below carries the scrollbar instead. */
+  overflow: visible;
   transition: width 0.25s ease;
 }
 
@@ -21,22 +24,222 @@
   padding: var(--spacing-lg) 0.5rem;
 }
 
-/* ---- Toggle button (chevron), floats on the right edge ---- */
+/* ---- Header: workflow chip + collapse toggle, on one row ---- */
+/* `stretch`, not `center`: the chip is two lines tall and the toggle one, so
+   centring left a small square floating beside a taller block. Stretching
+   makes them a matched pair with one top and one bottom edge. */
+.sidebar-head {
+  display: flex;
+  align-items: stretch;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+/* No room for two controls side by side once collapsed. */
+.sidebar.collapsed .sidebar-head {
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+/* Inside the sidebar now. It sat at right:-16px, half outside, where it
+   overlapped the page behind it and was clipped by the sidebar's own
+   overflow-y: auto. */
 .sidebar-toggle-btn {
-  position: absolute;
-  top: var(--spacing-md);
-  right: -16px;
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  background-color: var(--color-white);
-  color: var(--color-text-primary);
+  /* No fixed height: it takes the chip's, so the two line up exactly. */
+  flex: 0 0 34px;
+  border-radius: var(--radius-sm);
+  background-color: rgba(255, 255, 255, 0.14);
+  color: var(--color-white);
   display: flex;
   align-items: center;
   justify-content: center;
+  font-size: 0.8rem;
+  line-height: 1;
+}
+
+/* Collapsed, the pair stacks, so the toggle needs its own height back. */
+.sidebar.collapsed .sidebar-toggle-btn {
+  flex: 0 0 auto;
+  width: 100%;
+  height: 30px;
+}
+
+.sidebar-toggle-btn:hover {
+  background-color: rgba(255, 255, 255, 0.26);
+}
+
+.sidebar-toggle-btn:focus-visible {
+  outline: 2px solid var(--color-white);
+  outline-offset: 2px;
+}
+
+/* ---- Workflow switcher ---- */
+.workflow-switcher {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.workflow-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  min-width: 0;
+  padding: 0.45rem 0.55rem;
+  border-radius: var(--radius-sm);
+  background-color: rgba(255, 255, 255, 0.14);
+  color: var(--color-white);
+  text-align: left;
+}
+
+.workflow-chip:hover,
+.workflow-chip.is-open {
+  background-color: rgba(255, 255, 255, 0.26);
+}
+
+.workflow-chip:focus-visible {
+  outline: 2px solid var(--color-white);
+  outline-offset: 2px;
+}
+
+.workflow-chip-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.workflow-chip-label {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.75;
+}
+
+/* One line, clipped: a long workflow name must not widen the sidebar. */
+.workflow-chip-name {
+  font-size: 0.78rem;
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workflow-chip-caret {
+  flex: 0 0 auto;
+  font-size: 0.6rem;
+  opacity: 0.8;
+}
+
+.workflow-chip-initial {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 22px;
+  font-size: 0.85rem;
+  font-weight: var(--font-weight-bold);
+}
+
+/* ---- The menu ---- */
+.workflow-menu {
+  position: absolute;
+  top: calc(100% + 0.4rem);
+  left: 0;
+  /* Wider than a collapsed sidebar, so names stay readable in both states. */
+  width: max(210px, 100%);
+  background-color: var(--color-white);
+  border-radius: var(--radius-sm);
   box-shadow: var(--shadow-card-hover);
-  font-size: 0.9rem;
-  z-index: 5;
+  padding: 0.4rem;
+  z-index: 20;
+}
+
+.workflow-menu-head {
+  font-size: 0.62rem;
+  font-weight: var(--font-weight-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-light);
+  padding: 0.25rem 0.4rem 0.35rem;
+}
+
+/* A long list scrolls rather than running off the bottom of the screen. */
+.workflow-menu-list {
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.workflow-menu-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  padding: 0.4rem;
+  border-radius: 4px;
+  text-align: left;
+}
+
+.workflow-menu-item:hover {
+  background-color: #eef1f6;
+}
+
+.workflow-menu-item.active {
+  background-color: var(--color-primary-light);
+}
+
+.workflow-menu-name {
+  font-size: 0.78rem;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.workflow-menu-stage {
+  font-size: 0.66rem;
+  color: var(--color-text-secondary);
+}
+
+.workflow-menu-empty {
+  font-size: 0.72rem;
+  color: var(--color-text-light);
+  padding: 0.4rem;
+}
+
+/* Manage on the left, + New at the end of the same line. */
+.workflow-menu-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  margin-top: 0.3rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid var(--color-border-light);
+}
+
+.workflow-menu-action {
+  padding: 0.35rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-primary);
+}
+
+.workflow-menu-action:hover {
+  background-color: #eef1f6;
+}
+
+.workflow-menu-action.is-new {
+  background-color: var(--color-primary);
+  color: var(--color-white);
+}
+
+.workflow-menu-action.is-new:hover {
+  background-color: var(--color-primary-dark);
 }
 
 /* ---- Nav list ---- */
@@ -45,6 +248,11 @@
   flex-direction: column;
   gap: 0.4rem;
   margin-top: var(--spacing-lg);
+  /* Takes the remaining height and scrolls here, so the sidebar itself can
+     stay overflow:visible for the workflow menu. */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .sidebar-item {
