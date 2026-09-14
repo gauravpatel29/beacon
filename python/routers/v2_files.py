@@ -312,13 +312,36 @@ async def commit_spec(request: Request, workflow_id: str, filename: str, body: S
 
 
 @router.get("/{workflow_id}/files")
-async def list_files(request: Request, workflow_id: str):
+async def list_files(
+    request: Request, workflow_id: str,
+    kind: Optional[str] = Query(
+        None,
+        description="Comma-separated dataset kinds to return, e.g. 'upload'. "
+                    "Omit for every dataset in the workflow.",
+    ),
+):
+    """Every dataset in the workflow, optionally narrowed to certain kinds.
+
+    A workflow's files are not all the same thing: `upload` rows are what the
+    user put in, while `ard` and `merge` rows are outputs this API wrote. The
+    ingestion screen only ever meant the first group - listing the outputs
+    there offered an ARD for re-mapping and re-categorising as though it were
+    a source file.
+
+    The filter is opt-in, so every existing caller keeps the full list.
+    """
     if (guard := await _guard(request, workflow_id)) is not None:
         return guard
     try:
-        return {"workflow_id": workflow_id, "items": await datasets.list_datasets(workflow_id)}
+        items = await datasets.list_datasets(workflow_id)
     except DatasetError as exc:
         return _dataset_problem(request, exc)
+
+    if kind:
+        wanted = {part.strip() for part in kind.split(",") if part.strip()}
+        # Rows written before `kind` existed have none; they are uploads.
+        items = [d for d in items if (d.get("kind") or "upload") in wanted]
+    return {"workflow_id": workflow_id, "items": items}
 
 
 @router.get("/{workflow_id}/files/{filename}")
