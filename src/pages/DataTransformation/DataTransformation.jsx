@@ -1,11 +1,19 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import Papa from 'papaparse';
 import {
+  Bar, BarChart, CartesianGrid, Line, LineChart,
+  ResponsiveContainer, Tooltip, XAxis, YAxis,
+} from 'recharts';
+import {
   ensureWorkflow, problemMessage, transformationApply, transformationAutoSelect,
   transformationCorrelation, transformationPreviewSingle, v2GetCsv, v2ListArds,
 } from '../../services/api.js';
 import { recordStage } from '../../services/workflowState.js';
 import { useScreenState } from '../../services/useScreenState.js';
+import { ChartTooltip } from '../../components/charts/ChartTooltip.jsx';
+import {
+  AXIS_TICK, fmt, GRID, X_LABEL, Y_LABEL,
+} from '../../components/charts/chartTheme.js';
 import PageFooterNav from '../../components/PageFooterNav/PageFooterNav.jsx';
 import './DataTransformation.css';
 
@@ -100,6 +108,11 @@ function DataTransformation() {
   // The ARD a restored configuration belongs to. Consumed once by the loader,
   // so only that first load keeps the config instead of resetting it.
   const restoredArd = useRef(null);
+  // The set-name field, so Save can send the user to it when it is empty.
+  const setNameRef = useRef(null);
+  // The set the user deliberately saved, with a signature of the config it
+  // was saved from. Null until Save is pressed.
+  const [savedSet, setSavedSet] = useState(null);
 
   // Remember where the user got to, so Resume reopens this screen instead
   // of always returning to Data Ingestion.
@@ -112,7 +125,7 @@ function DataTransformation() {
     ready: Boolean(columns.length),
     deps: [selectedArdFilename, dateKeys, geoKeys, dependentVars, zipKeys, dmaKeys,
            popKeys, carryover, selectedVars, derivedVars, configs, transformSetName,
-           corrThreshold, inspectVar],
+           corrThreshold, inspectVar, savedSet],
     snapshot: () => ({
       ard: selectedArdFilename,
       dateKeys, geoKeys, dependentVars, zipKeys, dmaKeys, popKeys,
@@ -124,6 +137,7 @@ function DataTransformation() {
       transformSetName,
       corrThreshold,
       inspectVar: activeInspectVar,
+      savedSet,
     }),
     restore: (s) => {
       // The ARD is restored by the loader effect below, which also refetches
@@ -141,6 +155,7 @@ function DataTransformation() {
       if (typeof s.transformSetName === 'string') setTransformSetName(s.transformSetName);
       if (typeof s.corrThreshold === 'number') setCorrThreshold(s.corrThreshold);
       if (typeof s.inspectVar === 'string') setInspectVar(s.inspectVar);
+      if (s.savedSet && typeof s.savedSet === 'object') setSavedSet(s.savedSet);
       restoredArd.current = s.ard || null;
     },
   });
@@ -449,6 +464,48 @@ function DataTransformation() {
     }
   };
 
+  // What was applied, as one comparable string. Saving records this, and the
+  // card goes back to Unsaved the moment any of it changes - a set that still
+  // read "Saved" after the config moved underneath it would be a lie.
+  const appliedSignature = useMemo(() => JSON.stringify({
+    ard: selectedArdFilename,
+    dateKeys, geoKeys, dependentVars, popKeys, carryover,
+    transformations: selectedList.map(toTransformation),
+    derived: toDerivedVariables(),
+  }),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [selectedArdFilename, dateKeys, geoKeys, dependentVars, popKeys, carryover,
+   selectedVars, configs, derivedVars]);
+
+  // Saved only when a set was saved AND nothing has changed since.
+  const isSaved = Boolean(savedSet) && savedSet.signature === appliedSignature;
+
+  const saveTransformationSet = () => {
+    if (!transformResult) return;
+
+    // A set with no name is a set nobody can identify later. Rather than
+    // inventing one, point at the field that needs filling in - it lives up in
+    // Step 3, which is easy to miss from the button down here.
+    if (!transformSetName.trim()) {
+      setApplyError('Name this transformation set in Step 3 before saving it.');
+      setNameRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setNameRef.current?.focus();
+      return;
+    }
+
+    setApplyError(null);
+    setSavedSet({
+      name: transformSetName.trim(),
+      signature: appliedSignature,
+      savedAt: new Date().toISOString(),
+      // The transformed frame is deliberately not stored: it is 26k rows of
+      // derived data that this config reproduces exactly, and a stale copy
+      // would outlive the ARD it came from.
+      columns: transformResult.columns,
+      rowCount: transformResult.rowCount,
+    });
+  };
+
   // ---- Validation section ----
   // Correlation over the transformed columns, computed by the same engine the
   // Data Review screen uses, so the two screens cannot disagree about the same
@@ -579,6 +636,8 @@ function DataTransformation() {
       config: configFor(activeInspectVar),
       before: side('original'), after: side('transformed'),
       histBefore: counts(preview.raw_hist), histAfter: counts(preview.trans_hist),
+      binsBefore: (preview.raw_hist || []).map((h) => h.bin),
+      binsAfter: (preview.trans_hist || []).map((h) => h.bin),
       curveBefore: curve(preview.raw_curve), curveAfter: curve(preview.trans_curve),
       shapeBefore: preview.raw_curve?.shape_indicator || null,
       shapeAfter: preview.trans_curve?.shape_indicator || null,
@@ -927,10 +986,15 @@ function DataTransformation() {
                   <div className="set-name-row">
                     <div className="set-name-field">
                       <label>Transformation Set Name:</label>
-                      <input value={transformSetName} onChange={(e) => setTransformSetName(e.target.value)} placeholder="e.g. Q4 National Launch v1" />
+                      <input
+                        ref={setNameRef}
+                        value={transformSetName}
+                        onChange={(e) => setTransformSetName(e.target.value)}
+                        placeholder="e.g. Q4 National Launch v1"
+                      />
                     </div>
                     <button className="save-apply-btn" onClick={handleSaveApply} disabled={isApplying}>
-                      {isApplying ? 'Applying...' : '▶ Save & Apply Transformation Set'}
+                      {isApplying ? 'Applying...' : 'Apply Transformation Set'}
                     </button>
                   </div>
                   {applyError && <div className="transform-error-banner" style={{ marginTop: '0.75rem' }}>{applyError}</div>}
@@ -1013,17 +1077,43 @@ function DataTransformation() {
                   </div>
 
                   <div className="transform-card">
-                    <p className="transform-section-title">3. Preview &amp; Validation</p>
-                    <p className="transform-section-desc">
-                      Review the empirical impact of transformations, validate distribution compression, and inspect response shape against KPI before saving.
-                    </p>
+                    <div className="transform-card-titlebar">
+                      <div>
+                        <p className="transform-section-title">3. Preview &amp; Validation</p>
+                        <p className="transform-section-desc">
+                          Review the empirical impact of transformations, validate distribution compression, and inspect response shape against KPI before saving.
+                        </p>
+                      </div>
+                      {/* Applying runs the engine; saving records the set that
+                          produced this result. Nothing to save until something
+                          has been applied. */}
+                      <button
+                        type="button"
+                        className="save-set-btn"
+                        disabled={!transformResult || isSaved}
+                        title={isSaved
+                          ? 'This set is already saved'
+                          : 'Save this transformation set'}
+                        onClick={saveTransformationSet}
+                      >
+                        {isSaved ? 'Saved' : 'Save Transformation Set'}
+                      </button>
+                    </div>
                     <div className="stat-card-row-transform">
                       <div className="tstat-card blue"><p className="tstat-value">{selectedList.length}</p><p className="tstat-label">Variables Transformed</p></div>
                       <div className="tstat-card green"><p className="tstat-value">{Object.values(configs).filter((c) => c.source === 'auto').length}</p><p className="tstat-label">Auto Selected</p></div>
                       <div className="tstat-card grey"><p className="tstat-value">{Object.values(configs).filter((c) => c.source === 'manual').length}</p><p className="tstat-label">Manually Configured</p></div>
                       <div className="tstat-card purple"><p className="tstat-value">{derivedVars.length}</p><p className="tstat-label">Derived Variables</p></div>
                       <div className="tstat-card yellow"><p className="tstat-value">{highCorrPairs.length}</p><p className="tstat-label">High Corr Pairs</p></div>
-                      <div className="tstat-card dark"><p className="tstat-value">{transformSetName || 'Unsaved'}</p><p className="tstat-label">Active Version</p></div>
+                      {/* Reads Saved only while the saved signature still
+                          matches the current config. Changing anything after
+                          saving puts it back to Unsaved. */}
+                      <div className={`tstat-card ${isSaved ? 'green' : 'dark'}`}>
+                        <p className="tstat-value">
+                          {isSaved ? savedSet.name : 'Unsaved'}
+                        </p>
+                        <p className="tstat-label">Active Version</p>
+                      </div>
                     </div>
 
                     <div className="inspect-select-row">
@@ -1080,11 +1170,11 @@ function DataTransformation() {
                         <div className="dist-compare-row">
                           <div className="dist-chart-box">
                             <p className="dist-chart-title">Original Distribution (Raw Histogram)</p>
-                            <MiniBarChart bins={inspectDetail.histBefore} color="#94a3b8" />
+                            <MiniBarChart bins={inspectDetail.histBefore} binLabels={inspectDetail.binsBefore} color="#94a3b8" xLabel={activeInspectVar} yLabel="Records" />
                           </div>
                           <div className="dist-chart-box">
                             <p className="dist-chart-title after-title">Transformed Distribution (Normalized &amp; Saturated)</p>
-                            <MiniBarChart bins={inspectDetail.histAfter} color="#1d4ed8" />
+                            <MiniBarChart bins={inspectDetail.histAfter} binLabels={inspectDetail.binsAfter} color="#1d4ed8" xLabel={`${activeInspectVar} (transformed)`} yLabel="Records" />
                           </div>
                         </div>
 
@@ -1092,11 +1182,11 @@ function DataTransformation() {
                         <div className="curve-compare-row">
                           <div className="dist-chart-box">
                             <p className="dist-chart-title">Before: {activeInspectVar} vs {dependentVars[0]}</p>
-                            <MiniLineChart points={inspectDetail.curveBefore} color="#94a3b8" />
+                            <MiniLineChart points={inspectDetail.curveBefore} color="#94a3b8" xLabel={activeInspectVar} yLabel={`Average ${dependentVars[0] || 'KPI'}`} />
                           </div>
                           <div className="dist-chart-box">
                             <p className="dist-chart-title after-title">After: {activeInspectVar} (Transformed) vs {dependentVars[0]}</p>
-                            <MiniLineChart points={inspectDetail.curveAfter} color="#1d4ed8" />
+                            <MiniLineChart points={inspectDetail.curveAfter} color="#1d4ed8" xLabel={`${activeInspectVar} (transformed)`} yLabel={`Average ${dependentVars[0] || 'KPI'}`} />
                           </div>
                         </div>
                       </>
@@ -1115,33 +1205,88 @@ function DataTransformation() {
   );
 }
 
-function MiniBarChart({ bins, color }) {
-  const width = 400, height = 140, padding = 20;
-  const maxVal = Math.max(...bins, 1);
-  const barWidth = (width - padding * 2) / bins.length;
+// recharts, like Data Review. These were hand-drawn SVGs with no hover at all:
+// you could see a shape but not read a value off it, and the hit-testing to
+// add that is exactly what recharts already does.
+const CHART_MARGIN = { top: 10, right: 20, bottom: 24, left: 10 };
+
+function MiniBarChart({ bins, color, xLabel = '', yLabel = 'Records', binLabels = [] }) {
+  if (!bins.length) return null;
+  const total = bins.reduce((a, b) => a + b, 0);
+  // The bin's own range as the category, so the axis and the tooltip both
+  // report the values rather than a bin index.
+  const data = bins.map((count, i) => ({ bin: binLabels[i] ?? String(i + 1), count }));
+
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} style={{ width: '100%', height: 'auto' }}>
-      {bins.map((v, i) => {
-        const h = (v / maxVal) * (height - padding * 2);
-        return <rect key={i} x={padding + i * barWidth + 1} y={height - padding - h} width={barWidth - 2} height={h} fill={color} />;
-      })}
-    </svg>
+    <ResponsiveContainer width="100%" height={200}>
+      <BarChart data={data} margin={CHART_MARGIN}>
+        <CartesianGrid stroke={GRID} vertical={false} />
+        <XAxis
+          dataKey="bin" tick={{ fontSize: 8, fill: '#8a94a3' }} tickLine={false}
+          axisLine={{ stroke: GRID }} minTickGap={14}
+          label={{ value: xLabel, ...X_LABEL }}
+        />
+        <YAxis
+          tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
+          label={{ value: yLabel, ...Y_LABEL }}
+        />
+        <Tooltip
+          cursor={{ fill: 'rgba(29, 42, 107, 0.08)' }}
+          content={
+            <ChartTooltip
+              title={(label) => `${xLabel}: ${label}`}
+              rows={(label, payload) => {
+                const count = payload[0]?.value ?? 0;
+                return [
+                  { label: 'Records', value: count.toLocaleString(), color },
+                  { label: 'Share', value: total ? `${((count / total) * 100).toFixed(1)}%` : '—' },
+                ];
+              }}
+            />
+          }
+        />
+        <Bar dataKey="count" fill={color} radius={[2, 2, 0, 0]} />
+      </BarChart>
+    </ResponsiveContainer>
   );
 }
 
-function MiniLineChart({ points, color }) {
-  const width = 400, height = 140, padding = 20;
+function MiniLineChart({ points, color, xLabel = '', yLabel = '' }) {
   if (!points.length) return null;
-  const xs = points.map((p) => p.x), ys = points.map((p) => p.y);
-  const minX = Math.min(...xs), maxX = Math.max(...xs);
-  const minY = Math.min(...ys, 0), maxY = Math.max(...ys, 1);
-  const xScale = (v) => padding + ((v - minX) / (maxX - minX || 1)) * (width - padding * 2);
-  const yScale = (v) => height - padding - ((v - minY) / (maxY - minY || 1)) * (height - padding * 2);
+
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} style={{ width: '100%', height: 'auto' }}>
-      <polyline points={points.map((p) => `${xScale(p.x)},${yScale(p.y)}`).join(' ')} fill="none" stroke={color} strokeWidth="2" />
-      {points.map((p, i) => <circle key={i} cx={xScale(p.x)} cy={yScale(p.y)} r="3" fill={color} />)}
-    </svg>
+    <ResponsiveContainer width="100%" height={200}>
+      <LineChart data={points} margin={CHART_MARGIN}>
+        <CartesianGrid stroke={GRID} strokeDasharray="3 3" />
+        <XAxis
+          dataKey="x" type="number" domain={['dataMin', 'dataMax']}
+          tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
+          tickFormatter={(v) => fmt(v)}
+          label={{ value: xLabel, ...X_LABEL }}
+        />
+        <YAxis
+          tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
+          tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${Math.round(v / 1000)}k` : v)}
+          label={{ value: yLabel, ...Y_LABEL }}
+        />
+        <Tooltip
+          cursor={{ stroke: '#c7d2e5', strokeWidth: 1 }}
+          content={
+            <ChartTooltip
+              title={(label) => `${xLabel}: ${fmt(label)}`}
+              rows={(label, payload) => [
+                { label: yLabel, value: fmt(payload[0]?.value), color },
+              ]}
+            />
+          }
+        />
+        <Line
+          type="monotone" dataKey="y" stroke={color} strokeWidth={2}
+          dot={{ r: 3, fill: color }}
+          activeDot={{ r: 5, strokeWidth: 1.5, stroke: '#fff' }}
+        />
+      </LineChart>
+    </ResponsiveContainer>
   );
 }
 

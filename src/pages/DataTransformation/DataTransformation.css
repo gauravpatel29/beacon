@@ -832,3 +832,37 @@
   display: flex;
   gap: 0.6rem;
 }
+
+/* ---- Card title row with an action on the right ---- */
+.transform-card-titlebar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+}
+
+/* The title block takes the space; the button keeps its size. */
+.transform-card-titlebar > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.save-set-btn {
+  flex: 0 0 auto;
+  padding: 0.5rem 1.1rem;
+  border-radius: var(--radius-pill);
+  background-color: var(--color-primary);
+  color: var(--color-white);
+  font-size: 0.8rem;
+  font-weight: var(--font-weight-semibold);
+}
+
+.save-set-btn:not(:disabled):hover {
+  background-color: var(--color-primary-dark);
+}
+
+/* Saved, or nothing applied yet: both mean there is nothing to press. */
+.save-set-btn:disabled {
+  background-color: #eef1f6;
+  color: var(--color-text-light);
+}

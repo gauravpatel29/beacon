@@ -904,58 +904,8 @@
    The box design from the hand-drawn charts, kept when the charts moved to
    recharts. recharts positions its own wrapper and handles flipping near the
    edges, so this is static inside it - no offsets of our own. */
-.chart-tooltip {
-  min-width: 9rem;
-  max-width: 15rem;
-  padding: 0.5rem 0.65rem;
-  background-color: var(--color-white);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  box-shadow: 0 6px 18px rgba(20, 30, 50, 0.14);
-}
-
-.chart-tooltip-title {
-  font-size: 0.72rem;
-  font-weight: var(--font-weight-semibold);
-  color: var(--color-text-primary);
-  margin-bottom: 0.35rem;
-  white-space: nowrap;
-}
-
-.chart-tooltip-row {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.72rem;
-  line-height: 1.5;
-  white-space: nowrap;
-}
-
-.chart-tooltip-swatch {
-  width: 0.55rem;
-  height: 0.55rem;
-  border-radius: 2px;
-  flex-shrink: 0;
-}
-
-.chart-tooltip-label {
-  color: var(--color-text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 9rem;
-}
-
-.chart-tooltip-value {
-  margin-left: auto;
-  font-weight: var(--font-weight-semibold);
-  color: var(--color-text-primary);
-}
-
-/* recharts draws a focus outline on the SVG when the chart takes focus. */
-.recharts-wrapper:focus,
-.recharts-surface:focus {
-  outline: none;
-}
+/* The chart tooltip styles moved to components/charts/ChartTooltip.css,
+   so Data Review and Data Transformation render one design. */
 
 /* ---- Correlation: removal pair cards ---- */
 .removal-pair-row {

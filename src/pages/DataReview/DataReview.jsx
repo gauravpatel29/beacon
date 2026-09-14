@@ -16,6 +16,10 @@ import {
 } from '../../services/api.js';
 import { recordStage } from '../../services/workflowState.js';
 import { useScreenState } from '../../services/useScreenState.js';
+import { ChartTooltip } from '../../components/charts/ChartTooltip.jsx';
+import {
+  AXIS_TICK, CHART_COLORS, fmt, GRID, X_LABEL, Y_LABEL,
+} from '../../components/charts/chartTheme.js';
 import './DataReview.css';
 
 const TABS = [
@@ -32,7 +36,6 @@ const CORR_SUBTABS = [
   { id: 'combination', label: '3. Treatment: Combination (Sum)' },
 ];
 
-const CHART_COLORS = ['#1d4ed8', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#0891b2'];
 
 // The API's own semantic classification, which is what the rest of the
 // pipeline uses - so the role shown matches how the column is actually treated
@@ -1555,54 +1558,6 @@ function DataReview() {
 // had when the charts were hand-drawn SVG.
 
 /** Shared axis/grid treatment, so the three charts stay visually identical. */
-const GRID = '#eef1f6';
-const AXIS_TICK = { fontSize: 10, fill: '#8a94a3' };
-
-const fmt = (v) => (Number.isFinite(v)
-  ? (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : Number(Number(v).toFixed(2)).toLocaleString())
-  : '—');
-
-/**
- * Our tooltip, in recharts' contract.
- *
- * recharts calls this with { active, payload, label }; `payload` is one entry
- * per series under the cursor, each carrying its colour. `rows` lets a caller
- * override the lines entirely - the histogram uses it to add a share-of-total
- * that is not a series.
- */
-function ChartTooltip({ active, payload, label, title, rows, indexed = false }) {
-  if (!active || !payload || !payload.length) return null;
-
-  const heading = title ? title(label, payload) : label;
-  const lines = rows
-    ? rows(label, payload)
-    : payload.map((p) => ({
-        label: p.name ?? p.dataKey,
-        // Same formatting as the screen this was ported from: an indexed view
-        // reads as a rebased index, not as a count.
-        value: indexed ? `${Number(p.value).toFixed(1)} (Index)` : fmt(p.value),
-        color: p.color || p.stroke || p.fill,
-      }));
-
-  return (
-    <div className="chart-tooltip">
-      <p className="chart-tooltip-title">{heading}</p>
-      {lines.map((r) => (
-        <p key={r.label} className="chart-tooltip-row">
-          {r.color && <span className="chart-tooltip-swatch" style={{ backgroundColor: r.color }} />}
-          <span className="chart-tooltip-label">{r.label}</span>
-          <span className="chart-tooltip-value">{r.value}</span>
-        </p>
-      ))}
-    </div>
-  );
-}
-
-// Axis titles sit in the margin the chart reserves for them, so adding one
-// never lands on top of the tick labels underneath.
-const X_LABEL = { position: 'insideBottom', offset: -12, fontSize: 10, fill: '#8a94a3' };
-const Y_LABEL = { angle: -90, position: 'insideLeft', fontSize: 10, fill: '#8a94a3' };
-
 function TrendChart({ labels, series, indexed = false, xLabel = 'Period', yLabel = 'Value' }) {
   const seriesKeys = Object.keys(series);
   if (labels.length === 0 || seriesKeys.length === 0) {
