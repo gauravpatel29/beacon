@@ -1,10 +1,13 @@
 import io
 import json
+import math
+import numpy as np
 import pandas as pd
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException
 from core.processing import (
     apply_full_transformations_pipeline,
+    transform_edited_df,
     auto_select_channel_params,
     transform_single_channel,
     compute_poor_mans_curve_data,
@@ -24,16 +27,34 @@ def _parse_csv(csv_data: str) -> pd.DataFrame:
         return pd.read_csv(io.BytesIO(csv_data.encode("latin-1")), low_memory=False)
 
 
+def _sanitize_col_param(val: Any) -> str:
+    if isinstance(val, list):
+        return str(val[0]) if val else ""
+    return str(val) if val is not None else ""
+
+
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    if val is None or pd.isna(val):
+        return default
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return round(f, 4)
+    except (ValueError, TypeError):
+        return default
+
+
 @router.post("/apply")
 async def apply_transformations(payload: dict):
     try:
         df = _parse_csv(payload["csv_data"])
-        geo_col = payload.get("geo_column", "")
-        date_col = payload.get("date_column", "")
-        dep_var = payload.get("dependent_variable", "")
+        geo_col = _sanitize_col_param(payload.get("geo_column"))
+        date_col = _sanitize_col_param(payload.get("date_column"))
+        dep_var = _sanitize_col_param(payload.get("dependent_variable"))
         transformations = payload.get("transformations", [])
         derived_variables = payload.get("derived_variables", [])
-        pop_col = payload.get("pop_column")
+        pop_col = _sanitize_col_param(payload.get("pop_column")) or None
         add_carryover = bool(payload.get("add_carryover", False))
 
         if not transformations and not derived_variables:
@@ -71,13 +92,36 @@ async def apply_transformations(payload: dict):
 async def auto_select_route(payload: dict):
     try:
         df = _parse_csv(payload["csv_data"])
-        geo_col = payload.get("geo_column", "")
-        date_col = payload.get("date_column", "")
-        dep_var = payload.get("dependent_variable", "")
+        geo_col = _sanitize_col_param(payload.get("geo_column"))
+        date_col = _sanitize_col_param(payload.get("date_column"))
+        dep_var = _sanitize_col_param(payload.get("dependent_variable"))
         channels = payload.get("channels", [])
-        pop_col = payload.get("pop_column")
+        derived_variables = payload.get("derived_variables", [])
+        pop_col = _sanitize_col_param(payload.get("pop_column")) or None
 
-        # Exclude sales variable strictly
+        # Compute any derived channels in df first
+        if derived_variables:
+            for d in derived_variables:
+                out_name = d.get("name")
+                op = d.get("operator", "+")
+                vars_list = [v for v in d.get("variables", []) if v in df.columns]
+                if out_name and len(vars_list) >= 2:
+                    weights = d.get("weights", {})
+                    res_s = pd.to_numeric(df[vars_list[0]], errors="coerce").fillna(0.0) * float(weights.get(vars_list[0], 1.0))
+                    for next_v in vars_list[1:]:
+                        w = float(weights.get(next_v, 1.0))
+                        s_next = pd.to_numeric(df[next_v], errors="coerce").fillna(0.0) * w
+                        if op == "+":
+                            res_s = res_s + s_next
+                        elif op == "-":
+                            res_s = res_s - s_next
+                        elif op == "*":
+                            res_s = res_s * s_next
+                        elif op == "/":
+                            res_s = (res_s / (s_next.replace(0, pd.NA))).fillna(0.0)
+                    df[out_name] = res_s
+
+        # Exclude sales KPI
         channels_to_tune = [c for c in channels if c in df.columns and str(c).strip() != str(dep_var).strip()]
 
         recommendations = []
@@ -100,12 +144,38 @@ async def auto_select_route(payload: dict):
 async def preview_single_route(payload: dict):
     try:
         df = _parse_csv(payload["csv_data"])
-        channel = payload["channel"]
-        geo_col = payload.get("geo_column", "")
-        date_col = payload.get("date_column", "")
-        dep_var = payload.get("dependent_variable", "")
+        channel = payload.get("channel", "")
+        geo_col = _sanitize_col_param(payload.get("geo_column"))
+        date_col = _sanitize_col_param(payload.get("date_column"))
+        dep_var = _sanitize_col_param(payload.get("dependent_variable"))
         config = payload.get("config", {})
-        pop_col = payload.get("pop_column")
+        derived_variables = payload.get("derived_variables", [])
+        pop_col = _sanitize_col_param(payload.get("pop_column")) or None
+
+        # Compute derived channel if this channel is an arithmetic derived variable
+        if channel not in df.columns and derived_variables:
+            for d in derived_variables:
+                if d.get("name") == channel:
+                    vars_list = [v for v in d.get("variables", []) if v in df.columns]
+                    if len(vars_list) >= 2:
+                        weights = d.get("weights", {})
+                        op = d.get("operator", "+")
+                        res_s = pd.to_numeric(df[vars_list[0]], errors="coerce").fillna(0.0) * float(weights.get(vars_list[0], 1.0))
+                        for next_v in vars_list[1:]:
+                            w = float(weights.get(next_v, 1.0))
+                            s_next = pd.to_numeric(df[next_v], errors="coerce").fillna(0.0) * w
+                            if op == "+":
+                                res_s = res_s + s_next
+                            elif op == "-":
+                                res_s = res_s - s_next
+                            elif op == "*":
+                                res_s = res_s * s_next
+                            elif op == "/":
+                                res_s = (res_s / (s_next.replace(0, pd.NA))).fillna(0.0)
+                        df[channel] = res_s
+
+        if channel not in df.columns:
+            raise HTTPException(status_code=400, detail=f"Channel '{channel}' not found in dataset.")
 
         transformed_s = transform_single_channel(
             df=df,
@@ -120,49 +190,53 @@ async def preview_single_route(payload: dict):
             log_k=float(config.get("Log (k)", 1.0)) if pd.notna(config.get("Log (k)")) else 1.0,
         )
 
-        df_preview = pd.DataFrame({
-            "raw": pd.to_numeric(df[channel], errors="coerce").fillna(0.0),
-            "transformed": transformed_s,
-        })
+        raw_s = pd.to_numeric(df[channel], errors="coerce").fillna(0.0)
+        trans_s = pd.Series(transformed_s, index=df.index).fillna(0.0)
+
+        df_preview = pd.DataFrame({"raw": raw_s, "transformed": trans_s})
         if dep_var and dep_var in df.columns:
             df_preview[dep_var] = pd.to_numeric(df[dep_var], errors="coerce").fillna(0.0)
 
-        # Before & After Poor Man's Curves
-        raw_curve = compute_poor_mans_curve_data(df, channel, dep_var) if (dep_var and dep_var in df.columns) else None
-        trans_curve = compute_poor_mans_curve_data(df_preview, "transformed", dep_var) if (dep_var and dep_var in df.columns) else None
+        # 1. Summary Statistics with full NaN protection
+        stats_table = [
+            {"metric": "Mean", "original": _safe_float(raw_s.mean()), "transformed": _safe_float(trans_s.mean())},
+            {"metric": "Median", "original": _safe_float(raw_s.median()), "transformed": _safe_float(trans_s.median())},
+            {"metric": "Standard Deviation", "original": _safe_float(raw_s.std()), "transformed": _safe_float(trans_s.std())},
+            {"metric": "Minimum", "original": _safe_float(raw_s.min()), "transformed": _safe_float(trans_s.min())},
+            {"metric": "Maximum", "original": _safe_float(raw_s.max()), "transformed": _safe_float(trans_s.max())},
+            {"metric": "25th Percentile", "original": _safe_float(raw_s.quantile(0.25)), "transformed": _safe_float(trans_s.quantile(0.25))},
+            {"metric": "75th Percentile", "original": _safe_float(raw_s.quantile(0.75)), "transformed": _safe_float(trans_s.quantile(0.75))},
+        ]
 
-        raw_s = df_preview["raw"]
-        trans_s = df_preview["transformed"]
+        # 2. Side-by-Side Histograms with Zero-Variance protection
+        def make_hist(series, num_bins=12):
+            vals = pd.to_numeric(series, errors="coerce").dropna().values
+            if len(vals) == 0:
+                return []
+            min_v, max_v = float(np.min(vals)), float(np.max(vals))
+            if min_v == max_v:
+                return [{"bin": f"{min_v:.2f}", "count": len(vals)}]
+            counts, edges = np.histogram(vals, bins=num_bins)
+            return [{"bin": f"{edges[i]:.2f}-{edges[i+1]:.2f}", "count": int(counts[i])} for i in range(len(counts))]
 
-        stats = {
-            "raw_mean": round(float(raw_s.mean()), 2),
-            "raw_std": round(float(raw_s.std()), 2),
-            "raw_max": round(float(raw_s.max()), 2),
-            "trans_mean": round(float(trans_s.mean()), 2),
-            "trans_std": round(float(trans_s.std()), 2),
-            "trans_max": round(float(trans_s.max()), 2),
-            "correlation_with_kpi_raw": round(float(raw_s.corr(df_preview[dep_var])), 4) if (dep_var and dep_var in df_preview) else None,
-            "correlation_with_kpi_trans": round(float(trans_s.corr(df_preview[dep_var])), 4) if (dep_var and dep_var in df_preview) else None,
-        }
+        raw_hist = make_hist(raw_s)
+        trans_hist = make_hist(trans_s)
 
-        # Time series sample
-        time_trend = []
-        if date_col and date_col in df.columns:
-            df_time = pd.DataFrame({
-                "date": df[date_col].astype(str),
-                "raw": raw_s,
-                "transformed": trans_s,
-            })
-            time_agg = df_time.groupby("date")[["raw", "transformed"]].mean().reset_index().sort_values("date")
-            time_trend = time_agg.to_dict(orient="records")
+        # 3. Before & After Relationships with KPI (Poor Man's Curves)
+        raw_curve = compute_poor_mans_curve_data(df, channel, dep_var, n_bins=10) if (dep_var and dep_var in df.columns) else None
+        trans_curve = compute_poor_mans_curve_data(df_preview, "transformed", dep_var, n_bins=10) if (dep_var and dep_var in df.columns) else None
 
         return {
             "channel": channel,
-            "stats": stats,
+            "stats_table": stats_table,
+            "raw_hist": raw_hist,
+            "trans_hist": trans_hist,
             "raw_curve": raw_curve,
             "trans_curve": trans_curve,
-            "time_trend": time_trend,
+            "config": config,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Single preview failed: {str(e)}")
 
@@ -193,7 +267,11 @@ async def transformation_correlation(payload: dict):
 async def run_optuna(payload: dict):
     try:
         df = _parse_csv(payload["csv_data"])
-        df[payload["date_column"]] = pd.to_datetime(df[payload["date_column"]])
+        date_col = _sanitize_col_param(payload.get("date_column"))
+        geo_col = _sanitize_col_param(payload.get("geo_column"))
+        dep_var = _sanitize_col_param(payload.get("dependent_variable"))
+
+        df[date_col] = pd.to_datetime(df[date_col])
 
         channels_cfg = payload["channels_cfg"]
         channel_feature_names = payload.get("channel_feature_names") or [
@@ -205,8 +283,8 @@ async def run_optuna(payload: dict):
 
         result = run_optuna_optimization(
             df=df,
-            geo_column=payload["geo_column"],
-            dependent_variable=payload["dependent_variable"],
+            geo_column=geo_col,
+            dependent_variable=dep_var,
             channels_cfg=channels_cfg,
             channel_feature_names=channel_feature_names,
             n_trials=int(payload.get("n_trials", 50)),

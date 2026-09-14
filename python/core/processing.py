@@ -1,6 +1,4 @@
-"""
-Core processing utilities – pure Python/Polars/Pandas logic.
-"""
+
 import re
 import math
 from datetime import datetime, timedelta, date
@@ -458,10 +456,7 @@ def compute_eda_stats(
 
     trend_data = []
     if date_column in df.columns and len(metric_cols) > 0:
-        # One explicit format chosen by coverage. dayfirst inference reads
-        # 2026-01-04 as 1 April, so the trend series came back scattered across
-        # months that are not in the data.
-        parsed_date_series = _parse_dates_robust(df[date_column].astype(str).str.strip())
+        parsed_date_series = pd.to_datetime(df[date_column], dayfirst=True, errors="coerce")
         df["_parsed_date_str"] = parsed_date_series.dt.strftime("%Y-%m-%d")
         valid_trend_df = df[df["_parsed_date_str"].notna()]
         if len(valid_trend_df) > 0:
@@ -525,10 +520,46 @@ def compute_corr_pairs(df: pd.DataFrame, feature_cols: List[str], threshold: flo
     pairs.sort(key=lambda x: x[2], reverse=True)
     return pairs, corr_matrix
 
-# NOTE: compute_cross_correlation_lags is defined once, further down. An
-# earlier copy lived here and was removed: two definitions of the same name
-# means the later one silently wins, so the file read as if it inferred the
-# date format while the running code did not.
+
+def compute_cross_correlation_lags(
+    df: pd.DataFrame,
+    date_col: str,
+    x_col: str,
+    y_col: str,
+    max_lags: int = 6,
+) -> List[Dict[str, Any]]:
+    if date_col not in df.columns or x_col not in df.columns or y_col not in df.columns:
+        return []
+
+    df_time = df[[date_col, x_col, y_col]].copy()
+    df_time[date_col] = pd.to_datetime(df_time[date_col], dayfirst=True, errors="coerce")
+    df_time = df_time.dropna().sort_values(date_col)
+
+    ts = df_time.groupby(date_col)[[x_col, y_col]].sum().reset_index()
+    s_x = pd.to_numeric(ts[x_col], errors="coerce").fillna(0)
+    s_y = pd.to_numeric(ts[y_col], errors="coerce").fillna(0)
+
+    lag_results = []
+    for lag in range(-max_lags, max_lags + 1):
+        if lag < 0:
+            shifted_x = s_x.shift(-lag)
+            r = shifted_x.corr(s_y)
+        elif lag > 0:
+            shifted_x = s_x.shift(lag)
+            r = shifted_x.corr(s_y)
+        else:
+            r = s_x.corr(s_y)
+
+        r_val = round(float(r), 3) if pd.notna(r) else 0.0
+        lag_label = f"Lag {lag:+d}w" if lag != 0 else "Same Week (Lag 0)"
+        lag_results.append({
+            "lag": lag,
+            "label": lag_label,
+            "correlation": r_val,
+        })
+
+    return lag_results
+
 
 def preview_removal_reasons(
     df: pd.DataFrame,
@@ -841,6 +872,9 @@ def compute_sparsity_stats(df: pd.DataFrame, metric_cols: Optional[List[str]] = 
 
 
 def compute_poor_mans_curve_data(df: pd.DataFrame, x_col: str, y_col: str, n_bins: int = 12) -> Dict[str, Any]:
+    if x_col not in df.columns or y_col not in df.columns:
+        return {"binned_curve": [], "scatter_sample": [], "shape_indicator": "Insufficient Data", "x_col": x_col, "y_col": y_col}
+
     sub = df[[x_col, y_col]].dropna().copy()
     sub[x_col] = pd.to_numeric(sub[x_col], errors="coerce")
     sub[y_col] = pd.to_numeric(sub[y_col], errors="coerce")
@@ -1076,19 +1110,28 @@ def normalize_series_vectorized(
     s = pd.to_numeric(series, errors="coerce").fillna(0.0)
     m = str(method or "none").strip().lower()
 
-    if m == "population" and pop_series is not None:
-        p = pd.to_numeric(pop_series, errors="coerce").replace(0, np.nan)
-        return (s / p).fillna(0.0)
+    if m == "population":
+        if pop_series is not None:
+            p = pd.to_numeric(pop_series, errors="coerce").replace(0, np.nan).fillna(1.0)
+            return (s / p).fillna(0.0)
+        return s
     elif m == "minmax":
-        min_v = s.min()
-        max_v = s.max()
+        min_v = float(s.min())
+        max_v = float(s.max())
         if max_v > min_v:
             return (s - min_v) / (max_v - min_v)
         return pd.Series(0.0, index=s.index)
     elif m == "zscore":
-        std_v = s.std()
+        std_v = float(s.std())
         if std_v > 0:
-            return (s - s.mean()) / std_v
+            return (s - float(s.mean())) / std_v
+        return pd.Series(0.0, index=s.index)
+    elif m in ("iqr", "robust"):
+        q25 = float(s.quantile(0.25))
+        q75 = float(s.quantile(0.75))
+        iqr = q75 - q25
+        if iqr > 0:
+            return (s - q25) / iqr
         return pd.Series(0.0, index=s.index)
     return s
 
@@ -1096,9 +1139,9 @@ def normalize_series_vectorized(
 def transform_single_channel(
     df: pd.DataFrame,
     channel: str,
-    geo_column: str,
+    geo_column: Any,
     normalization: str = "none",
-    pop_column: Optional[str] = None,
+    pop_column: Optional[Any] = None,
     adstock_coeff: Optional[float] = None,
     lags: Optional[int] = None,
     sat_function: Optional[str] = None,
@@ -1108,29 +1151,42 @@ def transform_single_channel(
     if channel not in df.columns:
         raise ValueError(f"Channel '{channel}' not in DataFrame.")
 
-    raw_s = df[channel]
-    pop_s = df[pop_column] if (pop_column and pop_column in df.columns) else None
+    raw_s = df[channel].copy()
 
-    # Step 1: Normalization
+    # Extract population series
+    pop_s = None
+    if pop_column:
+        if isinstance(pop_column, list):
+            valid_pops = [c for c in pop_column if c in df.columns]
+            if valid_pops:
+                pop_s = df[valid_pops].apply(pd.to_numeric, errors="coerce").fillna(0.0).sum(axis=1)
+        elif isinstance(pop_column, str) and pop_column in df.columns:
+            pop_s = pd.to_numeric(df[pop_column], errors="coerce").fillna(1.0)
+
+    # 1. Normalization
     norm_s = normalize_series_vectorized(raw_s, normalization, pop_s)
 
-    # Step 2: Adstock across Geo groups
+    primary_geo = geo_column[0] if isinstance(geo_column, list) and len(geo_column) > 0 else geo_column
+
+    # 2. Adstock (vectorized array operations)
     if adstock_coeff is not None and float(adstock_coeff) > 0 and lags is not None and int(lags) > 0:
-        if geo_column in df.columns:
-            adstocked = df.groupby(geo_column)[channel].transform(
-                lambda s: geometric_adstock(norm_s.loc[s.index].values, int(lags), float(adstock_coeff))
+        if primary_geo and primary_geo in df.columns:
+            df_temp = pd.DataFrame({"geo": df[primary_geo].astype(str), "val": norm_s.values})
+            adstocked = df_temp.groupby("geo", sort=False)["val"].transform(
+                lambda s: geometric_adstock(s.values, int(lags), float(adstock_coeff))
             )
         else:
             adstocked = pd.Series(geometric_adstock(norm_s.values, int(lags), float(adstock_coeff)), index=df.index)
     elif lags is not None and int(lags) > 0 and (adstock_coeff is None or float(adstock_coeff) == 0):
-        if geo_column in df.columns:
-            adstocked = df.groupby(geo_column)[channel].shift(int(lags), fill_value=0.0)
+        if primary_geo and primary_geo in df.columns:
+            df_temp = pd.DataFrame({"geo": df[primary_geo].astype(str), "val": norm_s.values})
+            adstocked = df_temp.groupby("geo", sort=False)["val"].shift(int(lags), fill_value=0.0)
         else:
             adstocked = norm_s.shift(int(lags), fill_value=0.0)
     else:
         adstocked = norm_s
 
-    # Step 3: Saturation Transformation
+    # 3. Saturation Transformation
     final_s = apply_saturation(adstocked.values, sat_function, power_k=power_k, log_k=log_k)
     return pd.Series(final_s, index=df.index)
 
@@ -1169,7 +1225,7 @@ def auto_select_channel_params(
         "fit_score": 0.0,
     }
 
-    norm_candidates = ["none", "minmax"]
+    norm_candidates = ["none", "minmax", "zscore"]
     if pop_column and pop_column in df.columns:
         norm_candidates.append("population")
 
@@ -1223,48 +1279,17 @@ def auto_select_channel_params(
 
 def apply_full_transformations_pipeline(
     df: pd.DataFrame,
-    geo_column: str,
-    date_column: str,
+    geo_column: Any,
+    date_column: Any,
     dependent_variable: str,
     transformations: List[Dict[str, Any]],
     derived_variables: Optional[List[Dict[str, Any]]] = None,
-    pop_column: Optional[str] = None,
+    pop_column: Optional[Any] = None,
     add_carryover: bool = False,
 ) -> pd.DataFrame:
     df_out = df.copy()
 
-    # Enforce sales / KPI variable is excluded from transformations
-    safe_transformations = [
-        t for t in transformations
-        if str(t.get("Channel Name")).strip() != str(dependent_variable).strip()
-    ]
-
-    for t in safe_transformations:
-        channel = t.get("Channel Name")
-        if not channel or channel not in df_out.columns:
-            continue
-
-        transformed_s = transform_single_channel(
-            df=df_out,
-            channel=channel,
-            geo_column=geo_column,
-            normalization=t.get("Normalization", "none"),
-            pop_column=pop_column,
-            adstock_coeff=float(t["Adstock"]) if pd.notna(t.get("Adstock")) else 0.0,
-            lags=int(t["Lags"]) if pd.notna(t.get("Lags")) else 0,
-            sat_function=t.get("Saturation Function"),
-            power_k=float(t.get("Power (k)", 0.5)) if pd.notna(t.get("Power (k)")) else 0.5,
-            log_k=float(t.get("Log (k)", 1.0)) if pd.notna(t.get("Log (k)")) else 1.0,
-        )
-        df_out[f"{channel}_transformed"] = transformed_s
-
-    if add_carryover and dependent_variable in df_out.columns:
-        if geo_column in df_out.columns:
-            df_out["Carryover"] = df_out.groupby(geo_column)[dependent_variable].shift(1, fill_value=0.0)
-        else:
-            df_out["Carryover"] = df_out[dependent_variable].shift(1, fill_value=0.0)
-
-    # Apply Arithmetic Derived Variables
+    # Step 1: Compute Arithmetic Derived Variables FIRST so they exist as raw columns
     if derived_variables:
         for d in derived_variables:
             out_name = d.get("name")
@@ -1293,7 +1318,40 @@ def apply_full_transformations_pipeline(
                     res_series = res_series / (s_next.replace(0, np.nan))
                     res_series = res_series.fillna(0.0)
 
-            df_out[f"{out_name}_transformed"] = res_series
+            df_out[out_name] = res_series
+
+    # Step 2: Transform all channels
+    safe_transformations = [
+        t for t in transformations
+        if str(t.get("Channel Name")).strip() != str(dependent_variable).strip()
+    ]
+
+    for t in safe_transformations:
+        channel = t.get("Channel Name")
+        if not channel or channel not in df_out.columns:
+            continue
+
+        transformed_s = transform_single_channel(
+            df=df_out,
+            channel=channel,
+            geo_column=geo_column,
+            normalization=t.get("Normalization", "none"),
+            pop_column=pop_column,
+            adstock_coeff=float(t["Adstock"]) if pd.notna(t.get("Adstock")) else 0.0,
+            lags=int(t["Lags"]) if pd.notna(t.get("Lags")) else 0,
+            sat_function=t.get("Saturation Function"),
+            power_k=float(t.get("Power (k)", 0.5)) if pd.notna(t.get("Power (k)")) else 0.5,
+            log_k=float(t.get("Log (k)", 1.0)) if pd.notna(t.get("Log (k)")) else 1.0,
+        )
+        df_out[f"{channel}_transformed"] = transformed_s
+
+    # Step 3: Add Carryover (Lag 1)
+    primary_geo = geo_column[0] if isinstance(geo_column, list) and len(geo_column) > 0 else geo_column
+    if add_carryover and dependent_variable in df_out.columns:
+        if primary_geo and primary_geo in df_out.columns:
+            df_out["Carryover"] = df_out.groupby(primary_geo)[dependent_variable].shift(1, fill_value=0.0)
+        else:
+            df_out["Carryover"] = df_out[dependent_variable].shift(1, fill_value=0.0)
 
     return df_out
 
@@ -1306,12 +1364,17 @@ def transform_edited_df(df: pd.DataFrame, edited_df: pd.DataFrame, geo_column: s
         adstock_coeff = float(row["Adstock"]) if pd.notna(row.get("Adstock")) else None
         sat_function = row.get("Saturation Function")
         power_k = float(row["Power (k)"]) if sat_function == "Power" and pd.notna(row.get("Power (k)")) else 0.5
+        log_k = float(row.get("Log (k)", 1.0)) if pd.notna(row.get("Log (k)")) else 1.0
+        normalization = row.get("Normalization", "none")
 
         if channel not in transformed_df.columns:
             continue
 
+        raw_s = transformed_df[channel]
+        norm_s = normalize_series_vectorized(raw_s, normalization)
+
         if sat_function is None and adstock_coeff is None and lags is None:
-            transformed_df[f"{channel}_transformed"] = transformed_df[channel]
+            transformed_df[f"{channel}_transformed"] = norm_s
         elif sat_function is None and lags is None and adstock_coeff is not None:
             raise ValueError("Lag required when Adstock is set")
         elif sat_function is None and lags is not None and adstock_coeff is None:
@@ -1320,21 +1383,21 @@ def transform_edited_df(df: pd.DataFrame, edited_df: pd.DataFrame, geo_column: s
             )
         elif sat_function is None and lags is not None and adstock_coeff is not None:
             transformed_df[f"{channel}_transformed"] = (
-                transformed_df.groupby(geo_column)[channel].transform(lambda x: geometric_adstock(x, lags, adstock_coeff))
+                transformed_df.groupby(geo_column)[channel].transform(lambda x: geometric_adstock(norm_s.loc[x.index].values, lags, adstock_coeff))
             )
         elif sat_function is not None and lags is None and adstock_coeff is None:
             transformed_df[f"{channel}_transformed"] = (
-                transformed_df.groupby(geo_column)[channel].transform(lambda x: apply_saturation(x, sat_function, power_k))
+                transformed_df.groupby(geo_column)[channel].transform(lambda x: apply_saturation(norm_s.loc[x.index].values, sat_function, power_k, log_k))
             )
         elif sat_function is not None and lags is not None and adstock_coeff is None:
             lagged_series = transformed_df.groupby(geo_column, as_index=False)[channel].shift(lags, fill_value=0).fillna(0)
             transformed_df[f"{channel}_transformed"] = (
-                lagged_series.groupby(transformed_df[geo_column]).transform(lambda x: apply_saturation(x, sat_function, power_k))
+                lagged_series.groupby(transformed_df[geo_column]).transform(lambda x: apply_saturation(x, sat_function, power_k, log_k))
             )
         else:
             transformed_df[f"{channel}_transformed"] = (
                 transformed_df.groupby(geo_column)[channel].transform(
-                    lambda x: apply_saturation(geometric_adstock(x, lags, adstock_coeff), sat_function, power_k)
+                    lambda x: apply_saturation(geometric_adstock(norm_s.loc[x.index].values, lags, adstock_coeff), sat_function, power_k, log_k)
                 )
             )
     return transformed_df
