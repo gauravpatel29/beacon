@@ -146,8 +146,12 @@ class SparsityBody(BaseModel):
 class OutlierBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     column: str = Field(min_length=1)
-    method: str = Field(default="iqr", pattern="^(?i)(iqr|zscore)$")
-    threshold: float = Field(default=1.5, gt=0)
+    method: str = Field(default="percentile", pattern="^(?i)(percentile|zscore|iqr)$")
+    # Sigmas for zscore, a multiplier of the interquartile range for iqr, and
+    # unused by percentile, which reads the two bounds below instead.
+    threshold: float = Field(default=3.0, gt=0)
+    lower_percentile: float = Field(default=1.0, ge=0, le=100)
+    upper_percentile: float = Field(default=99.0, ge=0, le=100)
 
 
 class TrendBody(BaseModel):
@@ -222,7 +226,10 @@ async def review_detect_outliers(request: Request, workflow_id: str, filename: s
         return err
     if (bad := _missing_columns(request, df, [body.column])):
         return bad
-    return detect_outliers_engine(df, body.column, body.method, body.threshold)
+    return detect_outliers_engine(
+        df, body.column, body.method, body.threshold,
+        body.lower_percentile, body.upper_percentile,
+    )
 
 
 @router.post("/{workflow_id}/review/{filename}/remove-outliers")
@@ -238,7 +245,10 @@ async def review_remove_outliers(request: Request, workflow_id: str, filename: s
         return err
     if (bad := _missing_columns(request, df, [body.column])):
         return bad
-    return remove_outliers_engine(df, body.column, body.method, body.threshold)
+    return remove_outliers_engine(
+        df, body.column, body.method, body.threshold,
+        body.lower_percentile, body.upper_percentile,
+    )
 
 
 @router.post("/{workflow_id}/review/{filename}/trend-rollup")

@@ -104,9 +104,72 @@ try:
               rawcols["trx"]["control_total"])
         check("npi is still not", rawcols["npi"]["control_total"] is None,
               rawcols["npi"]["control_total"])
+        # The summary table shows a whole row per column, so an untyped numeric
+        # column reports its distribution too rather than a row of NA beside a
+        # populated control total.
+        check("and the rest of the row is filled in, not just the total",
+              all(rawcols["trx"][k] is not None
+                  for k in ("mean", "median", "std_dev", "p75", "p95",
+                            "active_pct", "min", "max")),
+              {k: rawcols["trx"][k] for k in ("mean", "median", "min", "max")})
+        check("it is flagged numeric so the role reads Metric, not Dimension",
+              rawcols["trx"]["numeric"] is True, rawcols["trx"]["numeric"])
+        check("the filter still treats it as untyped, so no control changes",
+              rawcols["trx"]["kind"] == "string", rawcols["trx"]["kind"])
+        check("an identifier stays empty across the whole row",
+              all(rawcols["npi"][k] is None
+                  for k in ("mean", "median", "std_dev", "p75", "p95",
+                            "active_pct", "min", "max")),
+              rawcols["npi"])
     finally:
         c.delete(f"/v2/workflows/{fresh}/files/u.csv")
         c.delete(f"/v1/workflows/{fresh}")
+
+    print("\n2d. the distribution the ingestion summary table reads")
+    # trx is 100,200,300,(blank),500,600,700,800,100,900 - nine values over ten
+    # rows. The blank is excluded from the statistics but counted in the rows,
+    # which is what separates active_pct from null_pct.
+    trx = cols["trx"]
+    check("mean is over the nine present values, not ten rows",
+          trx["mean"] == round(4200 / 9, 2), trx["mean"])
+    check("median", trx["median"] == 500.0, trx["median"])
+    # Sample deviation (ddof=1): variance 92,500 over eight degrees of freedom.
+    check("std dev is the sample deviation, not the population one",
+          trx["std_dev"] == 304.14, trx["std_dev"])
+    check("75th percentile", trx["p75"] == 700.0, trx["p75"])
+    check("95th percentile", trx["p95"] == 860.0, trx["p95"])
+    # Every present value is non-zero, so 9 of 10 rows are active.
+    check("active_pct counts NON-ZERO rows, not non-null",
+          trx["active_pct"] == 90.0, trx["active_pct"])
+    check("trx is reported as numeric", trx["numeric"] is True, trx["numeric"])
+
+    check("a text column has no distribution",
+          all(cols["region"][k] is None
+              for k in ("mean", "median", "std_dev", "p75", "p95", "active_pct")),
+          cols["region"])
+    check("and is not numeric", cols["region"]["numeric"] is False, cols["region"]["numeric"])
+    check("a date column has no distribution either",
+          cols["month"]["mean"] is None and cols["month"]["numeric"] is False, cols["month"])
+    check("an identifier is excluded from the distribution too, not just the total",
+          cols["npi"]["mean"] is None and cols["npi"]["numeric"] is False, cols["npi"])
+
+    print("\n2e. a zero-heavy column reads as sparse, not as healthy")
+    sparse_csv = ("geo,spend\n" + "".join(f"G{i},0\n" for i in range(8))
+                  + "G8,250\nG9,250\n").encode()
+    sp = c.post("/v1/workflows", json={"workflow_name": "sparse " + uuid.uuid4().hex[:6]}).json()["id"]
+    try:
+        c.post(f"/v2/workflows/{sp}/files", params={"overwrite": True},
+               files=[("files", ("z.csv", sparse_csv, "text/csv"))], data={"manifest": "{}"})
+        z = {x["column"]: x for x in c.get(f"/v2/workflows/{sp}/files/z.csv/stats").json()["columns"]}
+        check("nothing is null", z["spend"]["null_pct"] == 0.0, z["spend"]["null_pct"])
+        # The distinction that matters: non-null would say 100% healthy here.
+        check("but only 20% of rows are active", z["spend"]["active_pct"] == 20.0,
+              z["spend"]["active_pct"])
+        check("the total still reconciles", z["spend"]["control_total"] == 500,
+              z["spend"]["control_total"])
+    finally:
+        c.delete(f"/v2/workflows/{sp}/files/z.csv")
+        c.delete(f"/v1/workflows/{sp}")
 
     print("\n3. type-ahead over distinct values")
     r=c.get(f"/v2/workflows/{wf}/files/s.csv/values",params={"column":"region"})

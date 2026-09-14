@@ -940,7 +940,7 @@ def compute_poor_mans_curve_data(df: pd.DataFrame, x_col: str, y_col: str, n_bin
 
 
 # ---------------------------------------------------------------------------
-# OUTLIER DETECTION (PERCENTILES & Z-SCORE ONLY)
+# OUTLIER DETECTION (PERCENTILES, Z-SCORE & IQR)
 # ---------------------------------------------------------------------------
 def detect_outliers_engine(
     df: pd.DataFrame,
@@ -950,6 +950,15 @@ def detect_outliers_engine(
     lower_percentile: float = 1.0,
     upper_percentile: float = 99.0,
 ) -> Dict[str, Any]:
+    """Flag outlying rows in one column by percentile, z-score, or IQR.
+
+    `threshold` means something different per method - sigmas for z-score, a
+    multiplier of the interquartile range for IQR, and nothing at all for
+    percentiles, which read their bounds from the two percentile arguments.
+
+    The percentile arguments are optional so callers that only offer z-score
+    and IQR, like /v2 review, can leave them out entirely.
+    """
     if column not in df.columns:
         raise ValueError(f"Column '{column}' not in dataset.")
 
@@ -967,6 +976,18 @@ def detect_outliers_engine(
         lower_bound = float(mean_v - float(threshold) * std_v)
         upper_bound = float(mean_v + float(threshold) * std_v)
         method_label = f"Z-Score ({threshold} σ)"
+    elif m == "iqr":
+        # Asked for by name only. It used to fall through to the percentile
+        # branch below, which answered a different question under the label the
+        # caller asked for - the Data Review outlier tab defaults to IQR and was
+        # reading percentile bounds the whole time.
+        q25 = float(vals.quantile(0.25))
+        q75 = float(vals.quantile(0.75))
+        iqr = q75 - q25
+        lower_bound = float(q25 - float(threshold) * iqr)
+        upper_bound = float(q75 + float(threshold) * iqr)
+        outlier_mask = (vals < lower_bound) | (vals > upper_bound)
+        method_label = f"IQR ({threshold} x IQR)"
     else:  # Percentiles
         lp = max(0.0, min(100.0, float(lower_percentile))) / 100.0
         up = max(0.0, min(100.0, float(upper_percentile))) / 100.0
@@ -1983,3 +2004,47 @@ def create_response_curve(channel_name, impactable_sales_nation, beta_coeff, spe
         rows.append({"spend": spend, "impactable_geo_time": impactable_geo_time, "impactable_nation": impactable_nation, "impactable_nation_currency": impactable_nation_currency, "roi": roi, "mroi": mroi})
         prev_impactable = impactable_nation
     return pd.DataFrame(rows)
+
+
+def compute_cross_correlation_lags(
+    df: pd.DataFrame,
+    date_col: str,
+    x_col: str,
+    y_col: str,
+    max_lags: int = 6,
+) -> List[Dict[str, Any]]:
+    """Cross-correlation of X against Y across time lags, -max_lags..+max_lags.
+
+    A positive lag shifts X forward, so it answers "does spend in week N move
+    sales in week N+lag?".
+    """
+    if date_col not in df.columns or x_col not in df.columns or y_col not in df.columns:
+        return []
+
+    df_time = df[[date_col, x_col, y_col]].copy()
+    # One explicit format for the whole column. The original inferred with
+    # dayfirst=True, which reads ISO dates as %Y-%d-%m and scatters one week
+    # across several - silently changing every correlation below.
+    df_time[date_col] = _parse_dates_robust(df_time[date_col].astype(str).str.strip())
+    df_time = df_time.dropna().sort_values(date_col)
+    if df_time.empty:
+        return []
+
+    # Collapse to one row per date first: correlating raw HCP-level rows would
+    # measure cross-sectional spread, not movement over time.
+    ts = df_time.groupby(date_col)[[x_col, y_col]].sum().reset_index()
+    s_x = pd.to_numeric(ts[x_col], errors="coerce").fillna(0)
+    s_y = pd.to_numeric(ts[y_col], errors="coerce").fillna(0)
+
+    lag_results: List[Dict[str, Any]] = []
+    for lag in range(-max_lags, max_lags + 1):
+        r = s_x.shift(lag).corr(s_y) if lag else s_x.corr(s_y)
+        lag_results.append({
+            "lag": lag,
+            "label": f"Lag {lag:+d}w" if lag else "Same Week (Lag 0)",
+            "correlation": round(float(r), 3) if pd.notna(r) else 0.0,
+        })
+
+    return lag_results
+
+
