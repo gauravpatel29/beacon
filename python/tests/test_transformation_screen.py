@@ -240,7 +240,115 @@ def main() -> int:
         check("fewer than two columns is an empty answer, not an error",
               r.status_code == 200 and r.json()["columns"] == [], r.text[:200])
 
-        print("\n8. bad input is refused rather than guessed")
+        print("\n8. preview-single: the live per-channel panel")
+        # The screen previews ONE channel as its config is edited, before any
+        # Apply. Everything the panel renders comes from this one response.
+        r = c.post("/api/transformation/preview-single", json={
+            **BASE_PAYLOAD,
+            "channel": "calls",
+            "config": transformation("calls", decay=0.6, lags=4, sat="Log", log_k=1.0),
+            "derived_variables": [],
+        })
+        check("200", r.status_code == 200, r.text[:400])
+        d = r.json()
+        check("it names the channel back", d["channel"] == "calls", d.get("channel"))
+        metrics = [s["metric"] for s in d["stats_table"]]
+        check("all seven before/after metrics the table renders",
+              metrics == ["Mean", "Median", "Standard Deviation", "Minimum",
+                          "Maximum", "25th Percentile", "75th Percentile"], metrics)
+        check("each row carries both sides",
+              all({"original", "transformed"} <= set(s) for s in d["stats_table"]),
+              d["stats_table"][0])
+        check("both histograms come back with bin and count",
+              all({"bin", "count"} <= set(b) for b in d["raw_hist"])
+              and all({"bin", "count"} <= set(b) for b in d["trans_hist"]),
+              (d["raw_hist"][:1], d["trans_hist"][:1]))
+        check("the histograms actually differ after a log curve",
+              [b["count"] for b in d["raw_hist"]] != [b["count"] for b in d["trans_hist"]],
+              [b["count"] for b in d["raw_hist"]])
+        check("both response curves carry spend_x / response_y, the keys the chart reads",
+              all({"spend_x", "response_y"} <= set(p) for p in d["raw_curve"]["binned_curve"])
+              and all({"spend_x", "response_y"} <= set(p) for p in d["trans_curve"]["binned_curve"]),
+              d["raw_curve"]["binned_curve"][:1])
+        check("the config is echoed, so the panel can label what it drew",
+              d["config"]["Adstock"] == 0.6 and d["config"]["Lags"] == 4, d["config"])
+
+        print("\n8b. the preview agrees with what Apply would produce")
+        applied_one = c.post("/api/transformation/apply", json={
+            **BASE_PAYLOAD,
+            "transformations": [transformation("calls", decay=0.6, lags=4, sat="Log", log_k=1.0)],
+            "derived_variables": [], "add_carryover": False,
+        }).json()
+        frame = pd.read_csv(io.StringIO(applied_one["csv_data"]))
+        preview_mean = [s for s in d["stats_table"] if s["metric"] == "Mean"][0]["transformed"]
+        check("the previewed mean is the applied column's mean",
+              abs(preview_mean - float(frame["calls_transformed"].mean())) < 0.01,
+              (preview_mean, float(frame["calls_transformed"].mean())))
+
+        print("\n8c. a derived channel can be previewed before it exists")
+        r = c.post("/api/transformation/preview-single", json={
+            **BASE_PAYLOAD,
+            "channel": "CALLS+EMAILS",
+            "config": transformation("CALLS+EMAILS"),
+            "derived_variables": [{"name": "CALLS+EMAILS", "operator": "+",
+                                   "variables": ["calls", "emails"], "weights": {}}],
+        })
+        check("200 even though the column is not in the CSV",
+              r.status_code == 200, r.text[:300])
+        r = c.post("/api/transformation/preview-single", json={
+            **BASE_PAYLOAD, "channel": "nope",
+            "config": transformation("nope"), "derived_variables": [],
+        })
+        check("an unknown channel is refused", r.status_code == 400, r.status_code)
+
+        print("\n8d. every normalization method the picker offers is accepted")
+        norm_means = {}
+        for method in ("none", "minmax", "zscore", "iqr", "population"):
+            cfg = transformation("calls", sat="none")
+            cfg["Normalization"] = method
+            rr = c.post("/api/transformation/preview-single", json={
+                **BASE_PAYLOAD, "channel": "calls", "config": cfg, "derived_variables": [],
+            })
+            ok = rr.status_code == 200
+            check(f"{method} -> 200", ok, rr.text[:200])
+            if ok:
+                norm_means[method] = round(
+                    [s for s in rr.json()["stats_table"] if s["metric"] == "Mean"][0]["transformed"], 4)
+        print(f"      transformed means: {norm_means}")
+        check("min-max and z-score really do rescale",
+              norm_means.get("minmax") != norm_means.get("none")
+              and norm_means.get("zscore") != norm_means.get("none"), norm_means)
+        # No population column is set in BASE_PAYLOAD, so the engine has nothing
+        # to divide by and leaves the series alone. The picker says as much.
+        check("population without a Population column is a no-op, not an error",
+              norm_means.get("population") == norm_means.get("none"), norm_means)
+
+        print("\n8e. every operator the derived builder offers works")
+        for op, expected in (("+", lambda a, b: a + b), ("-", lambda a, b: a - b),
+                             ("*", lambda a, b: a * b)):
+            rr = c.post("/api/transformation/apply", json={
+                **BASE_PAYLOAD,
+                "transformations": [transformation("D", sat="none", decay=0.5, lags=0)],
+                "derived_variables": [{"name": "D", "operator": op,
+                                       "variables": ["calls", "emails"], "weights": {}}],
+                "add_carryover": False,
+            })
+            ok = rr.status_code == 200
+            if ok:
+                f2 = pd.read_csv(io.StringIO(rr.json()["csv_data"]))
+                raw2 = pd.read_csv(io.StringIO(CSV))
+                ok = np.allclose(f2["D"], expected(raw2["calls"], raw2["emails"]), atol=0.01)
+            check(f'operator "{op}" applies as written', ok, rr.text[:200])
+        rr = c.post("/api/transformation/apply", json={
+            **BASE_PAYLOAD,
+            "transformations": [transformation("D", sat="none", decay=0.5, lags=0)],
+            "derived_variables": [{"name": "D", "operator": "/",
+                                   "variables": ["calls", "emails"], "weights": {}}],
+            "add_carryover": False,
+        })
+        check('operator "/" is accepted', rr.status_code == 200, rr.text[:200])
+
+        print("\n9. bad input is refused rather than guessed")
         r = c.post("/api/transformation/apply", json={
             **BASE_PAYLOAD, "transformations": [], "derived_variables": [],
             "add_carryover": False,
