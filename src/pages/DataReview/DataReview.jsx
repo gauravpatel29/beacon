@@ -18,7 +18,7 @@ import { recordStage } from '../../services/workflowState.js';
 import { useScreenState } from '../../services/useScreenState.js';
 import { ChartTooltip } from '../../components/charts/ChartTooltip.jsx';
 import {
-  AXIS_TICK, CHART_COLORS, fmt, GRID, X_LABEL, Y_LABEL,
+  AXIS_TICK, CHART_COLORS, fmt, GRID, LINE_TYPE, X_LABEL, Y_LABEL,
 } from '../../components/charts/chartTheme.js';
 import './DataReview.css';
 
@@ -105,6 +105,13 @@ function DataReview() {
   const [bivarRaw, setBivarRaw] = useState(null);
 
   const [distVariable, setDistVariable] = useState('');
+  // Histogram bucket width. `binWidthInput` is what is in the box; `binWidth`
+  // is what the last Apply actually sent. Keeping them apart means typing does
+  // not refetch on every keystroke, and the chart never disagrees with the
+  // "Active bucket width" line under it.
+  const [binWidthInput, setBinWidthInput] = useState('');
+  const [binWidth, setBinWidth] = useState(null); // null = let the server choose
+  const [binWidthError, setBinWidthError] = useState(null);
   const [outlierVariable, setOutlierVariable] = useState('');
   const [outlierThreshold, setOutlierThreshold] = useState(3.0);
   const [outlierMethod, setOutlierMethod] = useState('percentile');
@@ -182,7 +189,7 @@ function DataReview() {
   const stateRestored = useScreenState('review', {
     ready: Boolean(columns.length),
     deps: [selectedArdFilename, activeTab, corrSubTab, dateKey, geoKey, kpiColumn,
-           selectedMetrics, aggregation, indexedView, distVariable, outlierVariable,
+           selectedMetrics, aggregation, indexedView, distVariable, binWidth, outlierVariable,
            outlierMethod, outlierThreshold, outlierLowerPct, outlierUpperPct,
            xAxisVar, yAxisVar, bivarX, bivarY, corrThreshold, corrSelectedCols,
            removalTargetKpi, removalThreshold, clusterThreshold, sortField, sortAsc],
@@ -192,6 +199,9 @@ function DataReview() {
       dateKey, geoKey, kpiColumn,
       selectedMetrics, aggregation, indexedView,
       distVariable,
+      // null is a real value here - it means "let the server bin it" - so it
+      // is stored as well, and restored only when it is a number.
+      binWidth,
       outlierVariable, outlierMethod, outlierThreshold, outlierLowerPct, outlierUpperPct,
       xAxisVar, yAxisVar, bivarX, bivarY,
       corrThreshold, corrSelectedCols,
@@ -211,6 +221,10 @@ function DataReview() {
       if (str(v.aggregation)) setAggregation(v.aggregation);
       if (typeof v.indexedView === 'boolean') setIndexedView(v.indexedView);
       if (str(v.distVariable)) setDistVariable(v.distVariable);
+      if (num(v.binWidth) && v.binWidth > 0) {
+        setBinWidth(v.binWidth);
+        setBinWidthInput(String(v.binWidth));
+      }
       if (str(v.outlierVariable)) setOutlierVariable(v.outlierVariable);
       if (str(v.outlierMethod)) setOutlierMethod(v.outlierMethod);
       if (num(v.outlierThreshold)) setOutlierThreshold(v.outlierThreshold);
@@ -422,12 +436,41 @@ function DataReview() {
   useEffect(() => {
     if (activeTab !== 'outliers' || !activeCsv || !distVariable) return undefined;
     let cancelled = false;
-    edaHistogram({ csv_data: activeCsv, column: distVariable })
-      .then((d) => { if (!cancelled) setHistRaw(d); })
+    // `bin_width` omitted means the server picks: one bar per value for a
+    // small integer range, otherwise sqrt(n) bins.
+    edaHistogram({
+      csv_data: activeCsv,
+      column: distVariable,
+      ...(binWidth ? { bin_width: binWidth } : {}),
+    })
+      .then((d) => {
+        if (cancelled) return;
+        setHistRaw(d);
+        // Seed the box with whatever width is actually in force, so the first
+        // edit is a nudge from the real value rather than a guess.
+        if (!binWidth && d?.bin_width) setBinWidthInput(String(d.bin_width));
+      })
       .catch((err) => { if (!cancelled) { setHistRaw(null); failed('Histogram')(err); } });
     return () => { cancelled = true; };
     // eslint-disable-next-line
-  }, [activeTab, activeCsv, distVariable]);
+  }, [activeTab, activeCsv, distVariable, binWidth]);
+
+  // A width is in the units of the column it was chosen for: 50 is a sensible
+  // bucket for call volume and absurd for a share between 0 and 1. Switching
+  // column goes back to the server's own choice rather than carrying it over.
+  //
+  // Only on a real change. The first column to arrive - whether defaulted or
+  // restored from the saved state - is not a switch, and resetting there would
+  // throw away a width that had just been restored alongside it.
+  const lastDistVariable = useRef('');
+  useEffect(() => {
+    const previous = lastDistVariable.current;
+    lastDistVariable.current = distVariable;
+    if (!previous || previous === distVariable) return;
+    setBinWidth(null);
+    setBinWidthInput('');
+    setBinWidthError(null);
+  }, [distVariable]);
 
   // ── Tab 3: outliers ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -549,8 +592,40 @@ function DataReview() {
       labels: histRaw.bin_labels,
       mean: num(histRaw.mean), median: num(histRaw.median),
       min: num(histRaw.min), max: num(histRaw.max),
+      // The width the server actually used, which is not always the one asked
+      // for: the bins it picks itself have their own width.
+      width: num(histRaw.bin_width),
     };
   }, [histRaw]);
+
+  /**
+   * Redraw the histogram at the width in the box.
+   *
+   * Empty means "back to automatic", which is the only way out of a width once
+   * one has been applied - short of switching column and back.
+   */
+  const applyBinWidth = () => {
+    const raw = binWidthInput.trim();
+    if (!raw) {
+      setBinWidth(null);
+      setBinWidthError(null);
+      return;
+    }
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setBinWidthError('Enter a bucket width greater than zero.');
+      return;
+    }
+    // A width far below the span would ask the server for tens of thousands of
+    // bars, which is a slow request and an unreadable chart at the end of it.
+    const span = histogramData ? histogramData.max - histogramData.min : 0;
+    if (span > 0 && span / parsed > 500) {
+      setBinWidthError(`Too narrow for a span of ${fmt(span)} - that is over 500 buckets.`);
+      return;
+    }
+    setBinWidthError(null);
+    setBinWidth(parsed);
+  };
 
   // ---- Tab 3: Outlier detection (server) ----
   // `outlier_indices` are positions in the CSV that was sent, and that CSV is
@@ -1040,18 +1115,50 @@ function DataReview() {
                 <>
                   <div className="review-card">
                     <p className="review-card-heading">Variable Distribution &amp; Skewness</p>
-                    <div className="ard-select-field" style={{ maxWidth: 300, marginBottom: '1rem' }}>
-                      <label>Select Variable:</label>
-                      <select value={distVariable} onChange={(e) => setDistVariable(e.target.value)}>
-                        {metricColumns.map((c) => <option key={c} value={c}>{c}</option>)}
-                      </select>
+                    <div className="dist-controls-row">
+                      <div className="ard-select-field">
+                        <label>Select Variable:</label>
+                        <select value={distVariable} onChange={(e) => setDistVariable(e.target.value)}>
+                          {metricColumns.map((c) => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      </div>
+                      {/* The server's own bin choice is a starting point, not an
+                          answer: a column of spend binned at sqrt(n) can hide a
+                          mode that a round bucket width makes obvious. */}
+                      <div className="ard-select-field">
+                        <label htmlFor="dist-bin-width">Bucket Width (Bin Size):</label>
+                        <div className="bin-width-row">
+                          <input
+                            id="dist-bin-width"
+                            type="number"
+                            step="any"
+                            min="0"
+                            placeholder="Automatic"
+                            value={binWidthInput}
+                            onChange={(e) => { setBinWidthInput(e.target.value); setBinWidthError(null); }}
+                            onKeyDown={(e) => { if (e.key === 'Enter') applyBinWidth(); }}
+                          />
+                          <button type="button" className="bin-width-apply" onClick={applyBinWidth}>
+                            Apply Width
+                          </button>
+                        </div>
+                      </div>
                     </div>
+                    {binWidthError && <p className="bin-width-error">{binWidthError}</p>}
                     {histogramData && (
                       <>
                         <div className="dist-stats-row">
                           <strong>Mean:</strong> {histogramData.mean.toFixed(2)} &nbsp;&nbsp;
                           <strong>Median:</strong> {histogramData.median.toFixed(2)} &nbsp;&nbsp;
                           Span: {histogramData.min.toFixed(1)} to {histogramData.max.toFixed(1)}
+                          {/* What is actually being drawn. The server rounds a
+                              requested width to fit the span, so this is not
+                              always the number in the box. */}
+                          <span className="dist-bin-badge">
+                            Active bucket width: {histogramData.width}
+                            {' '}({histogramData.bins.length} {histogramData.bins.length === 1 ? 'bucket' : 'buckets'})
+                            {!binWidth && ' - automatic'}
+                          </span>
                         </div>
                         <HistogramChart
                           bins={histogramData.bins}
@@ -1587,7 +1694,7 @@ function TrendChart({ labels, series, indexed = false, xLabel = 'Period', yLabel
         {seriesKeys.map((key, i) => (
           <Line
             key={key}
-            type="monotone"
+            type={LINE_TYPE}
             dataKey={key}
             stroke={CHART_COLORS[i % CHART_COLORS.length]}
             strokeWidth={2}
@@ -1674,7 +1781,7 @@ function BinnedCurveChart({ data, xLabel, yLabel }) {
           }
         />
         <Line
-          type="monotone" dataKey="response_y"
+          type={LINE_TYPE} dataKey="response_y"
           stroke={CHART_COLORS[0]} strokeWidth={3}
           dot={{ r: 5, fill: CHART_COLORS[1], strokeWidth: 0 }}
           activeDot={{ r: 7, stroke: '#fff', strokeWidth: 2, fill: CHART_COLORS[0] }}
@@ -1733,7 +1840,7 @@ function ScatterChart({ points, binnedLine, trendline = [], xLabel, yLabel }) {
         <Scatter data={points} fill="#94a3b8" fillOpacity={0.5} isAnimationActive={false} />
         {binnedLine.length > 0 && (
           <Line
-            data={binnedLine} dataKey="y" type="monotone"
+            data={binnedLine} dataKey="y" type={LINE_TYPE}
             stroke="#1d4ed8" strokeWidth={2.5}
             dot={{ r: 3.5, fill: '#1d4ed8', strokeWidth: 0 }}
             activeDot={{ r: 5, strokeWidth: 2, stroke: '#1d4ed8', fill: '#fff' }}

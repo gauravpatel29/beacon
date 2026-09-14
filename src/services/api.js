@@ -112,8 +112,19 @@ export function uploadFiles(workflowId, files, { manifest = {}, overwrite = true
   });
 }
 
-export const listFiles = (workflowId) =>
-  request(`/v2/workflows/${workflowId}/files`);
+/**
+ * Datasets in a workflow.
+ *
+ * `kind` narrows the list to what a screen actually deals in: 'upload' is what
+ * the user put in, while 'ard' and 'merge' are outputs this API wrote. Without
+ * it every screen gets everything, which is how generated ARDs ended up in the
+ * ingestion screen's upload list.
+ */
+export const listFiles = (workflowId, { kind } = {}) =>
+  request(
+    `/v2/workflows/${workflowId}/files` +
+      (kind ? `?kind=${encodeURIComponent(kind)}` : '')
+  );
 
 export const getFile = (workflowId, filename, previewRows = 100) =>
   request(

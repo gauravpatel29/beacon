@@ -945,3 +945,33 @@
 .preview-panel-heading.is-generated {
   color: var(--color-success, #1a7f4b);
 }
+
+/* One tab's problem, above the tab bar. The screen still works, so this sits
+   inside the card rather than replacing it the way .stitching-error-banner
+   does. */
+.stitching-tab-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  background-color: #fdecea;
+  color: #c0392b;
+  border: 1px solid #f3b6ae;
+  border-radius: var(--radius-sm);
+  padding: 0.55rem 0.85rem;
+  font-size: var(--font-size-small);
+  margin-bottom: var(--spacing-sm);
+}
+
+.stitching-tab-error button {
+  flex: 0 0 auto;
+  color: inherit;
+  font-size: 0.8rem;
+  line-height: 1;
+  padding: 0.2rem 0.35rem;
+  border-radius: 4px;
+}
+
+.stitching-tab-error button:hover {
+  background-color: #f7d6d1;
+}

@@ -123,6 +123,23 @@ export async function forgetFile(filename) {
       })
     );
     patch.stitching = { ...stitching, drafts };
+
+    // A draft also remembers the ARD it produced, so that deleting the tab can
+    // delete the dataset. If that dataset is what is going, the name has to go
+    // with it or the tab would offer to delete it a second time.
+    for (const draft of Object.values(patch.stitching.drafts)) {
+      if (draft.generatedArdName === filename) draft.generatedArdName = null;
+    }
+  }
+
+  // Downstream screens each hold the ARD they are working on by name. Left
+  // behind, the selection points at a dataset that no longer resolves and the
+  // screen opens on a load error instead of an empty picker.
+  for (const key of ['review', 'transformation']) {
+    const screen = stored[key];
+    if (screen && typeof screen === 'object' && screen.ard === filename) {
+      patch[key] = { ...screen, ard: '' };
+    }
   }
 
   if (!Object.keys(patch).length) return null;

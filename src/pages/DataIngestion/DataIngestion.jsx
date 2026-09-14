@@ -529,7 +529,11 @@ function DataIngestion() {
     const hydrate = async () => {
       setIsRestoringFiles(true);
       try {
-        const response = await listFiles(workflowId);
+        // Uploads only. ARDs built on the stitching screen are datasets in the
+        // same workflow, so they were appearing here as files to categorise
+        // and re-map - and every one of them cost a profile and a preview
+        // request on resume.
+        const response = await listFiles(workflowId, { kind: 'upload' });
         const files = await Promise.all((response.items || []).map(async (dataset) => {
           // Listing metadata is enough to render a resumed file. Profile and
           // preview failures must not hide every file in the workflow.

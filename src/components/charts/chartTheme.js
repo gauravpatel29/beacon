@@ -9,6 +9,16 @@ export const CHART_COLORS = ['#1d4ed8', '#10b981', '#f59e0b', '#ef4444', '#8b5cf
 export const GRID = '#eef1f6';
 export const AXIS_TICK = { fontSize: 10, fill: '#8a94a3' };
 
+/**
+ * How every line in the app is drawn: straight segments between the points.
+ *
+ * recharts' 'monotone' fits a spline through the points, which invents curve
+ * between them - a smooth rise where the data steps, and a bulge past a local
+ * maximum that no observation supports. These are diagnostic charts, read for
+ * shape, so the line has to join what was measured and nothing else.
+ */
+export const LINE_TYPE = 'linear';
+
 // Axis titles sit in the margin the chart reserves for them, so adding one
 // never lands on top of the tick labels underneath.
 export const X_LABEL = { position: 'insideBottom', offset: -12, fontSize: 10, fill: '#8a94a3' };

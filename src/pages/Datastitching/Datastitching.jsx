@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
-import { v2ListFiles, v2BuildArd, problemMessage, ensureWorkflow } from '../../services/api.js';
-import { loadScreenState, recordStage, saveScreenState } from '../../services/workflowState.js';
+import { v2ListFiles, v2BuildArd, deleteFile, problemMessage, ensureWorkflow } from '../../services/api.js';
+import { forgetFile, loadScreenState, recordStage, saveScreenState } from '../../services/workflowState.js';
 import './Datastitching.css';
 
 // No ARD until the user adds one. The screen used to open with an HCP and a
@@ -57,6 +57,11 @@ function makeDefaultDraft() {
     generateError: null,
     activePreview: null, // { cardIndex, data, isLoading, error }
     generatedArd: null,  // the committed build: { filename, version, row_count, columns, preview }
+    // Which dataset this tab has written, name only. The build above is
+    // deliberately not persisted - it is rebuildable, and a stored preview
+    // would outlive the data it described - but the name has to survive a
+    // resume, otherwise deleting the tab later leaves the ARD orphaned.
+    generatedArdName: null,
   };
 }
 
@@ -72,6 +77,9 @@ function Datastitching() {
   const [files, setFiles] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
+  // A problem with one tab, shown above the tab bar. Kept apart from
+  // `loadError`, which stands in for the whole screen.
+  const [tabError, setTabError] = useState(null);
 
   const [tabs, setTabs] = useState(DEFAULT_TABS);
   const [activeTabId, setActiveTabId] = useState('');
@@ -121,7 +129,9 @@ function Datastitching() {
       steps: d.steps,
       // A Set does not survive JSON.
       selectedFiles: Array.from(d.selectedFiles || []),
-      generatedArdName: d.generatedArd?.filename || null,
+      // Whichever is known: the live build this session, or the name carried
+      // over from the last one.
+      generatedArdName: d.generatedArd?.filename || d.generatedArdName || null,
     }])),
   });
 
@@ -151,6 +161,7 @@ function Datastitching() {
         ardName: d.ardName || '',
         steps: Array.isArray(d.steps) ? d.steps : [],
         selectedFiles: new Set(d.selectedFiles || []),
+        generatedArdName: d.generatedArdName || null,
       };
     }
 
@@ -271,22 +282,27 @@ function Datastitching() {
     setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, editing: false } : t)));
   };
 
-  const removeTab = (tabId, e) => {
+  const removeTab = async (tabId, e) => {
     e.stopPropagation();
 
     // Deleting a tab discards the joins in it, and the save that follows takes
     // them out of the workflow too - so an ARD with work in it asks first. An
     // empty one goes without ceremony, since there is nothing to lose.
     const tab = tabs.find((t) => t.id === tabId);
-    const stepCount = (drafts[tabId]?.steps || []).length;
-    if (stepCount > 0) {
+    const tabDraft = drafts[tabId] || {};
+    const stepCount = (tabDraft.steps || []).length;
+    // The dataset this tab produced, from this session or a previous one.
+    const builtArd = tabDraft.generatedArd?.filename || tabDraft.generatedArdName || null;
+
+    if (stepCount > 0 || builtArd) {
       const label = tab?.title || 'this ARD';
       const joins = stepCount === 1 ? '1 join' : `${stepCount} joins`;
-      const ok = window.confirm(
-        `Delete ${label}?\n\nIts ${joins} will be removed from this workflow. `
-        + 'Any ARD already generated from it stays where it is.'
-      );
-      if (!ok) return;
+      const lines = [`Delete ${label}?`, ''];
+      if (stepCount > 0) lines.push(`Its ${joins} will be removed from this workflow.`);
+      // The tab is where an ARD is built and named, so leaving the dataset
+      // behind left a file nothing on this screen could reach again.
+      if (builtArd) lines.push(`The generated dataset "${builtArd}" will be deleted too.`);
+      if (!window.confirm(lines.join('\n'))) return;
     }
 
     const remaining = tabs.filter((t) => t.id !== tabId);
@@ -298,6 +314,21 @@ function Datastitching() {
     });
     // Fall back to whatever is left, which may be nothing at all.
     if (activeTabId === tabId) setActiveTabId(remaining[0]?.id || '');
+
+    if (!builtArd || !workflowId) return;
+    try {
+      await deleteFile(workflowId, builtArd);
+      // Only after the delete lands: a failed one must not prune the state of
+      // a dataset that is still there. This also clears the selection on Data
+      // Review and Data Transformation, which held it by name.
+      await forgetFile(builtArd);
+    } catch (err) {
+      // The tab is already gone, and re-adding it would be more confusing than
+      // saying what is left over.
+      // Not `loadError`: that one replaces the whole screen, and the screen is
+      // still perfectly usable - one dataset just outlived its tab.
+      setTabError(problemMessage(err, `Removed ${tab?.title || 'the ARD'}, but "${builtArd}" could not be deleted.`));
+    }
   };
 
   const toggleFile = (filename) => {
@@ -554,6 +585,13 @@ function Datastitching() {
 
       {!isLoading && !loadError && (
         <div className="stitching-card">
+          {tabError && (
+            <div className="stitching-tab-error" role="status">
+              <span>{tabError}</span>
+              <button type="button" onClick={() => setTabError(null)} aria-label="Dismiss">✕</button>
+            </div>
+          )}
+
           {/* ---- Tab bar ---- */}
           <div className="grain-tabs">
             {tabs.map((t) => (

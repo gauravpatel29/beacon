@@ -556,6 +556,67 @@
   color: var(--color-text-primary);
 }
 
+/* Variable picker and bucket width, side by side above the histogram. */
+.dist-controls-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 300px) minmax(220px, 340px);
+  gap: var(--spacing-md);
+  margin-bottom: var(--spacing-md);
+}
+
+@media (max-width: 720px) {
+  .dist-controls-row { grid-template-columns: 1fr; }
+}
+
+.bin-width-row {
+  display: flex;
+  gap: 0.4rem;
+}
+
+/* Matches .ard-select-field select, so the two controls on this row are the
+   same height and border weight. */
+.bin-width-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0.65rem 0.8rem;
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 0.82rem;
+  background-color: var(--color-white);
+}
+
+.bin-width-apply {
+  flex: 0 0 auto;
+  padding: 0 0.9rem;
+  border-radius: var(--radius-sm);
+  background-color: var(--color-primary);
+  color: var(--color-white);
+  font-size: 0.78rem;
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+}
+
+.bin-width-apply:hover {
+  background-color: var(--color-primary-dark);
+}
+
+.bin-width-error {
+  margin: -0.4rem 0 var(--spacing-md);
+  font-size: 0.76rem;
+  color: #c0392b;
+}
+
+/* The width actually drawn, which is not always the one requested. */
+.dist-bin-badge {
+  display: inline-block;
+  margin-left: 0.6rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background-color: var(--color-primary-light, #e2ecff);
+  color: var(--color-primary);
+  font-weight: var(--font-weight-semibold);
+}
+
 /* ---- Correlation heatmap ---- */
 .threshold-slider-row {
   display: flex;

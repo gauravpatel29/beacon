@@ -12,7 +12,7 @@ import { recordStage } from '../../services/workflowState.js';
 import { useScreenState } from '../../services/useScreenState.js';
 import { ChartTooltip } from '../../components/charts/ChartTooltip.jsx';
 import {
-  AXIS_TICK, fmt, GRID, X_LABEL, Y_LABEL,
+  AXIS_TICK, fmt, GRID, LINE_TYPE, X_LABEL, Y_LABEL,
 } from '../../components/charts/chartTheme.js';
 import PageFooterNav from '../../components/PageFooterNav/PageFooterNav.jsx';
 import './DataTransformation.css';
@@ -1281,7 +1281,7 @@ function MiniLineChart({ points, color, xLabel = '', yLabel = '' }) {
           }
         />
         <Line
-          type="monotone" dataKey="y" stroke={color} strokeWidth={2}
+          type={LINE_TYPE} dataKey="y" stroke={color} strokeWidth={2}
           dot={{ r: 3, fill: color }}
           activeDot={{ r: 5, strokeWidth: 1.5, stroke: '#fff' }}
         />
