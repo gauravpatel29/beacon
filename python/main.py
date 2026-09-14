@@ -1,6 +1,8 @@
+import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import truststore
 truststore.inject_into_ssl()
 # Database Pool Manager
@@ -54,6 +56,39 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
 )
+
+
+logger = logging.getLogger("beacon")
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
+    """Return an unhandled error as a response, so CORS headers reach it.
+
+    Starlette's ServerErrorMiddleware sits OUTSIDE CORSMiddleware, so an
+    exception that escapes a handler is re-raised past CORS and the 500 goes
+    back with no Access-Control-Allow-Origin. A browser on another origin then
+    blocks it and `fetch` rejects - so the screen reported the API as
+    unreachable while the server was up and answering every other call.
+
+    Handling it here means the response is produced inside the middleware
+    stack, picks up CORS on the way out, and the client sees a real 500.
+    """
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        media_type="application/problem+json",
+        content={
+            "type": "about:blank",
+            "title": "Internal Server Error",
+            "status": 500,
+            "instance": str(request.url.path),
+            # Deliberately not the exception text: that can carry connection
+            # strings and row values. The traceback is in the server log.
+            "detail": "The server failed to handle this request. "
+                      "Check the server log for the traceback.",
+        },
+    )
 
 # Beacon v1 API Routes
 app.include_router(v1_workflows.router, prefix="/v1/workflows", tags=["Beacon V1 Workflows"])

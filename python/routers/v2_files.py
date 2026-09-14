@@ -345,6 +345,11 @@ class DetectGrainBody(BaseModel):
     date_column: str = Field(min_length=1)
     live_updates: Optional[Dict[str, Any]] = None
     filters: Optional[List[Dict[str, Any]]] = None
+    # The same two nested forms SpecBody accepts. The handler reads both, so
+    # leaving them off here made every request a 500 on attribute access - and
+    # `extra="forbid"` would have rejected a client that did send them.
+    filter_groups: Optional[List[Dict[str, Any]]] = None
+    filter_chain: Optional[Dict[str, Any]] = None
 
 
 @router.post("/{workflow_id}/files/{filename}/detect-granularity")
