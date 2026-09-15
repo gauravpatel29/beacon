@@ -1,4 +1,3 @@
-
 import React, { createContext, useContext, useState, useCallback, useEffect } from "react";
 import { v1PatchWorkflow } from "../services/api";
 
@@ -10,7 +9,7 @@ const initialState = {
   workflowName: null,
 
   // Ingestion (v2)
-  datasets: [],          // [{filename, row_count, columns, category, spec, applied, kind}]
+  datasets: [],          // [{filename, row_count, columns, category, spec, applied, kind, column_roles}]
   activeDataset: null,   // filename the downstream stages read
 
   // ARD Tracking & Stitching State Persistence
@@ -18,7 +17,8 @@ const initialState = {
   stitchingSteps: null,
   stitchingSourceFiles: null,
 
-  // Column Configuration
+  // Column Configuration & Ingestion Roles
+  columnRoles: {}, // { [columnName]: "Cross-sectional Variable" | "Dependent Variable" | "Time Variable" | "Independent Promotions" | "Baseline Variables" }
   dateColumn: null,
   geoColumn: null,
   zipColumn: null,
@@ -34,6 +34,7 @@ const initialState = {
   // Transformation Parameters
   transformationConfig: [],
   addCarryover: false,
+  modelSpecification: "linear_log", // "linear_log" | "log_log"
 
   // Modelling
   selectedChannels: [],

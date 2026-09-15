@@ -31,6 +31,14 @@ export const FILE_CATEGORIES = [
     desc: "DMA target population or universe sizing" },
 ];
 
+export const COLUMN_ROLES = [
+  { id: "Cross-sectional Variable", label: "Cross-sectional Variable (HCP/DMA/Geo/Zip)", color: "bg-purple-100 text-purple-800" },
+  { id: "Dependent Variable", label: "Dependent Variable (Sales KPI/TRx/NRx)", color: "bg-red-100 text-red-800" },
+  { id: "Time Variable", label: "Time Variable (Date/Week/Month)", color: "bg-blue-100 text-blue-800" },
+  { id: "Independent Promotions", label: "Independent Promotions (Marketing/Spend/Calls)", color: "bg-emerald-100 text-emerald-800" },
+  { id: "Baseline Variables", label: "Baseline Variables (Population/Macro/Trend)", color: "bg-amber-100 text-amber-800" },
+];
+
 const DTYPE_OPTIONS = [
   { value: "string", label: "Text / String" },
   { value: "integer", label: "Integer" },
@@ -57,7 +65,7 @@ const NUM_OPS = ["sum", "average", "min", "max", "product"];
 const GRAIN_TARGETS = { Daily: ["Weekly", "Monthly"], Weekly: ["Monthly"], Monthly: ["Yearly"] };
 
 const TABS = [
-  { id: "category", label: "1. Assign Category" },
+  { id: "category", label: "1. Assign Categories (File & Columns)" },
   { id: "columns", label: "2. Columns & Types" },
   { id: "filter", label: "3. Filter" },
   { id: "granularity", label: "4. Granularity" },
@@ -65,10 +73,11 @@ const TABS = [
 
 const emptyDraft = () => ({
   category: "",
-  keep: {},           // column -> bool (default true)
+  columnRoles: {},
+  keep: {},
   renames: {},
   dtypes: {},
-  dateFormats: {},    // column -> { from, to }
+  dateFormats: {},
   npiCol: "",
   dateCol: "",
   useLuhn: false,
@@ -78,15 +87,14 @@ const emptyDraft = () => ({
   grainTo: "",
   grainDateCol: "",
   grainGeoCol: "",
-  aggCols: [],        // columns chosen for aggregation
-  aggOps: {},         // column -> op
+  aggCols: [],
+  aggOps: {},
 });
 
 function labelFor(fmt) {
   return DATE_FORMATS.find((f) => f.value === fmt)?.label || fmt;
 }
 
-/** Accepts DD/MM/YYYY or YYYY-MM-DD; the API takes ISO only. */
 function toIso(text) {
   const s = (text || "").trim();
   if (!s) return null;
@@ -96,17 +104,32 @@ function toIso(text) {
     const [, d, mo, y] = m;
     return `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}`;
   }
-  return undefined;   // unparseable - distinct from "not supplied"
+  return undefined;
 }
 
-/** Column names after renames, for the tabs that run post-rename. */
 function afterRenames(columns, draft) {
   return columns
     .filter((c) => draft.keep[c] !== false)
     .map((c) => (draft.renames[c]?.trim() ? draft.renames[c].trim() : c));
 }
 
-/** Local draft -> the manifest the API expects. */
+function guessColumnRole(colName) {
+  const l = colName.toLowerCase();
+  if (l.includes("sale") || l.includes("trx") || l.includes("nrx") || l.includes("revenue") || l.includes("kpi")) {
+    return "Dependent Variable";
+  }
+  if (l.includes("date") || l.includes("week") || l.includes("month") || l.includes("period") || l.includes("year") || l.includes("time")) {
+    return "Time Variable";
+  }
+  if (l.includes("npi") || l.includes("hcp") || l.includes("dma") || l.includes("zip") || l.includes("geo") || l.includes("id") || l.includes("account")) {
+    return "Cross-sectional Variable";
+  }
+  if (l.includes("pop") || l.includes("universe") || l.includes("macro") || l.includes("trend") || l.includes("base")) {
+    return "Baseline Variables";
+  }
+  return "Independent Promotions";
+}
+
 function draftToSpec(draft, columns) {
   const kept = columns.filter((c) => draft.keep[c] !== false);
   const column_drops = columns.filter((c) => draft.keep[c] === false);
@@ -115,9 +138,6 @@ function draftToSpec(draft, columns) {
     .filter((c) => draft.renames[c]?.trim() && draft.renames[c].trim() !== c)
     .map((c) => ({ from: c, to: draft.renames[c].trim() }));
 
-  // "string" is the resting state (files are read as text), and date/timestamp
-  // casts would re-infer the format - that is `date_formats`' job, with an
-  // explicit `from`.
   const DATE_TYPES = ["date", "timestamp"];
   const dtype_changes = kept
     .filter((c) => draft.dtypes[c] && draft.dtypes[c] !== "string"
@@ -144,7 +164,10 @@ function draftToSpec(draft, columns) {
   }
 
   const spec = {
-    config_metadata: draft.category ? { category: draft.category } : {},
+    config_metadata: {
+      category: draft.category || "",
+      column_roles: draft.columnRoles || {},
+    },
     live_updates: { column_drops, date_formats, dtype_changes, column_renames },
     filters,
   };
@@ -199,7 +222,9 @@ export default function DataIngestion() {
       setField("datasets", items.map((d) => ({
         filename: d.filename, row_count: d.row_count, columns: d.columns,
         category: d.spec?.config_metadata?.category || "",
+        column_roles: d.spec?.config_metadata?.column_roles || {},
       })));
+
       setDrafts((prev) => {
         const next = { ...prev };
         for (const item of items) {
@@ -208,11 +233,18 @@ export default function DataIngestion() {
           const lu = spec.live_updates || {};
           const drops = new Set(lu.column_drops || []);
           const keep = {};
-          for (const c of item.columns || []) keep[c] = !drops.has(c);
+          const colRoles = spec.config_metadata?.column_roles || {};
+          for (const c of item.columns || []) {
+            keep[c] = !drops.has(c);
+            if (!colRoles[c]) {
+              colRoles[c] = guessColumnRole(c);
+            }
+          }
           const g = spec.granularity || null;
           next[item.filename] = {
             ...emptyDraft(),
             category: spec.config_metadata?.category || guessCategory(item.filename),
+            columnRoles: colRoles,
             keep,
             renames: Object.fromEntries((lu.column_renames || []).map((r) => [r.from, r.to])),
             dtypes: Object.fromEntries((lu.dtype_changes || []).map((d) => [d.column, d.to])),
@@ -234,10 +266,8 @@ export default function DataIngestion() {
     }
   }, [workflowId, activeFile, setField]);
 
-  useEffect(() => { refresh(); /* eslint-disable-next-line */ }, [workflowId]);
+  useEffect(() => { refresh(); }, [workflowId]);
 
-  // Preview rows for the Assign Category tab. Refetched per selection because
-  // the stored dataset changes whenever a manifest is applied.
   useEffect(() => {
     if (!workflowId || !activeFile) return;
     let cancelled = false;
@@ -245,11 +275,10 @@ export default function DataIngestion() {
       .then((res) => {
         if (!cancelled) setPreviews((p) => ({ ...p, [activeFile]: res.preview || [] }));
       })
-      .catch(() => { /* the tab degrades to an empty table */ });
+      .catch(() => {});
     return () => { cancelled = true; };
   }, [workflowId, activeFile, datasets]);
 
-  // Profile the selected file once; it describes immutable raw bytes.
   useEffect(() => {
     if (!workflowId || !activeFile || profiles[activeFile]) return;
     let cancelled = false;
@@ -262,10 +291,12 @@ export default function DataIngestion() {
           const dtypes = { ...d.dtypes };
           const dateFormats = { ...d.dateFormats };
           const keep = { ...d.keep };
+          const columnRoles = { ...d.columnRoles };
           let npiCol = d.npiCol, dateCol = d.dateCol;
           for (const col of res.profile) {
             const n = col.column;
             if (keep[n] === undefined) keep[n] = true;
+            if (!columnRoles[n]) columnRoles[n] = guessColumnRole(n);
             if (!dtypes[n]) dtypes[n] = col.suggested_dtype;
             if (col.date_candidates?.length && !dateFormats[n] && !col.ambiguous_date) {
               dateFormats[n] = { from: col.suggested_date_from, to: "%d/%m/%Y" };
@@ -273,12 +304,11 @@ export default function DataIngestion() {
             if (!dateCol && col.date_candidates?.length) dateCol = n;
             if (!npiCol && (col.id_like || /npi|id$/i.test(n))) npiCol = n;
           }
-          return { ...prev, [activeFile]: { ...d, dtypes, dateFormats, keep, npiCol, dateCol } };
+          return { ...prev, [activeFile]: { ...d, dtypes, dateFormats, keep, columnRoles, npiCol, dateCol } };
         });
       })
       .catch((err) => { if (!cancelled) toast.error(problemMessage(err, "Could not read column types")); });
     return () => { cancelled = true; };
-    /* eslint-disable-next-line */
   }, [workflowId, activeFile]);
 
   const onDrop = useCallback(async (accepted, rejections) => {
@@ -311,21 +341,6 @@ export default function DataIngestion() {
     },
   });
 
-  const runPreview = async (label = "Previewing…") => {
-    if (!current) return null;
-    setBusy(label); setErrors([]);
-    try {
-      const res = await v2Preview(workflowId, current.filename, draftToSpec(draft, columns));
-      setPreview(res);
-      return res;
-    } catch (err) {
-      setErrors(err?.response?.data?.errors || []);
-      setPreview(null);
-      toast.error(problemMessage(err, "Preview failed"));
-      return null;
-    } finally { setBusy(""); }
-  };
-
   const apply = async (successMsg) => {
     if (!current) return;
     setBusy("Applying…"); setErrors([]);
@@ -333,6 +348,10 @@ export default function DataIngestion() {
       const res = await v2CommitSpec(workflowId, current.filename, draftToSpec(draft, columns));
       setPreview({ row_count: res.row_count, columns: res.columns,
                    preview: res.preview, applied: res.applied, committed: true });
+      
+      const combinedRoles = { ...(state.columnRoles || {}), ...(draft.columnRoles || {}) };
+      setField("columnRoles", combinedRoles);
+
       await refresh();
       toast.success(successMsg || `Applied — ${res.row_count.toLocaleString()} rows`);
     } catch (err) {
@@ -364,7 +383,18 @@ export default function DataIngestion() {
     setProceeding(true);
     try {
       const csv = await v2GetCsv(workflowId, salesFile.filename);
-      setFields({ activeDataset: salesFile.filename, granularCsvData: csv, filteredCsvData: csv });
+      const allRoles = {};
+      Object.values(drafts).forEach((df) => {
+        Object.assign(allRoles, df.columnRoles || {});
+      });
+
+      setFields({
+        activeDataset: salesFile.filename,
+        granularCsvData: csv,
+        filteredCsvData: csv,
+        columnRoles: allRoles,
+      });
+
       await saveWorkflowSnapshot("Exploratory Data Analysis", "/eda", {
         ingestion: "completed", eda: "in_progress",
       });
@@ -393,7 +423,7 @@ export default function DataIngestion() {
       <Header onReset={() => { resetWorkflow(); navigate("/"); }} />
 
       <div className="grid grid-cols-12 gap-6 items-start">
-        {/* ── Left: upload + file list ─────────────────────────────────── */}
+        {/* Left Side: Upload & List */}
         <div className="col-span-12 lg:col-span-4 xl:col-span-3 bg-white rounded-2xl border border-slate-100 shadow-sm p-6">
           <div
             {...getRootProps()}
@@ -464,7 +494,7 @@ export default function DataIngestion() {
           )}
         </div>
 
-        {/* ── Right: mapping configuration ─────────────────────────────── */}
+        {/* Right Side: Configuration Tabs */}
         <div className="col-span-12 lg:col-span-8 xl:col-span-9 space-y-5">
           {!current ? (
             <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-8">
@@ -497,8 +527,15 @@ export default function DataIngestion() {
               </div>
 
               {activeTab === "category" && (
-                <CategoryTab file={current} rows={previews[current.filename] || []}
-                             draft={draft} patch={patch} />
+                <CategoryTab
+                  file={current}
+                  columns={columns}
+                  rows={previews[current.filename] || []}
+                  draft={draft}
+                  patch={patch}
+                  onApply={() => apply("Category and column roles saved")}
+                  busy={busy}
+                />
               )}
               {activeTab === "columns" && (
                 <ColumnsTab columns={columns} draft={draft} patch={patch} profile={profile}
@@ -543,30 +580,7 @@ export default function DataIngestion() {
             </div>
           )}
 
-          {preview && !busy && (
-            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6">
-              <h3 className="text-sm font-bold text-slate-700 uppercase tracking-wider mb-4">
-                {preview.committed ? "Applied result" : "Preview — nothing saved yet"}
-              </h3>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
-                <Metric label="Rows out" value={(preview.row_count ?? 0).toLocaleString()} />
-                <Metric label="Rows removed" value={(preview.applied?.rows_removed ?? 0).toLocaleString()} />
-                <Metric label="Columns" value={(preview.columns || []).length} />
-                <Metric label="Nulled" value={preview.applied?.nulled_values ?? 0} />
-              </div>
-              {preview.applied?.unhandled_columns?.length > 0 && (
-                <div className="mb-4">
-                  <Alert type="warning">
-                    Dropped by the rollup because no aggregation was chosen:{" "}
-                    <b>{preview.applied.unhandled_columns.join(", ")}</b>.
-                  </Alert>
-                </div>
-              )}
-              <DataTable data={preview.preview || []} maxRows={15} />
-            </div>
-          )}
-
-          {/* ── Proceed bar ─────────────────────────────────────────────── */}
+          {/* Proceed Bar */}
           <div className="bg-slate-900 text-white rounded-2xl p-5 flex items-center justify-between flex-wrap gap-4 shadow-xl">
             <div className="text-sm">
               {!datasets.length ? (
@@ -580,9 +594,6 @@ export default function DataIngestion() {
                   ✅ All {datasets.length} files mapped — handing off {salesFile.filename}
                 </span>
               )}
-              <p className="text-[11px] text-slate-400 mt-0.5">
-                Files stay in Neon; only the id travels between screens.
-              </p>
             </div>
             <div className="flex gap-3">
               <Btn variant="secondary" onClick={() => navigate("/")}>Back to Home</Btn>
@@ -605,7 +616,7 @@ function Header({ onReset }) {
         <div>
           <h1 className="text-3xl font-bold text-slate-900">Data Ingestion &amp; Mapping</h1>
           <p className="text-slate-500 text-sm mt-1">
-            Upload multi-grain marketing files, assign roles, modify data types, and standardize time grain
+            Upload source files, assign file roles, map column-level categories, and standardize schema
           </p>
         </div>
       </div>
@@ -627,34 +638,106 @@ function guessCategory(filename) {
   return "";
 }
 
-// ─── 1. Assign Category ──────────────────────────────────────────────────────
-function CategoryTab({ file, rows, draft, patch }) {
+// ─── 1. Assign File & Column Categories Component ─────────────────────────────
+function CategoryTab({ file, columns, rows, draft, patch, onApply, busy }) {
   const cat = FILE_CATEGORIES.find((c) => c.id === draft.category);
+
+  const updateColRole = (colName, roleId) => {
+    patch({
+      columnRoles: {
+        ...(draft.columnRoles || {}),
+        [colName]: roleId,
+      },
+    });
+  };
+
   return (
     <div className="space-y-6">
-      <div>
-        <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
-          File Category
+      {/* Block 1: File Category */}
+      <div className="bg-slate-50 p-5 rounded-2xl border border-slate-200 space-y-3">
+        <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+          1. File-Level Category
         </label>
         <select
           value={draft.category}
           onChange={(e) => patch({ category: e.target.value })}
-          className="w-full sm:w-[28rem] px-4 py-3 rounded-xl border border-slate-200 text-sm bg-white"
+          className="w-full sm:w-[28rem] px-4 py-2.5 rounded-xl border border-slate-200 text-sm bg-white font-semibold text-slate-800"
         >
-          <option value="">Select a category…</option>
+          <option value="">Select a file category…</option>
           {FILE_CATEGORIES.map((c) => (
             <option key={c.id} value={c.id}>{c.label}</option>
           ))}
         </select>
         {cat && (
-          <div className="mt-3 p-4 rounded-xl bg-brand-50 border border-brand-100">
-            <p className="text-sm font-bold text-brand-700">{cat.label}</p>
-            <p className="text-xs text-slate-600 mt-0.5">{cat.desc}</p>
-            <p className="text-[11px] text-brand-500 mt-1">Expected grain: {cat.grain}</p>
+          <div className="p-3 rounded-xl bg-brand-50 border border-brand-100 text-xs">
+            <span className="font-bold text-brand-700 block">{cat.label} ({cat.grain})</span>
+            <span className="text-slate-600">{cat.desc}</span>
           </div>
         )}
       </div>
 
+      {/* Block 2: Column-Level Category Selection Table */}
+      <div className="bg-slate-50 p-5 rounded-2xl border border-slate-200 space-y-4">
+        <div>
+          <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+            2. Column-Level Categories ({columns.length} Columns)
+          </label>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Assign each column in this file to one of the 5 modeling categories.
+          </p>
+        </div>
+
+        <div className="overflow-x-auto rounded-xl border border-slate-200 max-h-80 bg-white">
+          <table className="w-full text-xs text-left">
+            <thead className="bg-slate-100 text-slate-700 font-bold sticky top-0 z-10">
+              <tr>
+                <th className="px-4 py-3">Column Name</th>
+                <th className="px-4 py-3">Assigned Category Role</th>
+                <th className="px-4 py-3">Sample Values</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {columns.map((col) => {
+                const currentRole = draft.columnRoles?.[col] || guessColumnRole(col);
+                const roleObj = COLUMN_ROLES.find((r) => r.id === currentRole);
+                const sampleVals = rows.slice(0, 3).map((r) => r[col]).filter(Boolean).join(" · ");
+
+                return (
+                  <tr key={col} className="hover:bg-slate-50/60">
+                    <td className="px-4 py-2.5 font-bold text-slate-800">
+                      {col}
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <select
+                        value={currentRole}
+                        onChange={(e) => updateColRole(col, e.target.value)}
+                        className={`text-xs font-bold border rounded-lg px-2.5 py-1.5 focus:outline-none ${
+                          roleObj?.color || "bg-white text-slate-700 border-slate-300"
+                        }`}
+                      >
+                        {COLUMN_ROLES.map((role) => (
+                          <option key={role.id} value={role.id}>
+                            {role.label}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="px-4 py-2.5 text-slate-400 font-mono text-[11px] truncate max-w-xs">
+                      {sampleVals || "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        <Btn onClick={onApply} disabled={!!busy} className="mt-2 text-xs">
+          Save Categories &amp; Roles
+        </Btn>
+      </div>
+
+      {/* Block 3: Preview */}
       <div>
         <div className="flex items-baseline justify-between mb-2">
           <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Data Preview</h4>
@@ -668,7 +751,7 @@ function CategoryTab({ file, rows, draft, patch }) {
   );
 }
 
-// ─── 2. Columns & Types ──────────────────────────────────────────────────────
+// ─── 2. Columns & Types Component ─────────────────────────────────────────────
 function ColumnsTab({ columns, draft, patch, profile, onApply, busy }) {
   const byCol = useMemo(
     () => Object.fromEntries((profile || []).map((p) => [p.column, p])), [profile]);
@@ -793,7 +876,7 @@ function ColumnsTab({ columns, draft, patch, profile, onApply, busy }) {
                     <div className="flex items-center gap-2 flex-wrap pl-1">
                       <span className="text-[11px] text-amber-700 font-semibold">
                         {info?.ambiguous_date
-                          ? `Ambiguous — ${(info.ambiguous_between || []).join(" and ")} both fit. Pick the source format:`
+                          ? `Ambiguous — ${(info.ambiguous_between || []).join(" and ")} both fit. Pick source format:`
                           : "Source format:"}
                       </span>
                       <select
@@ -827,7 +910,7 @@ function ColumnsTab({ columns, draft, patch, profile, onApply, busy }) {
   );
 }
 
-// ─── 3. Filter ───────────────────────────────────────────────────────────────
+// ─── 3. Filter Component ──────────────────────────────────────────────────────
 function FilterTab({ columns, draft, patch, onApply, busy }) {
   const badStart = draft.startDate.trim() && toIso(draft.startDate) === undefined;
   const badEnd = draft.endDate.trim() && toIso(draft.endDate) === undefined;
@@ -905,22 +988,14 @@ function FilterTab({ columns, draft, patch, onApply, busy }) {
         </Alert>
       )}
 
-      {draft.useLuhn && !draft.npiCol && (
-        <Alert type="warning">Select an NPI / ID column to validate.</Alert>
-      )}
-      {(draft.startDate.trim() || draft.endDate.trim()) && !draft.dateCol && (
-        <Alert type="warning">Select a date column for the range to apply to.</Alert>
-      )}
-
       <Btn onClick={onApply} disabled={!!busy || badStart || badEnd}>Apply Filters</Btn>
     </div>
   );
 }
 
-// ─── 4. Granularity ──────────────────────────────────────────────────────────
+// ─── 4. Granularity Component ─────────────────────────────────────────────────
 function GranularityTab({ workflowId, filename, columns, draft, patch, onApply, busy, specSoFar }) {
   const [detecting, setDetecting] = useState(false);
-  const [detail, setDetail] = useState(null);
 
   const detect = async () => {
     if (!draft.grainDateCol) return toast.error("Select a date column first");
@@ -932,7 +1007,6 @@ function GranularityTab({ workflowId, filename, columns, draft, patch, onApply, 
         live_updates: spec.live_updates,
         filters: spec.filters,
       });
-      setDetail(res);
       const targets = GRAIN_TARGETS[res.granularity] || [];
       patch({ grainFrom: res.granularity, grainTo: targets[0] || "" });
       toast.success(`Detected: ${res.granularity}`);
@@ -960,7 +1034,7 @@ function GranularityTab({ workflowId, filename, columns, draft, patch, onApply, 
           <label className="block text-sm font-semibold text-slate-700 mb-2">Date Column</label>
           <select
             value={draft.grainDateCol}
-            onChange={(e) => { patch({ grainDateCol: e.target.value, grainFrom: null, grainTo: "" }); setDetail(null); }}
+            onChange={(e) => { patch({ grainDateCol: e.target.value, grainFrom: null, grainTo: "" }); }}
             className="w-full px-4 py-3 rounded-xl border border-slate-200 text-sm bg-white"
           >
             <option value="">Select…</option>
@@ -1000,11 +1074,6 @@ function GranularityTab({ workflowId, filename, columns, draft, patch, onApply, 
               <option value="">Target grain…</option>
               {targets.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
-            {detail && (
-              <span className="text-[11px] text-slate-400">
-                {detail.distinct_dates} distinct dates · {detail.min_date} → {detail.max_date}
-              </span>
-            )}
           </div>
         )}
       </div>
@@ -1043,12 +1112,6 @@ function GranularityTab({ workflowId, filename, columns, draft, patch, onApply, 
             </div>
           ))}
         </div>
-      )}
-
-      {ready && draft.aggCols.length === 0 && (
-        <Alert type="warning">
-          No columns selected to aggregate — every non-key column will be dropped by the rollup.
-        </Alert>
       )}
 
       <Btn onClick={onApply} disabled={!!busy || !ready}>Modify Granularity</Btn>

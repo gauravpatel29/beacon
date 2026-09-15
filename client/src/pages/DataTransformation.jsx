@@ -7,7 +7,6 @@ import {
 } from "recharts";
 import {
   applyTransformations,
-  transformationAutoSelect,
   transformationPreviewSingle,
   transformationCorrelation,
   v2ListArds,
@@ -17,8 +16,8 @@ import {
 import { useAppState } from "../context/AppContext";
 import { PageHeader, Card, Btn, Alert, Spinner, DataTable } from "../components/UI";
 
-const HORIZON_OPTIONS = [
-  { value: 0, label: "0 weeks (Immediate / No Lag)" },
+const ADSTOCK_HORIZON_OPTIONS = [
+  { value: 0, label: "0 weeks (No Adstock Decay)" },
   { value: 1, label: "1 week" },
   { value: 2, label: "2 weeks" },
   { value: 3, label: "3 weeks" },
@@ -26,6 +25,16 @@ const HORIZON_OPTIONS = [
   { value: 6, label: "6 weeks" },
   { value: 8, label: "8 weeks (2 months)" },
   { value: 12, label: "12 weeks (1 quarter)" },
+];
+
+const PURE_LAG_OPTIONS = [
+  { value: 0, label: "Lag 0 (Immediate Effect)" },
+  { value: 1, label: "Lag 1 (Shift 1 wk)" },
+  { value: 2, label: "Lag 2 (Shift 2 wks)" },
+  { value: 3, label: "Lag 3 (Shift 3 wks)" },
+  { value: 4, label: "Lag 4 (Shift 4 wks)" },
+  { value: 6, label: "Lag 6 (Shift 6 wks)" },
+  { value: 8, label: "Lag 8 (Shift 8 wks)" },
 ];
 
 const NORMALIZATION_OPTIONS = [
@@ -36,66 +45,113 @@ const NORMALIZATION_OPTIONS = [
   { value: "iqr", label: "Robust / IQR Scaling" },
 ];
 
-// ─── Interactive Multi-Select Column Box Component ──────────────────────────
-function ColumnSelectBox({ label, options, value = [], onChange, isDanger = false, helperText = "" }) {
-  const selectedList = Array.isArray(value) ? value : (value ? [value] : []);
+function getChannelGuidance(channelName) {
+  const l = channelName.toLowerCase();
 
-  const toggle = (opt) => {
-    if (selectedList.includes(opt)) {
-      onChange(selectedList.filter((x) => x !== opt));
-    } else {
-      onChange([...selectedList, opt]);
-    }
+  if (l.includes("tv") || l.includes("broad") || l.includes("video")) {
+    return {
+      tacticType: "Mass Media / Television / CTV",
+      adstockDecay: "0.60 – 0.80 (High Memory Retention)",
+      adstockHorizon: "4 to 8 weeks",
+      pureLag: "1 to 2 weeks",
+      saturation: "Logarithmic: ln(1 + k·x) with k ≈ 1.0 or Power (p ≈ 0.40)",
+      rationale: "Broad mass media builds brand awareness with a long carryover half-life. High GRPs experience diminishing returns rapidly due to frequency fatigue.",
+      actionItem: "Set Adstock Decay to 0.70, Adstock Horizon to 4–6 weeks, Lag to 1 week, and use Log Saturation."
+    };
+  }
+  if (l.includes("call") || l.includes("det") || l.includes("rep") || l.includes("f2f")) {
+    return {
+      tacticType: "HCP Personal Detailing / Sales Rep Calls",
+      adstockDecay: "0.40 – 0.60 (Medium Retention)",
+      adstockHorizon: "2 to 4 weeks",
+      pureLag: "0 to 1 week",
+      saturation: "Power: x^p (p ≈ 0.50 – 0.60) or Log (k ≈ 1.0)",
+      rationale: "Sales rep details have an immediate clinical impact with memory decay lasting 2–4 weeks. Detailing frequency saturates after 3–4 calls per HCP per month.",
+      actionItem: "Set Adstock Decay to 0.50, Adstock Horizon to 2 weeks, Lag to 0, and Saturation to Power (p = 0.50)."
+    };
+  }
+  if (l.includes("samp") || l.includes("voucher") || l.includes("copay")) {
+    return {
+      tacticType: "Physical Samples & Co-Pay Vouchers",
+      adstockDecay: "0.20 – 0.30 (Short / Immediate)",
+      adstockHorizon: "1 to 2 weeks",
+      pureLag: "0 weeks (Immediate)",
+      saturation: "Power: x^p (p ≈ 0.60) or Linear",
+      rationale: "Samples lead directly to immediate trial prescriptions (TRx) with low long-term memory carryover.",
+      actionItem: "Set Adstock Decay to 0.20, Adstock Horizon to 1 week, Lag to 0, and Saturation to Power (p = 0.60)."
+    };
+  }
+  if (l.includes("dig") || l.includes("sear") || l.includes("disp") || l.includes("soci") || l.includes("email") || l.includes("rte")) {
+    return {
+      tacticType: "Digital Media / Search / Social / Emails / RTE",
+      adstockDecay: "0.10 – 0.30 (Fast Decay)",
+      adstockHorizon: "1 to 2 weeks",
+      pureLag: "0 weeks",
+      saturation: "Logarithmic (k ≈ 1.5 – 2.0)",
+      rationale: "Digital impressions trigger near-instant click-through actions. Saturation happens quickly due to banner blindness.",
+      actionItem: "Set Adstock Decay to 0.20, Adstock Horizon to 1 week, Lag to 0, and Saturation to Log (k = 1.5)."
+    };
+  }
+  if (l.includes("speak") || l.includes("symp") || l.includes("conf") || l.includes("event")) {
+    return {
+      tacticType: "Peer-to-Peer Speaker Programs & Medical Symposia",
+      adstockDecay: "0.60 – 0.75 (Long Clinical Half-Life)",
+      adstockHorizon: "6 to 8 weeks",
+      pureLag: "1 to 3 weeks",
+      saturation: "Logarithmic: ln(1 + k·x) (k ≈ 1.0)",
+      rationale: "Peer influence and key opinion leader (KOL) events alter physician prescribing behavior over multiple subsequent treatment cycles.",
+      actionItem: "Set Adstock Decay to 0.70, Adstock Horizon to 6 weeks, Lag to 2 weeks, and Saturation to Log."
+    };
+  }
+
+  return {
+    tacticType: "General Marketing & Promotion Channel",
+    adstockDecay: "0.40 – 0.50 (Standard Benchmark)",
+    adstockHorizon: "2 to 4 weeks",
+    pureLag: "0 to 1 week",
+    saturation: "Logarithmic: ln(1 + k·x) or Power (p = 0.50)",
+    rationale: "Standard promotional channel. Balances short-term prescription lift with multi-week memory decay.",
+    actionItem: "Set Adstock Decay to 0.50, Adstock Horizon to 2 weeks, Lag to 0, and Saturation to Log."
   };
+}
 
+function IngestionCategoryBox({ title, subtitle, columns, selected = [], onToggle, colorBadge }) {
   return (
-    <div className="flex flex-col space-y-1.5">
-      <div className="flex items-center justify-between">
-        <label className={`text-xs font-bold uppercase tracking-wider ${isDanger ? "text-red-700" : "text-slate-700"}`}>
-          {label} {selectedList.length > 0 && <span className="font-normal opacity-75">({selectedList.length} selected)</span>}
-        </label>
-        {selectedList.length > 0 && (
-          <button
-            type="button"
-            onClick={() => onChange([])}
-            className="text-[10px] text-slate-400 hover:text-red-500 font-semibold transition-colors"
-          >
-            Clear
-          </button>
-        )}
-      </div>
+    <div className="bg-slate-50 rounded-2xl border border-slate-200 p-4 flex flex-col justify-between">
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-xs font-bold text-slate-800 uppercase tracking-wider">{title}</span>
+          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${colorBadge}`}>
+            {selected.length} / {columns.length}
+          </span>
+        </div>
+        <p className="text-[11px] text-slate-500 mb-3">{subtitle}</p>
 
-      <div className={`p-2.5 rounded-xl border bg-white max-h-32 min-h-[5rem] overflow-y-auto flex flex-wrap gap-1.5 transition-all ${
-        isDanger 
-          ? "border-red-300 bg-red-50/20 focus-within:ring-2 focus-within:ring-red-400" 
-          : "border-slate-200 focus-within:ring-2 focus-within:ring-brand-500"
-      }`}>
-        {options.length === 0 ? (
-          <span className="text-[11px] text-slate-400 italic p-1">No columns available</span>
-        ) : (
-          options.map((opt) => {
-            const isSelected = selectedList.includes(opt);
-            return (
-              <button
-                key={opt}
-                type="button"
-                onClick={() => toggle(opt)}
-                className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 border ${
-                  isSelected
-                    ? (isDanger 
-                        ? "bg-red-600 text-white border-red-600 shadow-sm" 
-                        : "bg-[#001E96] text-white border-[#001E96] shadow-sm")
-                    : "bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100"
-                }`}
-              >
-                <span>{isSelected ? "✓" : "+"}</span>
-                <span>{opt}</span>
-              </button>
-            );
-          })
-        )}
+        <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto p-2 bg-white rounded-xl border border-slate-200">
+          {columns.length === 0 ? (
+            <span className="text-[11px] text-slate-400 italic">No columns mapped to this category</span>
+          ) : (
+            columns.map((c) => {
+              const isChecked = selected.includes(c);
+              return (
+                <button
+                  key={c}
+                  type="button"
+                  onClick={() => onToggle(c)}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 border ${
+                    isChecked
+                      ? "bg-[#001E96] text-white border-[#001E96] shadow-sm"
+                      : "bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100"
+                  }`}
+                >
+                  <span>{isChecked ? "✓" : "+"}</span>
+                  <span>{c}</span>
+                </button>
+              );
+            })
+          )}
+        </div>
       </div>
-      {helperText && <span className="text-[10px] text-red-600 font-semibold">{helperText}</span>}
     </div>
   );
 }
@@ -166,7 +222,6 @@ export default function DataTransformation() {
   const { state, setField, saveWorkflowSnapshot } = useAppState();
   const workflowId = state.workflowId;
 
-  // ─── Header: Active ARD & Version Management ──────────────────────────────
   const [ardList, setArdList] = useState(() => state.savedArds || []);
   const [selectedArdId, setSelectedArdId] = useState(() => state.activeDataset || "active");
   const [activeCsv, setActiveCsv] = useState(() => state.granularCsvData || state.filteredCsvData || "");
@@ -181,7 +236,7 @@ export default function DataTransformation() {
           id: a.filename,
           name: a.filename.replace(/\.csv$/i, ""),
           filename: a.filename,
-          grain: a.grain || (a.derived_from && a.derived_from.grain) || "hcp",
+          grain: a.grain || (a.derived_from && a.derived_from.grain) || (a.filename.toLowerCase().includes("dma") ? "dma" : "hcp"),
           rows: a.row_count,
           cols: (a.columns || []).length,
           columns: a.columns || [],
@@ -209,14 +264,17 @@ export default function DataTransformation() {
       .catch(() => {});
   }, [workflowId, selectedArdId]);
 
-  // ─── Step 1: Key Columns State (Multi-Select Enabled) ─────────────────────
+  // ─── Step 1: Parse Columns & Group by 5 Ingestion Categories ───────────────
   const [allCols, setAllCols] = useState([]);
-  const [dateCol, setDateCol] = useState(state.dateColumn || "");
-  const [geoCol, setGeoCol] = useState(state.geoColumn || "");
-  const [zipCol, setZipCol] = useState(state.zipColumn || "");
-  const [dmaCol, setDmaCol] = useState(state.dmaColumn || "");
-  const [depVar, setDepVar] = useState(state.dependentVariable || "");
-  const [popCol, setPopCol] = useState("");
+  const [columnRolesMap, setColumnRolesMap] = useState(() => state.columnRoles || {});
+
+  const [selCrossSectional, setSelCrossSectional] = useState([]);
+  const [selDependent, setSelDependent] = useState([]);
+  const [selTime, setSelTime] = useState([]);
+  const [selPromotions, setSelPromotions] = useState([]);
+  const [selBaseline, setSelBaseline] = useState([]);
+
+  const [modelSpec, setModelSpec] = useState(() => state.modelSpecification || "linear_log");
   const [addCarryover, setAddCarryover] = useState(state.addCarryover || false);
 
   useEffect(() => {
@@ -226,76 +284,54 @@ export default function DataTransformation() {
       const cols = firstLine.split(",").map((c) => c.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
       setAllCols(cols);
 
-      if (!dateCol || !cols.includes(Array.isArray(dateCol) ? dateCol[0] : dateCol)) {
-        const d = cols.find((c) => /date|week|month|time/i.test(c)) || cols[0] || "";
-        setDateCol(d ? [d] : []);
-      }
-      if (!geoCol || !cols.includes(Array.isArray(geoCol) ? geoCol[0] : geoCol)) {
-        const g = cols.find((c) => /npi|geo|id|dma/i.test(c)) || cols[1] || cols[0] || "";
-        setGeoCol(g ? [g] : []);
-      }
-      if (!depVar || !cols.includes(Array.isArray(depVar) ? depVar[0] : depVar)) {
-        const s = cols.find((c) => /sale|trx|nrx|kpi|rev/i.test(c)) || "";
-        setDepVar(s ? [s] : []);
-      }
-      if (!popCol || !cols.includes(Array.isArray(popCol) ? popCol[0] : popCol)) {
-        const p = cols.find((c) => /pop|universe|target/i.test(c)) || "";
-        if (p) setPopCol([p]);
-      }
+      const roles = { ...(state.columnRoles || {}) };
+      cols.forEach((c) => {
+        if (!roles[c]) {
+          const l = c.toLowerCase();
+          if (l.includes("sale") || l.includes("trx") || l.includes("nrx") || l.includes("crx") || l.includes("nbrx") || l.includes("kpi") || l.includes("revenue")) {
+            roles[c] = "Dependent Variable";
+          } else if (l.includes("date") || l.includes("week") || l.includes("month") || l.includes("year") || l.includes("period")) {
+            roles[c] = "Time Variable";
+          } else if (l.includes("npi") || l.includes("geo") || l.includes("id") || l.includes("dma") || l.includes("zip")) {
+            roles[c] = "Cross-sectional Variable";
+          } else if (l.includes("pop") || l.includes("universe") || l.includes("macro") || l.includes("base") || l.includes("trend")) {
+            roles[c] = "Baseline Variables";
+          } else {
+            roles[c] = "Independent Promotions";
+          }
+        }
+      });
+      setColumnRolesMap(roles);
+
+      setSelCrossSectional(cols.filter((c) => roles[c] === "Cross-sectional Variable"));
+      setSelDependent(cols.filter((c) => roles[c] === "Dependent Variable"));
+      setSelTime(cols.filter((c) => roles[c] === "Time Variable"));
+      setSelPromotions(cols.filter((c) => roles[c] === "Independent Promotions"));
+      setSelBaseline(cols.filter((c) => roles[c] === "Baseline Variables"));
     } catch (e) {}
   }, [activeCsv]);
 
-  // ─── Step 2: Variable Selection Grid (Sales Strictly Excluded) ────────────
-  const classifiedVariables = useMemo(() => {
-    const rawKeys = [dateCol, geoCol, zipCol, dmaCol].flatMap((k) => (Array.isArray(k) ? k : [k])).filter(Boolean);
-    const keySet = new Set(rawKeys);
-    const depVarList = Array.isArray(depVar) ? depVar : (depVar ? [depVar] : []);
-    const depSet = new Set(depVarList);
+  const crossCols = useMemo(() => allCols.filter((c) => columnRolesMap[c] === "Cross-sectional Variable"), [allCols, columnRolesMap]);
+  const depCols = useMemo(() => allCols.filter((c) => columnRolesMap[c] === "Dependent Variable"), [allCols, columnRolesMap]);
+  const timeCols = useMemo(() => allCols.filter((c) => columnRolesMap[c] === "Time Variable"), [allCols, columnRolesMap]);
+  const promoCols = useMemo(() => allCols.filter((c) => columnRolesMap[c] === "Independent Promotions"), [allCols, columnRolesMap]);
+  const baseCols = useMemo(() => allCols.filter((c) => columnRolesMap[c] === "Baseline Variables"), [allCols, columnRolesMap]);
 
-    return allCols.map((c) => {
-      const isSales = depSet.has(c);
-      const isKey = keySet.has(c) || /id$/i.test(c);
-      let grain = "HCP";
-      if (/dma|tv|radio|pop|print|national|media/i.test(c)) {
-        grain = "DMA";
-      }
-
-      return {
-        name: c,
-        grain,
-        type: "Numeric",
-        isSales,
-        isKey,
-        isTransformable: !isSales && !isKey,
-      };
-    });
-  }, [allCols, dateCol, geoCol, zipCol, dmaCol, depVar]);
-
-  const transformableCandidates = useMemo(() => {
-    return classifiedVariables.filter((v) => v.isTransformable).map((v) => v.name);
-  }, [classifiedVariables]);
-
-  const [selectedVariables, setSelectedVariables] = useState(() => transformableCandidates);
-
-  useEffect(() => {
-    setSelectedVariables(transformableCandidates);
-  }, [transformableCandidates]);
-
-  const toggleVariableSelection = (varName) => {
-    setSelectedVariables((prev) =>
-      prev.includes(varName) ? prev.filter((v) => v !== varName) : [...prev, varName]
-    );
+  const toggleCategorySelection = (col, list, setter) => {
+    setter(list.includes(col) ? list.filter((x) => x !== col) : [...list, col]);
   };
 
-  const selectAllVariables = () => {
-    setSelectedVariables(transformableCandidates);
-  };
+  // ─── Step 2: Transformable Channels Table ──────────────────────────────────
+  const activeTransformableList = useMemo(() => {
+    const list = [...selPromotions, ...selBaseline];
+    if (modelSpec === "log_log") {
+      selDependent.forEach((d) => {
+        if (!list.includes(d)) list.push(d);
+      });
+    }
+    return list;
+  }, [selPromotions, selBaseline, selDependent, modelSpec]);
 
-  const deselectAllVariables = () => {
-    setSelectedVariables([]);
-  };
-
-  // ─── Step 3: Transformation Configuration Table (Standard + Derived) ──────
   const [derivedVars, setDerivedVars] = useState([]);
   const [derivedModalOpen, setDerivedModalOpen] = useState(false);
   const [newDerivedName, setNewDerivedName] = useState("");
@@ -303,26 +339,30 @@ export default function DataTransformation() {
   const [selectedDerivedVars, setSelectedDerivedVars] = useState([]);
   const [derivedWeights, setDerivedWeights] = useState({});
 
+  const [infoModalOpen, setInfoModalOpen] = useState(false);
+  const [infoChannelName, setInfoChannelName] = useState("");
+
   const [transformConfig, setTransformConfig] = useState(() => state.transformationConfig || []);
 
   useEffect(() => {
     setTransformConfig((prev) => {
       const existingMap = new Map(prev.map((r) => [r["Channel Name"], r]));
 
-      const standardRows = selectedVariables.map((v) => {
+      const standardRows = activeTransformableList.map((v) => {
         if (existingMap.has(v)) return existingMap.get(v);
-        const meta = classifiedVariables.find((x) => x.name === v);
+        const isDep = selDependent.includes(v);
         return {
           "Channel Name": v,
-          "Grain": meta?.grain || "HCP",
+          "Grain": isDep ? "KPI" : "Promo",
           "Normalization": "none",
           "Adstock": 0.5,
-          "Lags": 2, // Horizon in weeks
+          "Adstock Horizon": 2,
+          "Lag": 0,
           "Saturation Function": "Log",
           "Power (k)": 0.5,
           "Log (k)": 1.0,
-          "auto_selected": false,
           "is_derived": false,
+          "is_dependent": isDep,
         };
       });
 
@@ -333,11 +373,11 @@ export default function DataTransformation() {
           "Grain": "Derived",
           "Normalization": "none",
           "Adstock": 0.5,
-          "Lags": 2,
+          "Adstock Horizon": 2,
+          "Lag": 0,
           "Saturation Function": "Log",
           "Power (k)": 0.5,
           "Log (k)": 1.0,
-          "auto_selected": false,
           "is_derived": true,
           "formula": dv.variables.join(` ${dv.operator} `),
         };
@@ -345,15 +385,20 @@ export default function DataTransformation() {
 
       return [...standardRows, ...derivedRows];
     });
-  }, [selectedVariables, classifiedVariables, derivedVars]);
+  }, [activeTransformableList, derivedVars, selDependent]);
 
   const updateConfigRow = (channelName, field, value) => {
     setTransformConfig((prev) =>
       prev.map((row) => {
         if (row["Channel Name"] !== channelName) return row;
-        return { ...row, [field]: value, auto_selected: false };
+        return { ...row, [field]: value };
       })
     );
+  };
+
+  const handleOpenInfo = (channelName) => {
+    setInfoChannelName(channelName);
+    setInfoModalOpen(true);
   };
 
   const handleAddDerivedVariable = () => {
@@ -377,7 +422,7 @@ export default function DataTransformation() {
     setSelectedDerivedVars([]);
     setDerivedWeights({});
     setDerivedModalOpen(false);
-    toast.success(`Derived channel "${derivedName}" added directly to Transformation Table!`);
+    toast.success(`Derived channel "${derivedName}" added!`);
   };
 
   const removeDerivedVariable = (channelName) => {
@@ -386,72 +431,8 @@ export default function DataTransformation() {
     toast.success(`Removed derived channel "${channelName}"`);
   };
 
-  // ─── Step 4: Auto-Selection Engine ────────────────────────────────────────
-  const [autoSelecting, setAutoSelecting] = useState(false);
-
-  const handleAutoSelectAll = async () => {
-    if (!activeCsv) return toast.error("No dataset loaded");
-    const primaryDep = Array.isArray(depVar) ? depVar[0] : depVar;
-    if (!primaryDep) return toast.error("Set Dependent Variable (Sales KPI) first");
-    if (!transformConfig.length) return toast.error("No channels available in table to auto-tune");
-
-    setAutoSelecting(true);
-    try {
-      const allTableChannels = transformConfig.map((c) => c["Channel Name"]);
-      const res = await transformationAutoSelect({
-        csv_data: activeCsv,
-        geo_column: Array.isArray(geoCol) ? geoCol[0] : geoCol,
-        date_column: Array.isArray(dateCol) ? dateCol[0] : dateCol,
-        dependent_variable: primaryDep,
-        channels: allTableChannels,
-        derived_variables: derivedVars,
-        pop_column: Array.isArray(popCol) ? popCol[0] : popCol || undefined,
-      });
-
-      const recs = res.recommendations || [];
-      const recsMap = new Map(recs.map((r) => [r["Channel Name"], r]));
-
-      setTransformConfig((prev) =>
-        prev.map((row) => {
-          const r = recsMap.get(row["Channel Name"]);
-          return r ? { ...row, ...r, auto_selected: true } : row;
-        })
-      );
-      toast.success(`Auto-tuned parameters for ${recs.length} channel(s)!`);
-    } catch (err) {
-      toast.error(problemMessage(err, "Auto-selection failed"));
-    } finally {
-      setAutoSelecting(false);
-    }
-  };
-
-  const handleAutoSelectSingle = async (channelName) => {
-    const primaryDep = Array.isArray(depVar) ? depVar[0] : depVar;
-    if (!activeCsv || !primaryDep) return toast.error("Set Target Sales KPI first");
-    try {
-      const res = await transformationAutoSelect({
-        csv_data: activeCsv,
-        geo_column: Array.isArray(geoCol) ? geoCol[0] : geoCol,
-        date_column: Array.isArray(dateCol) ? dateCol[0] : dateCol,
-        dependent_variable: primaryDep,
-        channels: [channelName],
-        derived_variables: derivedVars,
-        pop_column: Array.isArray(popCol) ? popCol[0] : popCol || undefined,
-      });
-      if (res.recommendations && res.recommendations.length > 0) {
-        const rec = res.recommendations[0];
-        setTransformConfig((prev) =>
-          prev.map((row) => (row["Channel Name"] === channelName ? { ...row, ...rec, auto_selected: true } : row))
-        );
-        toast.success(`Auto-tuned ${channelName}! (Fit Score: ${rec.fit_score})`);
-      }
-    } catch (err) {
-      toast.error("Auto-tune failed");
-    }
-  };
-
-  // ─── Step 5: Execution & Versioning ───────────────────────────────────────
-  const [setNameInput, setSetNameInput] = useState("Q4 National Launch v1");
+  // ─── Step 3: Execution & Dataset Registry Save ─────────────────────────────
+  const [setNameInput, setSetNameInput] = useState("HCP FINAL ARD");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
 
@@ -460,25 +441,31 @@ export default function DataTransformation() {
 
   const handleApplyTransformations = async () => {
     if (!activeCsv) return toast.error("No dataset available");
-    const primaryDep = Array.isArray(depVar) ? depVar[0] : depVar;
-    const primaryDate = Array.isArray(dateCol) ? dateCol[0] : dateCol;
-    const primaryGeo = Array.isArray(geoCol) ? geoCol[0] : geoCol;
-    const primaryPop = Array.isArray(popCol) ? popCol[0] : popCol;
+    const primaryDate = selTime[0] || "";
+    const primaryGeo = selCrossSectional[0] || "";
+    const primaryDep = selDependent[0] || "";
+    const primaryPop = selBaseline[0] || "";
 
     if (!primaryDate || !primaryGeo || !primaryDep) {
-      return toast.error("Set Date, Geo, and Dependent Variable columns");
+      return toast.error("Select Time Variable, Cross-sectional Geo Variable, and Dependent Variable.");
     }
-    if (!transformConfig.length) return toast.error("Configure at least one channel in table");
+    if (!transformConfig.length) return toast.error("Configure at least one channel in the transformation table.");
 
     setLoading(true);
     try {
+      const mappedTransformations = transformConfig.map((c) => ({
+        ...c,
+        Lags: c["Adstock Horizon"] ?? 2,
+        Lag: c["Lag"] ?? 0,
+      }));
+
       const data = await applyTransformations({
         csv_data: activeCsv,
         geo_column: primaryGeo,
         date_column: primaryDate,
         dependent_variable: primaryDep,
         add_carryover: addCarryover,
-        transformations: transformConfig,
+        transformations: mappedTransformations,
         derived_variables: derivedVars,
         pop_column: primaryPop || undefined,
       });
@@ -488,27 +475,46 @@ export default function DataTransformation() {
       setField("geoColumn", primaryGeo);
       setField("dateColumn", primaryDate);
       setField("dependentVariable", primaryDep);
-      setField("zipColumn", Array.isArray(zipCol) ? zipCol[0] : zipCol);
-      setField("dmaColumn", Array.isArray(dmaCol) ? dmaCol[0] : dmaCol);
       setField("transformationConfig", transformConfig);
       setField("addCarryover", addCarryover);
+      setField("modelSpecification", modelSpec);
 
-      // Save versioned transformation set
+      // Detect Grain from selected ARD or name
+      const activeArd = ardList.find((a) => a.id === selectedArdId);
+      const isDma = (activeArd?.grain || "").toLowerCase().includes("dma") ||
+                    (selectedArdId || "").toLowerCase().includes("dma") ||
+                    setNameInput.toLowerCase().includes("dma");
+      const detectedGrain = isDma ? "DMA" : "HCP";
+
       const newVersion = {
+        id: `trans_${Date.now()}`,
         name: setNameInput.trim() || `Transform Set v${savedSets.length + 1}`,
+        grain: detectedGrain, // "HCP" | "DMA"
         createdAt: new Date().toISOString(),
         configs: [...transformConfig],
         derivedVars: [...derivedVars],
         columnsCount: data.cols,
+        columns: data.columns || [],
+        transformed_channels: data.transformed_channels || [],
         resultData: data,
+        csv_data: data.csv_data,
+        depVars: selDependent,
+        timeVars: selTime,
+        crossVars: selCrossSectional,
+        promotions: selPromotions,
+        baselineVars: selBaseline,
+        dateColumn: primaryDate,
+        geoColumn: primaryGeo,
+        dependentVariable: primaryDep,
+        addCarryover: addCarryover,
+        modelSpecification: modelSpec,
       };
 
-      const updatedSets = [newVersion, ...savedSets];
+      const updatedSets = [newVersion, ...savedSets.filter((s) => s.name !== newVersion.name)];
       setSavedSets(updatedSets);
       setActiveSetIndex(0);
       setField("savedTransformationSets", updatedSets);
 
-      // Fetch transformed correlation matrix
       if (data.transformed_channels && data.transformed_channels.length >= 2) {
         transformationCorrelation({
           csv_data: data.csv_data,
@@ -519,7 +525,7 @@ export default function DataTransformation() {
           .catch(() => {});
       }
 
-      toast.success(`Transformation Set "${newVersion.name}" saved & applied!`);
+      toast.success(`Transformation Dataset "${newVersion.name}" saved & ready for Modelling!`);
     } catch (err) {
       toast.error(err.response?.data?.error || err.response?.data?.detail || "Transformation failed");
     } finally {
@@ -527,7 +533,6 @@ export default function DataTransformation() {
     }
   };
 
-  // Switch versions using dropdown
   const handleSelectVersion = (idx) => {
     const targetSet = savedSets[idx];
     if (!targetSet) return;
@@ -541,7 +546,7 @@ export default function DataTransformation() {
     toast.success(`Switched to "${targetSet.name}"`);
   };
 
-  // ─── Preview & Validation Section State ───────────────────────────────────
+  // ─── Preview & Single Channel Validation ──────────────────────────────────
   const [selectedValidationVar, setSelectedValidationVar] = useState("");
   const [validationData, setValidationData] = useState(null);
   const [validationLoading, setValidationLoading] = useState(false);
@@ -557,10 +562,10 @@ export default function DataTransformation() {
     const cfg = transformConfig.find((c) => c["Channel Name"] === selectedValidationVar);
     if (!cfg) return;
 
-    const primaryDep = Array.isArray(depVar) ? depVar[0] : depVar;
-    const primaryDate = Array.isArray(dateCol) ? dateCol[0] : dateCol;
-    const primaryGeo = Array.isArray(geoCol) ? geoCol[0] : geoCol;
-    const primaryPop = Array.isArray(popCol) ? popCol[0] : popCol;
+    const primaryDate = selTime[0] || "";
+    const primaryGeo = selCrossSectional[0] || "";
+    const primaryDep = selDependent[0] || "";
+    const primaryPop = selBaseline[0] || "";
 
     setValidationLoading(true);
     transformationPreviewSingle({
@@ -569,7 +574,7 @@ export default function DataTransformation() {
       geo_column: primaryGeo,
       date_column: primaryDate,
       dependent_variable: primaryDep,
-      config: cfg,
+      config: { ...cfg, Lags: cfg["Adstock Horizon"] ?? 2 },
       derived_variables: derivedVars,
       pop_column: primaryPop || undefined,
     })
@@ -580,14 +585,14 @@ export default function DataTransformation() {
         console.error("Preview failed:", err);
       })
       .finally(() => setValidationLoading(false));
-  }, [selectedValidationVar, activeCsv, transformConfig, derivedVars, depVar, geoCol, dateCol, popCol]);
+  }, [selectedValidationVar, activeCsv, transformConfig, derivedVars, selDependent, selCrossSectional, selTime, selBaseline]);
 
   const handleProceedToModelling = async () => {
     await saveWorkflowSnapshot("MMM Modelling", "/modelling", {
       transformation: "completed",
       modelling: "in_progress",
     });
-    toast.success("Transformation layer saved! Proceeding to Modelling.");
+    toast.success("Proceeding to Module 6: Modelling.");
     navigate("/modelling");
   };
 
@@ -595,13 +600,13 @@ export default function DataTransformation() {
     <div className="space-y-6">
       <PageHeader
         title="Module 5: Data Transformation & Feature Engineering"
-        subtitle="Apply Normalization, Adstock decay, Horizon smoothing, Saturation curves (Log/Power), and manage versioned transformation sets"
+        subtitle="Configure Normalization, Adstock decay, Adstock Horizon, Pure Lags, and Saturation curves based on Ingestion column categories"
         icon="⚙️"
       />
 
       {!activeCsv && <Alert type="warning">No dataset available. Complete Data Ingestion and Stitching first.</Alert>}
 
-      {/* ─── Header: Active ARD & Version Selector ────────────────────────── */}
+      {/* ARD Table & Version Selector */}
       <Card title="Active ARD Dataset & Transformation Set Version">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
@@ -627,7 +632,7 @@ export default function DataTransformation() {
 
           <div>
             <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-              Select Active Transformation Set / Version:
+              Select Active Transformation Version:
             </label>
             <select
               value={activeSetIndex}
@@ -640,7 +645,7 @@ export default function DataTransformation() {
               ) : (
                 savedSets.map((s, idx) => (
                   <option key={idx} value={idx}>
-                    🏷️ {s.name} ({s.configs?.length || 0} channels • {new Date(s.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})
+                    🏷️ {s.name} ({s.grain || "HCP"} • {s.configs?.length || 0} channels)
                   </option>
                 ))
               )}
@@ -649,195 +654,138 @@ export default function DataTransformation() {
         </div>
       </Card>
 
-      {/* ─── Step 1: Key Columns (Interactive Multi-Select Boxes) ──────────── */}
-      <Card title="Step 1: Key Columns & Model Target">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          <ColumnSelectBox
-            label="Date Column(s)"
-            options={allCols}
-            value={dateCol}
-            onChange={setDateCol}
+      {/* Step 1: 5 Ingestion Categories */}
+      <Card title="Step 1: Column Categorization (From Ingestion)">
+        <p className="text-xs text-slate-500 mb-4">
+          Variables are categorized according to their Ingestion roles. You can adjust channel inclusions or switch model formulation below.
+        </p>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <IngestionCategoryBox
+            title="1. Time Variable"
+            subtitle="Dates, Weeks, Periods"
+            columns={timeCols}
+            selected={selTime}
+            onToggle={(c) => toggleCategorySelection(c, selTime, setSelTime)}
+            colorBadge="bg-blue-100 text-blue-800"
           />
 
-          <ColumnSelectBox
-            label="Geo Column(s) (HCP / DMA Keys)"
-            options={allCols}
-            value={geoCol}
-            onChange={setGeoCol}
+          <IngestionCategoryBox
+            title="2. Cross-sectional Variable"
+            subtitle="HCP IDs, DMA, Zip, Region Keys"
+            columns={crossCols}
+            selected={selCrossSectional}
+            onToggle={(c) => toggleCategorySelection(c, selCrossSectional, setSelCrossSectional)}
+            colorBadge="bg-purple-100 text-purple-800"
           />
 
-          <ColumnSelectBox
-            label="Dependent Variable(s) (Sales KPI)"
-            options={allCols}
-            value={depVar}
-            onChange={setDepVar}
-            isDanger={true}
-            helperText="* Selected sales KPI(s) are strictly locked from transformation."
+          <IngestionCategoryBox
+            title="3. Dependent Variable (KPI)"
+            subtitle="Sales, TRx, NRx, Revenue"
+            columns={depCols}
+            selected={selDependent}
+            onToggle={(c) => toggleCategorySelection(c, selDependent, setSelDependent)}
+            colorBadge="bg-red-100 text-red-800"
           />
 
-          <ColumnSelectBox
-            label="ZIP Column(s) (Optional)"
-            options={allCols}
-            value={zipCol}
-            onChange={setZipCol}
+          <IngestionCategoryBox
+            title="4. Independent Promotions"
+            subtitle="Calls, Details, Spend, Emails, Media"
+            columns={promoCols}
+            selected={selPromotions}
+            onToggle={(c) => toggleCategorySelection(c, selPromotions, setSelPromotions)}
+            colorBadge="bg-emerald-100 text-emerald-800"
           />
 
-          <ColumnSelectBox
-            label="DMA Column(s) (Optional)"
-            options={allCols}
-            value={dmaCol}
-            onChange={setDmaCol}
+          <IngestionCategoryBox
+            title="5. Baseline Variables"
+            subtitle="Target Population, Macro, Universe"
+            columns={baseCols}
+            selected={selBaseline}
+            onToggle={(c) => toggleCategorySelection(c, selBaseline, setSelBaseline)}
+            colorBadge="bg-amber-100 text-amber-800"
           />
 
-          <ColumnSelectBox
-            label="Population / Universe Column(s)"
-            options={allCols}
-            value={popCol}
-            onChange={setPopCol}
-          />
-        </div>
+          {/* Model Formulation Controls */}
+          <div className="bg-brand-50/50 rounded-2xl border border-brand-200 p-4 flex flex-col justify-between">
+            <div>
+              <span className="text-xs font-bold text-brand-900 uppercase tracking-wider block mb-1">
+                Model Formulation &amp; KPI Lock
+              </span>
+              <p className="text-[11px] text-slate-600 mb-3">
+                Decide whether the Dependent Variable is transformed (Log-Log) or kept in linear units (Linear-Log).
+              </p>
 
-        <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between flex-wrap gap-2">
-          <label className="flex items-center gap-2 text-xs font-bold text-slate-700 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={addCarryover}
-              onChange={(e) => setAddCarryover(e.target.checked)}
-              className="rounded text-brand-600"
-            />
-            <span>Create Lagged Dependent Variable as <code>Carryover</code> (Lag 1)</span>
-          </label>
-          <span className="text-xs text-slate-400 font-mono">
-            {transformableCandidates.length} channel(s) eligible for transformation
-          </span>
+              <div className="space-y-2">
+                <label className="flex items-center gap-2 text-xs font-bold text-slate-800 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="modelSpec"
+                    value="linear_log"
+                    checked={modelSpec === "linear_log"}
+                    onChange={() => setModelSpec("linear_log")}
+                    className="accent-[#001E96]"
+                  />
+                  <span>Linear-Log (Keep Sales KPI Linear / Un-transformed)</span>
+                </label>
+
+                <label className="flex items-center gap-2 text-xs font-bold text-slate-800 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="modelSpec"
+                    value="log_log"
+                    checked={modelSpec === "log_log"}
+                    onChange={() => setModelSpec("log_log")}
+                    className="accent-[#001E96]"
+                  />
+                  <span>Log-Log (Transform Sales KPI with Log Curve)</span>
+                </label>
+              </div>
+            </div>
+
+            <label className="flex items-center gap-2 text-xs font-bold text-slate-700 cursor-pointer pt-3 border-t border-brand-200/60 mt-3">
+              <input
+                type="checkbox"
+                checked={addCarryover}
+                onChange={(e) => setAddCarryover(e.target.checked)}
+                className="rounded text-brand-600"
+              />
+              <span>Generate <code>Carryover</code> (Lag 1 of Sales KPI)</span>
+            </label>
+          </div>
         </div>
       </Card>
 
-      {/* ─── Step 2: Variable Selection Grid ──────────────────────────────── */}
-      <Card title="Step 2: Variable Selection Grid">
-        <div className="flex justify-between items-center mb-3 flex-wrap gap-2">
-          <p className="text-xs text-slate-500">
-            Check the marketing variables you want to transform. Target KPI(s) are visible but locked to prevent transformation.
-          </p>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={selectAllVariables}
-              className="text-xs font-bold text-brand-600 hover:underline"
-            >
-              Select All Eligible
-            </button>
-            <span className="text-slate-300">|</span>
-            <button
-              type="button"
-              onClick={deselectAllVariables}
-              className="text-xs font-bold text-slate-400 hover:text-slate-600"
-            >
-              Deselect All
-            </button>
+      {/* Step 2: Transformation Configuration Table */}
+      {transformConfig.length > 0 && (
+        <Card title="Step 2: Transformation Configuration Table">
+          <div className="flex justify-between items-center mb-4 flex-wrap gap-3">
+            <p className="text-xs text-slate-500">
+              Configure Normalization, Adstock Decay, Adstock Horizon (decay span), Pure Lag (delay), and Saturation Curves. Click <strong>ℹ️</strong> on any channel for expert guidance.
+            </p>
+
             <Btn
               variant="outline"
               onClick={() => setDerivedModalOpen(true)}
-              className="text-xs py-1 px-3 ml-2"
+              className="text-xs py-1.5 px-3"
             >
-              ➕ Add Derived Variable
+              ➕ Add Derived Channel
             </Btn>
-          </div>
-        </div>
-
-        <div className="overflow-x-auto rounded-xl border border-slate-200 max-h-64">
-          <table className="w-full text-xs text-left bg-white">
-            <thead className="bg-slate-50 border-b border-slate-200 text-slate-700 sticky top-0 font-bold z-10">
-              <tr>
-                <th className="px-4 py-2.5 w-12 text-center">Select</th>
-                <th className="px-4 py-2.5">Variable Name</th>
-                <th className="px-4 py-2.5">Grain</th>
-                <th className="px-4 py-2.5">Type</th>
-                <th className="px-4 py-2.5">Transformation Status</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {classifiedVariables.map((v) => {
-                const isChecked = selectedVariables.includes(v.name);
-
-                return (
-                  <tr
-                    key={v.name}
-                    className={v.isSales ? "bg-red-50/40" : isChecked ? "bg-brand-50/20" : "hover:bg-slate-50"}
-                  >
-                    <td className="px-4 py-2 text-center">
-                      <input
-                        type="checkbox"
-                        checked={isChecked && !v.isSales && !v.isKey}
-                        disabled={v.isSales || v.isKey}
-                        onChange={() => toggleVariableSelection(v.name)}
-                        className="accent-[#001E96] h-4 w-4 cursor-pointer disabled:cursor-not-allowed"
-                      />
-                    </td>
-                    <td className="px-4 py-2 font-bold text-slate-800">
-                      {v.name}
-                    </td>
-                    <td className="px-4 py-2">
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                        v.grain === "HCP" ? "bg-blue-100 text-blue-800" : "bg-purple-100 text-purple-800"
-                      }`}>
-                        {v.grain}
-                      </span>
-                    </td>
-                    <td className="px-4 py-2 text-slate-500 font-mono">{v.type}</td>
-                    <td className="px-4 py-2">
-                      {v.isSales ? (
-                        <span className="text-red-700 font-bold text-[11px] flex items-center gap-1">
-                          🔒 Sales (Dependent Variable) — <em>Transform Disabled</em>
-                        </span>
-                      ) : v.isKey ? (
-                        <span className="text-slate-400 text-[11px]">ID / Group Key (Preserved)</span>
-                      ) : isChecked ? (
-                        <span className="text-emerald-600 font-bold text-[11px]">✓ Included in Step 3</span>
-                      ) : (
-                        <span className="text-slate-400 text-[11px]">Excluded</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-
-      {/* ─── Step 3: Transformation Configuration Table (Standard + Derived) ── */}
-      {transformConfig.length > 0 && (
-        <Card title="Step 3: Transformation Configuration Table">
-          <div className="flex justify-between items-center mb-4 flex-wrap gap-3">
-            <p className="text-xs text-slate-500">
-              Configure Normalization, Adstock Decay, Horizon smoothing (weeks), and Functional Saturation (Log/Power) per channel.
-            </p>
-
-            <div className="flex gap-2">
-              <Btn
-                onClick={handleAutoSelectAll}
-                disabled={autoSelecting}
-                className="text-xs py-2 bg-[#1ABC9C] hover:bg-[#16a085]"
-              >
-                {autoSelecting ? "Evaluating Fit Grids…" : "🚀 Auto-Select All Variables"}
-              </Btn>
-            </div>
           </div>
 
           <div className="overflow-x-auto rounded-xl border border-slate-200 max-h-[500px]">
             <table className="w-full text-xs text-left bg-white">
               <thead className="bg-slate-50 border-b border-slate-200 text-slate-700 sticky top-0 z-10 font-bold">
                 <tr>
-                  <th className="px-3 py-3">Variable</th>
-                  <th className="px-3 py-3">Grain</th>
+                  <th className="px-3 py-3">Channel Name</th>
+                  <th className="px-3 py-3">Category</th>
                   <th className="px-3 py-3">Normalization</th>
                   <th className="px-3 py-3">Adstock (Decay)</th>
-                  <th className="px-3 py-3">Horizon (Time Horizon)</th>
+                  <th className="px-3 py-3">Adstock Horizon</th>
+                  <th className="px-3 py-3">Lag (Shift)</th>
                   <th className="px-3 py-3">Saturation Curve</th>
                   <th className="px-3 py-3">Param (k / p)</th>
-                  <th className="px-3 py-3">Source</th>
-                  <th className="px-3 py-3 text-right">Actions</th>
+                  <th className="px-3 py-3 text-right">Guidance &amp; Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -845,12 +793,14 @@ export default function DataTransformation() {
                   const isPower = row["Saturation Function"] === "Power";
                   const isLog = row["Saturation Function"] === "Log";
                   const isDerived = row.is_derived;
+                  const isDep = row.is_dependent;
 
                   return (
-                    <tr key={row["Channel Name"]} className={isDerived ? "bg-amber-50/40 hover:bg-amber-50/70" : "hover:bg-slate-50"}>
+                    <tr key={row["Channel Name"]} className={isDerived ? "bg-amber-50/40" : isDep ? "bg-red-50/30" : "hover:bg-slate-50"}>
                       <td className="px-3 py-2.5 font-bold text-slate-800 whitespace-nowrap">
                         <div className="flex items-center gap-1.5">
-                          {isDerived && <span className="text-amber-600 font-bold" title="Arithmetic Derived Channel">⚡</span>}
+                          {isDerived && <span className="text-amber-600 font-bold" title="Derived Variable">⚡</span>}
+                          {isDep && <span className="text-red-600 font-bold" title="Dependent Variable">🎯</span>}
                           <span>{row["Channel Name"]}</span>
                         </div>
                         {isDerived && row.formula && (
@@ -863,16 +813,15 @@ export default function DataTransformation() {
                       <td className="px-3 py-2">
                         <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                           isDerived
-                            ? "bg-amber-100 text-amber-800 border border-amber-200"
-                            : row["Grain"] === "HCP"
-                            ? "bg-blue-100 text-blue-800"
-                            : "bg-purple-100 text-purple-800"
+                            ? "bg-amber-100 text-amber-800"
+                            : isDep
+                            ? "bg-red-100 text-red-800"
+                            : "bg-emerald-100 text-emerald-800"
                         }`}>
-                          {row["Grain"] || "HCP"}
+                          {row["Grain"] || "Promo"}
                         </span>
                       </td>
 
-                      {/* Normalization Dropdown */}
                       <td className="px-3 py-2">
                         <select
                           value={row["Normalization"] || "none"}
@@ -887,7 +836,6 @@ export default function DataTransformation() {
                         </select>
                       </td>
 
-                      {/* Adstock Decay */}
                       <td className="px-3 py-2">
                         <select
                           value={row["Adstock"] ?? 0.5}
@@ -902,14 +850,13 @@ export default function DataTransformation() {
                         </select>
                       </td>
 
-                      {/* Time Horizon (weeks) */}
                       <td className="px-3 py-2">
                         <select
-                          value={row["Lags"] ?? 1}
-                          onChange={(e) => updateConfigRow(row["Channel Name"], "Lags", parseInt(e.target.value))}
+                          value={row["Adstock Horizon"] ?? 2}
+                          onChange={(e) => updateConfigRow(row["Channel Name"], "Adstock Horizon", parseInt(e.target.value))}
                           className="border border-slate-200 rounded-lg px-2 py-1 text-xs bg-white font-semibold"
                         >
-                          {HORIZON_OPTIONS.map((h) => (
+                          {ADSTOCK_HORIZON_OPTIONS.map((h) => (
                             <option key={h.value} value={h.value}>
                               {h.label}
                             </option>
@@ -917,7 +864,20 @@ export default function DataTransformation() {
                         </select>
                       </td>
 
-                      {/* Saturation Function */}
+                      <td className="px-3 py-2">
+                        <select
+                          value={row["Lag"] ?? 0}
+                          onChange={(e) => updateConfigRow(row["Channel Name"], "Lag", parseInt(e.target.value))}
+                          className="border border-slate-200 rounded-lg px-2 py-1 text-xs bg-white font-semibold"
+                        >
+                          {PURE_LAG_OPTIONS.map((l) => (
+                            <option key={l.value} value={l.value}>
+                              {l.label}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+
                       <td className="px-3 py-2">
                         <select
                           value={row["Saturation Function"] || "None"}
@@ -930,7 +890,6 @@ export default function DataTransformation() {
                         </select>
                       </td>
 
-                      {/* Parameter k / p */}
                       <td className="px-3 py-2">
                         {isPower ? (
                           <div className="flex items-center gap-1">
@@ -963,36 +922,22 @@ export default function DataTransformation() {
                         )}
                       </td>
 
-                      {/* Source Badge (AUTO vs MANUAL) */}
-                      <td className="px-3 py-2">
-                        {row.auto_selected ? (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-100 text-emerald-800">
-                            AUTO
-                          </span>
-                        ) : (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-600">
-                            MANUAL
-                          </span>
-                        )}
-                      </td>
-
-                      {/* Actions */}
                       <td className="px-3 py-2 text-right whitespace-nowrap">
                         <div className="flex items-center justify-end gap-1.5">
                           <button
                             type="button"
-                            onClick={() => handleAutoSelectSingle(row["Channel Name"])}
-                            className="px-2.5 py-1 rounded bg-brand-50 hover:bg-brand-100 text-[11px] font-bold text-brand-700"
-                            title="Auto-select single variable"
+                            onClick={() => handleOpenInfo(row["Channel Name"])}
+                            className="w-6 h-6 rounded-full bg-brand-50 hover:bg-brand-100 text-brand-700 font-black text-xs flex items-center justify-center border border-brand-200 transition-all shadow-sm"
+                            title="View GPT-generated transformation guidance"
                           >
-                            ⚡ Auto
+                            ℹ️
                           </button>
                           {isDerived && (
                             <button
                               type="button"
                               onClick={() => removeDerivedVariable(row["Channel Name"])}
                               className="px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-[11px] font-bold text-red-600"
-                              title="Delete derived variable"
+                              title="Delete derived channel"
                             >
                               ✕
                             </button>
@@ -1006,14 +951,14 @@ export default function DataTransformation() {
             </table>
           </div>
 
-          {/* Save & Apply Set Controls */}
           <div className="mt-6 pt-4 border-t border-slate-200 flex items-center justify-between flex-wrap gap-4">
             <div className="flex items-center gap-2">
-              <label className="text-xs font-bold text-slate-700">Transformation Set Name:</label>
+              <label className="text-xs font-bold text-slate-700">Transformation Dataset Name:</label>
               <input
                 type="text"
                 value={setNameInput}
                 onChange={(e) => setSetNameInput(e.target.value)}
+                placeholder="e.g. HCP FINAL ARD"
                 className="text-xs font-bold border border-slate-200 rounded-lg px-3 py-2 bg-white w-64"
               />
             </div>
@@ -1031,9 +976,7 @@ export default function DataTransformation() {
 
       {loading && <Spinner label="Applying transformations and computing diagnostics…" />}
 
-      {/* ═══════════════════════════════════════════════════════════════════════ */}
-      {/* ─── 1st: POST-TRANSFORMATION MULTICOLLINEARITY MATRIX ───────────────── */}
-      {/* ═══════════════════════════════════════════════════════════════════════ */}
+      {/* 1st: Post-Transformation Multicollinearity Matrix */}
       {result && (
         <Card title="1. Post-Transformation Multicollinearity Matrix">
           <p className="text-xs text-slate-500 mb-4">
@@ -1085,9 +1028,7 @@ export default function DataTransformation() {
         </Card>
       )}
 
-      {/* ═══════════════════════════════════════════════════════════════════════ */}
-      {/* ─── 2nd: TRANSFORMED DATASET PREVIEW (FIRST 10 ROWS ONLY) ──────────── */}
-      {/* ═══════════════════════════════════════════════════════════════════════ */}
+      {/* 2nd: Transformed Dataset Preview */}
       {result && (
         <Card title="2. Transformed Dataset Preview">
           <div className="flex items-center justify-between mb-3">
@@ -1099,48 +1040,13 @@ export default function DataTransformation() {
         </Card>
       )}
 
-      {/* ═══════════════════════════════════════════════════════════════════════ */}
-      {/* ─── 3rd: DEDICATED PREVIEW & VALIDATION SECTION ──────────────────────── */}
-      {/* ═══════════════════════════════════════════════════════════════════════ */}
+      {/* 3rd: Single Variable Preview & Validation */}
       {transformConfig.length > 0 && (
         <Card title="3. Preview & Validation">
           <p className="text-xs text-slate-500 mb-5">
             Review the empirical impact of transformations, validate distribution compression, and inspect response shape against KPI before saving.
           </p>
 
-          {/* ─── Transformation Impact Summary Cards ───────────────────────── */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
-            <div className="bg-brand-50 p-3 rounded-xl text-center border border-brand-100">
-              <div className="text-xl font-bold text-brand-700">{transformConfig.length}</div>
-              <div className="text-[10px] text-brand-600 font-bold uppercase mt-0.5">Variables Transformed</div>
-            </div>
-            <div className="bg-emerald-50 p-3 rounded-xl text-center border border-emerald-100">
-              <div className="text-xl font-bold text-emerald-700">
-                {transformConfig.filter((c) => c.auto_selected).length}
-              </div>
-              <div className="text-[10px] text-emerald-600 font-bold uppercase mt-0.5">Auto Selected</div>
-            </div>
-            <div className="bg-slate-50 p-3 rounded-xl text-center border border-slate-200">
-              <div className="text-xl font-bold text-slate-700">
-                {transformConfig.filter((c) => !c.auto_selected).length}
-              </div>
-              <div className="text-[10px] text-slate-500 font-bold uppercase mt-0.5">Manually Configured</div>
-            </div>
-            <div className="bg-purple-50 p-3 rounded-xl text-center border border-purple-100">
-              <div className="text-xl font-bold text-purple-700">{derivedVars.length}</div>
-              <div className="text-[10px] text-purple-600 font-bold uppercase mt-0.5">Derived Variables</div>
-            </div>
-            <div className="bg-amber-50 p-3 rounded-xl text-center border border-amber-100">
-              <div className="text-xl font-bold text-amber-700">{transCorrMatrix?.pairs?.length || 0}</div>
-              <div className="text-[10px] text-amber-600 font-bold uppercase mt-0.5">High Corr Pairs</div>
-            </div>
-            <div className="bg-slate-900 text-white p-3 rounded-xl text-center shadow-sm">
-              <div className="text-sm font-bold truncate">{setNameInput || "Set v1"}</div>
-              <div className="text-[10px] text-slate-300 uppercase mt-0.5 font-mono">Active Version</div>
-            </div>
-          </div>
-
-          {/* ─── Variable Selector Dropdown ────────────────────────────────── */}
           <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 mb-6 flex items-center justify-between gap-4 flex-wrap">
             <div className="flex-1 min-w-[280px]">
               <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
@@ -1153,20 +1059,17 @@ export default function DataTransformation() {
               >
                 {transformConfig.map((c) => (
                   <option key={c["Channel Name"]} value={c["Channel Name"]}>
-                    {c["Channel Name"]} ({c["Grain"] || "HCP"} • {c["Normalization"]} • {c["Saturation Function"] || "Linear"})
+                    {c["Channel Name"]} ({c["Grain"] || "Promo"} • {c["Normalization"]} • {c["Saturation Function"] || "Linear"})
                   </option>
                 ))}
               </select>
             </div>
-            {validationLoading && <span className="text-xs text-brand-600 font-semibold animate-pulse">Calculating metrics…</span>}
           </div>
 
           {validationLoading && <Spinner label="Loading before/after validation metrics..." />}
 
-          {/* Validation Metrics Display */}
           {validationData && !validationLoading && (
             <div className="space-y-6">
-              {/* Row 1: Transformation Details & Summary Statistics */}
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
                 <div className="lg:col-span-5 bg-slate-50 p-5 rounded-2xl border border-slate-200 space-y-3">
                   <span className="text-xs font-bold text-brand-800 uppercase tracking-wider block border-b border-slate-200 pb-2">
@@ -1178,7 +1081,7 @@ export default function DataTransformation() {
                       <strong className="text-slate-800">{validationData.config?.Normalization || "None"}</strong>
                     </div>
                     <div>
-                      <span className="text-slate-400 block text-[10px] uppercase font-bold">Adstock Decay (α)</span>
+                      <span className="text-slate-400 block text-[10px] uppercase font-bold">Adstock Decay</span>
                       <strong className="text-slate-800">{validationData.config?.Adstock ?? 0.5}</strong>
                     </div>
                     <div>
@@ -1188,24 +1091,6 @@ export default function DataTransformation() {
                     <div>
                       <span className="text-slate-400 block text-[10px] uppercase font-bold">Saturation Transform</span>
                       <strong className="text-slate-800">{validationData.config?.["Saturation Function"] || "Linear"}</strong>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 block text-[10px] uppercase font-bold">Param (k / p)</span>
-                      <strong className="text-slate-800">
-                        {validationData.config?.["Saturation Function"] === "Power"
-                          ? `p = ${validationData.config?.["Power (k)"] ?? 0.5}`
-                          : validationData.config?.["Saturation Function"] === "Log"
-                          ? `k = ${validationData.config?.["Log (k)"] ?? 1.0}`
-                          : "—"}
-                      </strong>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 block text-[10px] uppercase font-bold">Configuration Source</span>
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                        validationData.config?.auto_selected ? "bg-emerald-100 text-emerald-800" : "bg-slate-200 text-slate-700"
-                      }`}>
-                        {validationData.config?.auto_selected ? "Auto Selected" : "Manual"}
-                      </span>
                     </div>
                   </div>
                 </div>
@@ -1237,14 +1122,13 @@ export default function DataTransformation() {
                 </div>
               </div>
 
-              {/* Row 2: Side-by-Side Distribution Comparison */}
               <div>
                 <span className="text-xs font-bold text-slate-700 uppercase tracking-wider block mb-2">
-                  Variable Distribution Comparison (Compression & Skewness Check):
+                  Distribution Comparison:
                 </span>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="bg-white p-3 rounded-2xl border border-slate-200">
-                    <span className="text-[11px] font-bold text-slate-600 block mb-2">Original Distribution (Raw Histogram)</span>
+                    <span className="text-[11px] font-bold text-slate-600 block mb-2">Original Distribution (Raw)</span>
                     <ResponsiveContainer width="100%" height={200}>
                       <BarChart data={validationData.raw_hist}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
@@ -1257,7 +1141,7 @@ export default function DataTransformation() {
                   </div>
 
                   <div className="bg-white p-3 rounded-2xl border border-slate-200">
-                    <span className="text-[11px] font-bold text-brand-700 block mb-2">Transformed Distribution (Normalized & Saturated)</span>
+                    <span className="text-[11px] font-bold text-brand-700 block mb-2">Transformed Distribution</span>
                     <ResponsiveContainer width="100%" height={200}>
                       <BarChart data={validationData.trans_hist}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
@@ -1271,7 +1155,6 @@ export default function DataTransformation() {
                 </div>
               </div>
 
-              {/* Row 3: Relationship with KPI (Poor Man's Curve) Before vs After */}
               {validationData.raw_curve?.binned_curve?.length > 0 && validationData.trans_curve?.binned_curve?.length > 0 && (
                 <div>
                   <span className="text-xs font-bold text-slate-700 uppercase tracking-wider block mb-2">
@@ -1280,7 +1163,7 @@ export default function DataTransformation() {
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="bg-white p-3 rounded-2xl border border-slate-200">
                       <span className="text-[11px] font-bold text-slate-600 block mb-1">
-                        Before: {validationData.channel} vs {Array.isArray(depVar) ? depVar[0] : depVar} ({validationData.raw_curve.shape_indicator})
+                        Before: {validationData.channel} vs {selDependent[0]} ({validationData.raw_curve.shape_indicator})
                       </span>
                       <ResponsiveContainer width="100%" height={220}>
                         <LineChart data={validationData.raw_curve.binned_curve}>
@@ -1295,7 +1178,7 @@ export default function DataTransformation() {
 
                     <div className="bg-white p-3 rounded-2xl border border-slate-200">
                       <span className="text-[11px] font-bold text-brand-700 block mb-1">
-                        After: {validationData.channel} (Transformed) vs {Array.isArray(depVar) ? depVar[0] : depVar} ({validationData.trans_curve.shape_indicator})
+                        After: {validationData.channel} (Transformed) vs {selDependent[0]} ({validationData.trans_curve.shape_indicator})
                       </span>
                       <ResponsiveContainer width="100%" height={220}>
                         <LineChart data={validationData.trans_curve.binned_curve}>
@@ -1315,7 +1198,7 @@ export default function DataTransformation() {
         </Card>
       )}
 
-      {/* ─── Bottom Actions Bar (Download Data / Save Config / Proceed) ────── */}
+      {/* Bottom Actions Bar */}
       <div className="bg-slate-900 text-white rounded-2xl p-5 flex items-center justify-between flex-wrap gap-4 shadow-xl">
         <div className="flex items-center gap-2">
           <label className="text-xs font-bold text-slate-300">Set Name:</label>
@@ -1328,16 +1211,6 @@ export default function DataTransformation() {
         </div>
 
         <div className="flex items-center gap-3 flex-wrap">
-          {result && (
-            <a
-              href={`data:text/csv;charset=utf-8,${encodeURIComponent(result.csv_data)}`}
-              download={`${(setNameInput || "transformed_data").replace(/\s+/g, "_")}.csv`}
-              className="px-4 py-2.5 rounded-xl text-xs font-bold bg-slate-800 text-slate-200 hover:bg-slate-700 transition-all flex items-center gap-1.5 border border-slate-700"
-            >
-              📥 Download Transformed Data
-            </a>
-          )}
-
           <Btn
             onClick={handleApplyTransformations}
             disabled={loading || !transformConfig.length}
@@ -1348,7 +1221,7 @@ export default function DataTransformation() {
 
           <Btn
             onClick={handleProceedToModelling}
-            disabled={!result}
+            disabled={!result && savedSets.length === 0}
             className="py-2.5 px-5 font-bold uppercase tracking-wider text-xs bg-[#1ABC9C] hover:bg-[#16a085]"
           >
             Proceed to Modeling →
@@ -1356,12 +1229,85 @@ export default function DataTransformation() {
         </div>
       </div>
 
-      {/* ─── MODAL: Derived Variable Builder ──────────────────────────────── */}
+      {/* Guidance Modal */}
+      {infoModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl max-w-xl w-full p-6 shadow-2xl space-y-4">
+            <div className="flex justify-between items-center border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <span className="text-xl">🤖</span>
+                <div>
+                  <h3 className="text-base font-black text-slate-800">
+                    Transformation Guidance: {infoChannelName}
+                  </h3>
+                  <p className="text-xs text-slate-400">GPT Parameter Recommendations &amp; Methodology</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setInfoModalOpen(false)}
+                className="text-slate-400 hover:text-slate-600 font-bold p-1 text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            {(() => {
+              const guide = getChannelGuidance(infoChannelName);
+              return (
+                <div className="space-y-4 text-xs">
+                  <div className="p-3 bg-brand-50 border border-brand-100 rounded-xl space-y-1">
+                    <span className="font-bold text-brand-900 block">Classified Channel Archetype:</span>
+                    <span className="text-brand-700 font-semibold">{guide.tacticType}</span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+                      <span className="text-slate-400 font-bold uppercase text-[10px] block">Recommended Adstock Decay</span>
+                      <strong className="text-slate-800 text-sm">{guide.adstockDecay}</strong>
+                    </div>
+                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+                      <span className="text-slate-400 font-bold uppercase text-[10px] block">Adstock Horizon</span>
+                      <strong className="text-slate-800 text-sm">{guide.adstockHorizon}</strong>
+                    </div>
+                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+                      <span className="text-slate-400 font-bold uppercase text-[10px] block">Pure Delay Lag</span>
+                      <strong className="text-slate-800 text-sm">{guide.pureLag}</strong>
+                    </div>
+                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+                      <span className="text-slate-400 font-bold uppercase text-[10px] block">Saturation Shape</span>
+                      <strong className="text-slate-800 text-sm">{guide.saturation}</strong>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5 p-3 bg-slate-50 border border-slate-200 rounded-xl">
+                    <span className="font-bold text-slate-800 block">Behavioral Rationale:</span>
+                    <p className="text-slate-600 leading-relaxed">{guide.rationale}</p>
+                  </div>
+
+                  <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-900">
+                    <span className="font-bold block mb-0.5">Recommended Table Setting:</span>
+                    <span>{guide.actionItem}</span>
+                  </div>
+                </div>
+              );
+            })()}
+
+            <div className="flex justify-end pt-2 border-t border-slate-100">
+              <Btn onClick={() => setInfoModalOpen(false)}>
+                Got it, Close
+              </Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Derived Variable Modal */}
       {derivedModalOpen && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4">
             <div className="flex justify-between items-center border-b border-slate-100 pb-3">
-              <h3 className="text-base font-black text-slate-800">Create Arithmetic Derived Variable</h3>
+              <h3 className="text-base font-black text-slate-800">Create Arithmetic Derived Channel</h3>
               <button
                 type="button"
                 onClick={() => setDerivedModalOpen(false)}
@@ -1402,7 +1348,7 @@ export default function DataTransformation() {
                   Select Source Variables:
                 </label>
                 <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto p-2 border border-slate-200 rounded-xl">
-                  {transformableCandidates.map((v) => {
+                  {allCols.map((v) => {
                     const isSel = selectedDerivedVars.includes(v);
                     return (
                       <button
@@ -1427,15 +1373,6 @@ export default function DataTransformation() {
                   })}
                 </div>
               </div>
-
-              {selectedDerivedVars.length > 0 && (
-                <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 text-xs">
-                  <span className="font-bold text-slate-700 block mb-1">Formula Preview:</span>
-                  <code className="text-brand-700 font-bold">
-                    {newDerivedName || "NEW_VAR"} = {selectedDerivedVars.join(` ${derivedOperator} `)}
-                  </code>
-                </div>
-              )}
             </div>
 
             <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">

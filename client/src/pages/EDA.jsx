@@ -1,23 +1,18 @@
 import React, { useState, useEffect, useMemo } from "react";
 import toast from "react-hot-toast";
+import { useNavigate } from "react-router-dom";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  BarChart, Bar, ScatterChart, Scatter, Legend
+  BarChart, Bar, ScatterChart, Scatter
 } from "recharts";
 import {
   edaStats, edaSparsity, edaPoorMansCurve, edaDetectOutliers, edaRemoveOutliers,
-  edaTrendRollup, edaHistogram, edaScatter, correlationMatrix, computeVIF,
+  edaHistogram, edaScatter, correlationMatrix, computeVIF,
   getHighCorrPairs, previewRemoval, applyRemoval, findClusters, applyCombination,
   v2ListArds, v2GetCsv, problemMessage
 } from "../services/api";
 import { useAppState } from "../context/AppContext";
 import { PageHeader, Card, Btn, Select, Alert, Spinner, DataTable } from "../components/UI";
-
-const PALETTE = [
-  "#001E96", "#1ABC9C", "#F59E0B", "#EF4444", "#8B5CF6", 
-  "#06B6D4", "#EC4899", "#84CC16", "#10B981", "#6366F1",
-  "#F97316", "#14B8A6", "#A855F7", "#3B82F6", "#E11D48"
-];
 
 function CorrelationHeatmap({ matrix, columns, threshold = 0.7, onCellClick }) {
   if (!matrix || !columns || !columns.length) return null;
@@ -92,6 +87,7 @@ function CorrelationHeatmap({ matrix, columns, threshold = 0.7, onCellClick }) {
 }
 
 export default function EDA() {
+  const navigate = useNavigate();
   const { state, setField, saveWorkflowSnapshot } = useAppState();
   const workflowId = state.workflowId;
 
@@ -138,10 +134,6 @@ export default function EDA() {
       })
       .catch((err) => toast.error(problemMessage(err, "Failed to load ARD data")));
   }, [workflowId, selectedArdId]);
-
-  const activeArdObj = useMemo(() => {
-    return ardList.find((a) => a.id === selectedArdId) || null;
-  }, [ardList, selectedArdId]);
 
   const activeCsv = useMemo(() => {
     if (selectedArdId && loadedCsvMap[selectedArdId]) {
@@ -221,7 +213,7 @@ export default function EDA() {
     }
   }, [activeCsv, dateCol, geoCol]);
 
-  // ─── TAB 1: SUMMARY STATS ─────────────────────────────────────────────────
+  // ─── TAB 1: SUMMARY STATS & SPARSITY ──────────────────────────────────────
   const [sortField, setSortField] = useState("variable");
   const [sortAsc, setSortAsc] = useState(true);
   const [searchVar, setSearchVar] = useState("");
@@ -261,70 +253,11 @@ export default function EDA() {
     return list;
   }, [statsResult, sparsityMap, sortField, sortAsc, searchVar]);
 
-  // ─── TAB 2: TIME TRENDS (CRISP LINE GRAPH + SCATTER) ─────────────────────
-  const [trendPeriod, setTrendPeriod] = useState("week");
-  const [selectedTrendMetrics, setSelectedTrendMetrics] = useState([]);
-  const [trendRollupData, setTrendRollupData] = useState([]);
-  const [indexedView, setIndexedView] = useState(false);
-
-  const [trendScatterX, setTrendScatterX] = useState("");
-  const [trendScatterY, setTrendScatterY] = useState("");
-  const [trendScatterData, setTrendScatterData] = useState(null);
-  const [trendScatterLoading, setTrendScatterLoading] = useState(false);
-
-  useEffect(() => {
-    if (statsResult?.numeric_cols?.length) {
-      const activeNumeric = statsResult.numeric_cols;
-      const valid = selectedTrendMetrics.filter((m) => activeNumeric.includes(m));
-      if (valid.length > 0) {
-        setSelectedTrendMetrics(valid);
-      } else {
-        setSelectedTrendMetrics(activeNumeric.slice(0, 2));
-      }
-
-      if (!trendScatterX) setTrendScatterX(activeNumeric.find((c) => c !== kpiCol) || activeNumeric[0] || "");
-      if (!trendScatterY) setTrendScatterY(kpiCol || activeNumeric[0] || "");
-    }
-  }, [statsResult, kpiCol]);
-
-  useEffect(() => {
-    if (activeMainTab === "trends" && activeCsv && dateCol && selectedTrendMetrics.length > 0) {
-      edaTrendRollup({ csv_data: activeCsv, date_column: dateCol, metric_columns: selectedTrendMetrics, period: trendPeriod })
-        .then((res) => setTrendRollupData(res.trend_data || []))
-        .catch(() => {});
-    }
-  }, [activeMainTab, activeCsv, dateCol, selectedTrendMetrics, trendPeriod]);
-
-  useEffect(() => {
-    if (activeMainTab === "trends" && activeCsv && trendScatterX && trendScatterY) {
-      setTrendScatterLoading(true);
-      edaScatter({ csv_data: activeCsv, x_column: trendScatterX, y_column: trendScatterY })
-        .then((res) => setTrendScatterData(res))
-        .catch(() => {})
-        .finally(() => setTrendScatterLoading(false));
-    }
-  }, [activeMainTab, activeCsv, trendScatterX, trendScatterY]);
-
-  const displayTrendData = useMemo(() => {
-    if (!trendRollupData.length) return [];
-    if (!indexedView) return trendRollupData;
-    const baseRow = trendRollupData[0];
-    return trendRollupData.map((row) => {
-      const newRow = { date: row.date };
-      selectedTrendMetrics.forEach((m) => {
-        const baseVal = baseRow[m] || 1;
-        newRow[m] = baseVal !== 0 ? ((row[m] || 0) / baseVal) * 100 : 100;
-      });
-      return newRow;
-    });
-  }, [trendRollupData, indexedView, selectedTrendMetrics]);
-
-  // ─── TAB 3: DISTRIBUTIONS & OUTLIERS (CUSTOM BUCKET WIDTH & PERCENTILES) ─
+  // ─── TAB 2: DISTRIBUTIONS & OUTLIERS ──────────────────────────────────────
   const [distCol, setDistCol] = useState("");
   const [histData, setHistData] = useState(null);
   const [customBinWidth, setCustomBinWidth] = useState("");
   
-  // Outlier detection: Percentiles (default) vs Z-score
   const [outlierMethod, setOutlierMethod] = useState("percentile");
   const [lowerPercentile, setLowerPercentile] = useState("1.0");
   const [upperPercentile, setUpperPercentile] = useState("99.0");
@@ -423,7 +356,7 @@ export default function EDA() {
     handleRunEDA(backupCsv);
   };
 
-  // ─── TAB 4: RELATIONSHIPS & POOR MAN'S CURVE ──────────────────────────────
+  // ─── TAB 3: POOR MAN'S CURVE ──────────────────────────────────────────────
   const [relX, setRelX] = useState("");
   const [relY, setRelY] = useState(kpiCol || "");
   const [poorManCurve, setPoorManCurve] = useState(null);
@@ -449,7 +382,7 @@ export default function EDA() {
     }
   }, [activeMainTab, activeCsv, relX, relY]);
 
-  // ─── TAB 5: CORRELATION & MULTICOLLINEARITY ───────────────────────────────
+  // ─── TAB 4: CORRELATION, MULTICOLLINEARITY & BIVARIATE EXPLORER ────────────
   const [corrSubTab, setCorrSubTab] = useState("analysis");
   const [corrSelectedCols, setCorrSelectedCols] = useState([]);
   const [corrKpiTarget, setCorrKpiTarget] = useState(kpiCol || "");
@@ -458,6 +391,12 @@ export default function EDA() {
   const [vifTable, setVifTable] = useState(null);
   const [vifLoading, setVifLoading] = useState(false);
   const [corrThreshold, setCorrThreshold] = useState(0.7);
+
+  // Relocated Bivariate Relationship Explorer state
+  const [bivX, setBivX] = useState("");
+  const [bivY, setBivY] = useState("");
+  const [bivData, setBivData] = useState(null);
+  const [bivLoading, setBivLoading] = useState(false);
 
   const [removalThreshold, setRemovalThreshold] = useState("0.75");
   const [removalPreview, setRemovalPreview] = useState(null);
@@ -481,6 +420,8 @@ export default function EDA() {
       if (!corrKpiTarget) {
         setCorrKpiTarget(kpiCol || activeNumeric[0]);
       }
+      if (!bivX) setBivX(activeNumeric.find((c) => c !== kpiCol) || activeNumeric[0] || "");
+      if (!bivY) setBivY(kpiCol || activeNumeric[0] || "");
     }
   }, [statsResult]);
 
@@ -508,6 +449,16 @@ export default function EDA() {
       fetchCorrelation();
     }
   }, [activeMainTab, corrThreshold, activeCsv, corrSelectedCols]);
+
+  useEffect(() => {
+    if (activeMainTab === "correlation" && activeCsv && bivX && bivY) {
+      setBivLoading(true);
+      edaScatter({ csv_data: activeCsv, x_column: bivX, y_column: bivY })
+        .then((res) => setBivData(res))
+        .catch(() => {})
+        .finally(() => setBivLoading(false));
+    }
+  }, [activeMainTab, activeCsv, bivX, bivY]);
 
   const handleComputeVIF = async () => {
     if (corrSelectedCols.length < 2) return toast.error("Select at least 2 columns.");
@@ -542,8 +493,7 @@ export default function EDA() {
         toast.success(`Found ${res.total_pairs} correlated pair(s)`);
       }
     } catch (e) {
-      const msg = e.response?.data?.detail || e.response?.data?.error || e.message || "Removal scan failed";
-      toast.error(msg);
+      toast.error("Removal scan failed");
     } finally {
       setRemovalLoading(false);
     }
@@ -605,7 +555,7 @@ export default function EDA() {
         toast.success(`Found ${clusters.length} correlated 2-variable pair(s)`);
       }
     } catch (e) {
-      toast.error(e.response?.data?.detail || "Pair search failed");
+      toast.error("Pair search failed");
     } finally {
       setComboLoading(false);
     }
@@ -632,17 +582,16 @@ export default function EDA() {
       setFoundClusters([]);
       handleRunEDA(res.csv_data);
     } catch (e) {
-      toast.error(e.response?.data?.detail || e.message || "Combination failed");
+      toast.error("Combination failed");
     } finally {
       setComboLoading(false);
     }
   };
 
   const handleHeatmapJumpToScatter = (rowVar, colVar) => {
-    setRelX(colVar);
-    setRelY(rowVar);
-    setActiveMainTab("relationships");
-    toast(`Viewing scatter & response shape: ${colVar} vs ${rowVar}`, { icon: "🔍" });
+    setBivX(colVar);
+    setBivY(rowVar);
+    toast(`Explorer updated: ${colVar} vs ${rowVar}`, { icon: "🔍" });
   };
 
   const handleProceedToTransformation = async () => {
@@ -651,13 +600,14 @@ export default function EDA() {
       transformation: "in_progress",
     });
     toast.success("EDA Complete! Proceeding to Data Transformation.");
+    navigate("/transformation");
   };
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Module 4: Exploratory Data Analysis & Diagnostics"
-        subtitle="Sanity-check trends, inspect variable sparsity, preview response shapes, detect outliers, and analyze correlation"
+        subtitle="Inspect variable sparsity, control totals, preview response shapes, detect outliers, and analyze correlation"
         icon="🔍"
       />
 
@@ -665,7 +615,7 @@ export default function EDA() {
         <Alert type="warning">No dataset available. Complete Data Ingestion and Stitching first.</Alert>
       )}
 
-      {/* ─── ARD Registry Selector Bar ────────────────────────────────────────── */}
+      {/* ARD Selector */}
       <Card title="Active ARD Dataset Under Review">
         <div className="flex items-center justify-between gap-4 flex-wrap">
           <div className="flex-1 min-w-[280px]">
@@ -702,23 +652,15 @@ export default function EDA() {
             {loading ? "Calculating…" : "↻ Recalculate EDA"}
           </Btn>
         </div>
-
-        {activeArdObj && (
-          <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
-            <span>Currently reviewing: <strong className="text-slate-800">{activeArdObj.name}</strong></span>
-            <span className="font-mono">Created: {new Date(activeArdObj.createdAt).toLocaleDateString()}</span>
-          </div>
-        )}
       </Card>
 
-      {/* ─── 5 Unified Tabs ──────────────────────────────────────────────────── */}
+      {/* 4 Unified Tabs */}
       <div className="bg-slate-200/70 p-1.5 rounded-2xl flex items-center gap-1 shadow-inner border border-slate-200 overflow-x-auto scrollbar-thin">
         {[
           { id: "summary", label: "📊 1. Summary Stats & Sparsity" },
-          { id: "trends", label: "📈 2. Time Trends & Relationships" },
-          { id: "distributions", label: "📉 3. Distributions & Outliers" },
-          { id: "relationships", label: "🔗 4. Poor Man's Response Curve" },
-          { id: "correlation", label: "⚖️ 5. Correlation & Multicollinearity" },
+          { id: "distributions", label: "📉 2. Distributions & Outliers" },
+          { id: "relationships", label: "🔗 3. Poor Man's Response Curve" },
+          { id: "correlation", label: "⚖️ 4. Correlation, Multicollinearity & Explorer" },
         ].map((tab) => (
           <button
             key={tab.id}
@@ -737,7 +679,7 @@ export default function EDA() {
 
       {loading && <Spinner label="Running diagnostic calculations on ARD..." />}
 
-      {/* TAB 1: SUMMARY STATS */}
+      {/* TAB 1: SUMMARY STATS & SPARSITY */}
       {activeMainTab === "summary" && statsResult && (
         <Card title="Variable Health, Sparsity & Control Totals">
           <div className="flex justify-between items-center mb-4 flex-wrap gap-2">
@@ -818,144 +760,7 @@ export default function EDA() {
         </Card>
       )}
 
-      {/* TAB 2: TIME TRENDS (LINEAR LINE GRAPH + BIVARIATE SCATTER) */}
-      {activeMainTab === "trends" && (
-        <div className="space-y-6">
-          <Card title="Time-Series Trend Rollup (WoW & MoM)">
-            <div className="flex justify-between items-center mb-4 flex-wrap gap-3">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-bold text-slate-700">Aggregation:</span>
-                <button
-                  type="button"
-                  onClick={() => setTrendPeriod("week")}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold ${trendPeriod === "week" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-600"}`}
-                >
-                  Week-on-Week (WoW)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setTrendPeriod("month")}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold ${trendPeriod === "month" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-600"}`}
-                >
-                  Month-on-Month (MoM)
-                </button>
-              </div>
-
-              <label className="flex items-center gap-2 text-xs font-bold text-slate-700 cursor-pointer bg-slate-50 p-2 rounded-xl border border-slate-200">
-                <input type="checkbox" checked={indexedView} onChange={(e) => setIndexedView(e.target.checked)} className="rounded text-brand-600" />
-                Indexed View (Rebase to 100)
-              </label>
-            </div>
-
-            <div className="mb-4">
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                Select Metrics to Display on Trend Line ({selectedTrendMetrics.length} selected):
-              </label>
-              <div className="flex flex-wrap gap-1.5">
-                {(statsResult?.numeric_cols || []).map((col) => {
-                  const isSel = selectedTrendMetrics.includes(col);
-                  return (
-                    <button
-                      key={col}
-                      type="button"
-                      onClick={() => {
-                        if (isSel) {
-                          if (selectedTrendMetrics.length === 1) return toast.error("At least one metric must be selected.");
-                          setSelectedTrendMetrics(selectedTrendMetrics.filter((m) => m !== col));
-                        } else {
-                          setSelectedTrendMetrics([...selectedTrendMetrics, col]);
-                        }
-                      }}
-                      className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${
-                        isSel ? "bg-brand-600 text-white shadow-sm ring-2 ring-brand-400/30" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
-                      }`}
-                    >
-                      {col}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {displayTrendData.length > 0 && (
-              <ResponsiveContainer width="100%" height={340}>
-                {/* type="linear" removes curved smoothing and creates exact straight-line connections */}
-                <LineChart data={displayTrendData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                  <XAxis dataKey="date" tick={{ fontSize: 10 }} />
-                  <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => (indexedView ? `${v.toFixed(0)}` : Number(v).toLocaleString())} />
-                  <Tooltip formatter={(v) => (indexedView ? `${Number(v).toFixed(1)} (Index)` : Number(v).toLocaleString())} />
-                  <Legend verticalAlign="bottom" wrapperStyle={{ paddingTop: "14px", fontSize: "11px" }} />
-                  {selectedTrendMetrics.map((m, i) => (
-                    <Line
-                      key={m}
-                      type="linear"
-                      dataKey={m}
-                      stroke={PALETTE[i % PALETTE.length]}
-                      strokeWidth={2.5}
-                      dot={{ r: 3, fill: PALETTE[i % PALETTE.length] }}
-                      activeDot={{ r: 6 }}
-                      name={m}
-                    />
-                  ))}
-                </LineChart>
-              </ResponsiveContainer>
-            )}
-          </Card>
-
-          {/* 2nd Graph: Bivariate Scatter Plot for Relationship Between X and Y */}
-          <Card title="Variable Relationship Explorer (Scatter Plot & Linear Correlation)">
-            <p className="text-xs text-slate-500 mb-4">
-              Inspect the relationship between any marketing variable ($X$) and sales/response ($Y$). Displays observed data points, linear trendline, and Pearson correlation coefficient ($r$).
-            </p>
-
-            <div className="grid grid-cols-2 gap-4 mb-4">
-              <Select
-                label="Select Independent Variable (X Axis):"
-                value={trendScatterX}
-                onChange={setTrendScatterX}
-                options={(statsResult?.numeric_cols || []).filter((c) => c !== trendScatterY)}
-              />
-              <Select
-                label="Select Dependent / Response Variable (Y Axis):"
-                value={trendScatterY}
-                onChange={setTrendScatterY}
-                options={statsResult?.numeric_cols || columns}
-              />
-            </div>
-
-            {trendScatterLoading && <Spinner label="Loading scatter plot..." />}
-
-            {trendScatterData && !trendScatterLoading && (
-              <div className="space-y-3">
-                <div className="flex justify-between items-center bg-slate-50 p-2.5 rounded-xl border border-slate-200 text-xs">
-                  <span className="font-bold text-slate-700">
-                    {trendScatterX} vs {trendScatterY}
-                  </span>
-                  <span className="font-mono font-bold text-brand-700 bg-brand-50 px-2.5 py-1 rounded border border-brand-200">
-                    Pearson r = {trendScatterData.r}
-                  </span>
-                </div>
-
-                <ResponsiveContainer width="100%" height={320}>
-                  <ScatterChart margin={{ top: 10, right: 30, bottom: 20, left: 10 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                    <XAxis type="number" dataKey="x" name={trendScatterX} tick={{ fontSize: 10 }} label={{ value: trendScatterX, position: "insideBottom", offset: -10, fontSize: 11 }} />
-                    <YAxis type="number" dataKey="y" name={trendScatterY} tick={{ fontSize: 10 }} label={{ value: trendScatterY, angle: -90, position: "insideLeft", fontSize: 11 }} />
-                    <Tooltip formatter={(v) => Number(v).toFixed(2)} />
-                    <Scatter name="Data Points" data={trendScatterData.x.map((xv, i) => ({ x: xv, y: trendScatterData.y[i] }))} fill="#001E96" opacity={0.65} />
-                    {trendScatterData.trendline?.length > 0 && (
-                      <Scatter name="Linear Trendline" data={trendScatterData.trendline} line={{ stroke: "#EF4444", strokeWidth: 2 }} shape={() => null} />
-                    )}
-                  </ScatterChart>
-                </ResponsiveContainer>
-              </div>
-            )}
-          </Card>
-        </div>
-      )}
-
-      {/* TAB 3: DISTRIBUTIONS & OUTLIERS (CUSTOM BUCKET WIDTH & PERCENTILES) */}
+      {/* TAB 2: DISTRIBUTIONS & OUTLIERS */}
       {activeMainTab === "distributions" && (
         <div className="space-y-6">
           <Card title="Variable Distribution & Histogram Customization">
@@ -1011,7 +816,7 @@ export default function EDA() {
             )}
           </Card>
 
-          {/* Outlier Diagnostics Section (Percentiles & Z-score) */}
+          {/* Outlier Diagnostics Section */}
           <Card title={`Outlier Diagnostics for ${distCol}`}>
             <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-4">
               <Select
@@ -1019,7 +824,7 @@ export default function EDA() {
                 value={outlierMethod}
                 onChange={setOutlierMethod}
                 options={[
-                  { value: "percentile", label: "Percentile Cutoffs (e.g. 1st - 99th %ile)" },
+                  { value: "percentile", label: "Percentile Cutoffs (Bottom/Top Tails)" },
                   { value: "zscore", label: "Z-Score (Standard Deviations)" },
                 ]}
               />
@@ -1028,29 +833,31 @@ export default function EDA() {
                 <>
                   <div>
                     <label className="block text-xs font-bold text-slate-700 mb-1">
-                      Lower Percentile (%):
+                      Bottom Tail Cutoff % (Flags lower values):
                     </label>
                     <input
                       type="number"
                       step="0.5"
-                      min="0"
-                      max="49"
+                      min="0.1"
+                      max="20"
                       value={lowerPercentile}
                       onChange={(e) => setLowerPercentile(e.target.value)}
+                      placeholder="e.g. 1.0 (lowest 1%)"
                       className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white"
                     />
                   </div>
                   <div>
                     <label className="block text-xs font-bold text-slate-700 mb-1">
-                      Upper Percentile (%):
+                      Top Tail Cutoff % (Flags higher values):
                     </label>
                     <input
                       type="number"
                       step="0.5"
-                      min="51"
-                      max="100"
+                      min="80"
+                      max="99.9"
                       value={upperPercentile}
                       onChange={(e) => setUpperPercentile(e.target.value)}
+                      placeholder="e.g. 99.0 (highest 1%)"
                       className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white"
                     />
                   </div>
@@ -1115,7 +922,7 @@ export default function EDA() {
                   </>
                 ) : (
                   <div className="flex items-center justify-between bg-emerald-50 border border-emerald-200 p-3 rounded-xl">
-                    <span className="text-xs font-bold text-emerald-800">✅ No extreme outliers detected in {distCol} with {outlierResult.method}.</span>
+                    <span className="text-xs font-bold text-emerald-800">✅ No extreme outliers detected in {distCol}.</span>
                   </div>
                 )}
               </div>
@@ -1124,7 +931,7 @@ export default function EDA() {
         </div>
       )}
 
-      {/* TAB 4: RELATIONSHIPS & POOR MAN'S CURVE */}
+      {/* TAB 3: POOR MAN'S CURVE */}
       {activeMainTab === "relationships" && (
         <Card title="Bivariate Relationships & Poor Man's Saturation Curve">
           <p className="text-xs text-slate-500 mb-4">
@@ -1165,12 +972,12 @@ export default function EDA() {
         </Card>
       )}
 
-      {/* TAB 5: CORRELATION & MULTICOLLINEARITY */}
+      {/* TAB 4: CORRELATION, MULTICOLLINEARITY & BIVARIATE EXPLORER */}
       {activeMainTab === "correlation" && (
         <div className="space-y-6">
           <div className="flex gap-2 border-b border-slate-200">
             {[
-              { id: "analysis", label: "1. Analysis (Heatmap & VIF)" },
+              { id: "analysis", label: "1. Analysis (Heatmap, VIF & Explorer)" },
               { id: "removal", label: "2. Treatment — Removal" },
               { id: "combination", label: "3. Treatment — Combination (Sum)" },
             ].map((st) => (
@@ -1190,7 +997,7 @@ export default function EDA() {
           </div>
 
           {corrSubTab === "analysis" && (
-            <div className="space-y-4">
+            <div className="space-y-6">
               <Card title="Select Variables for Multicollinearity Analysis">
                 <div className="flex flex-wrap gap-1.5">
                   {(statsResult?.numeric_cols || []).map((col) => {
@@ -1213,6 +1020,7 @@ export default function EDA() {
                 </div>
               </Card>
 
+              {/* Correlation Heatmap */}
               <Card title="Pairwise Correlation & Multicollinearity Matrix">
                 <div className="flex items-center justify-between gap-4 mb-4 flex-wrap">
                   <div>
@@ -1243,6 +1051,64 @@ export default function EDA() {
                       VIF: r.VIF != null ? r.VIF : "—",
                       Status: r.status || (r.VIF > 10 ? "🔴 High (>10)" : r.VIF > 5 ? "⚠️ Moderate (5-10)" : "✅ OK (<5)"),
                     }))} />
+                  </div>
+                )}
+              </Card>
+
+              {/* Relocated Bivariate Relationship Explorer */}
+              <Card title="Custom Relationship Explorer (X vs Y Comparison)">
+                <p className="text-xs text-slate-500 mb-4">
+                  Compare any two metrics directly with a least-squares linear fit ($y = m \cdot x + c$), slope, intercept, and Pearson correlation coefficient ($r$). Click any cell in the heatmap above to load that pair here instantly.
+                </p>
+
+                <div className="grid grid-cols-2 gap-4 mb-4">
+                  <Select
+                    label="X Metric (Independent Variable):"
+                    value={bivX}
+                    onChange={setBivX}
+                    options={(statsResult?.numeric_cols || []).filter((c) => c !== bivY)}
+                  />
+                  <Select
+                    label="Y Metric (Dependent Variable / Response):"
+                    value={bivY}
+                    onChange={setBivY}
+                    options={statsResult?.numeric_cols || columns}
+                  />
+                </div>
+
+                {bivLoading && <Spinner label="Plotting bivariate relationship..." />}
+
+                {bivData && !bivLoading && (
+                  <div className="space-y-4">
+                    <div className="flex justify-between items-center bg-slate-50 p-3 rounded-xl border border-slate-200 text-xs flex-wrap gap-2">
+                      <span className="font-bold text-slate-800">
+                        Relationship: <strong className="text-brand-700">{bivX}</strong> ➔ <strong className="text-brand-700">{bivY}</strong>
+                      </span>
+                      <div className="flex items-center gap-3 font-mono">
+                        <span className="font-bold text-brand-700 bg-brand-50 px-2.5 py-1 rounded border border-brand-200">
+                          r = {bivData.r}
+                        </span>
+                        <span className="text-slate-600 bg-slate-100 px-2.5 py-1 rounded">
+                          slope = {bivData.slope?.toFixed(4)}
+                        </span>
+                        <span className="text-slate-600 bg-slate-100 px-2.5 py-1 rounded">
+                          intercept = {bivData.intercept?.toFixed(4)}
+                        </span>
+                      </div>
+                    </div>
+
+                    <ResponsiveContainer width="100%" height={320}>
+                      <ScatterChart margin={{ top: 10, right: 30, bottom: 20, left: 10 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                        <XAxis type="number" dataKey="x" name={bivX} tick={{ fontSize: 10 }} label={{ value: bivX, position: "insideBottom", offset: -10, fontSize: 11 }} />
+                        <YAxis type="number" dataKey="y" name={bivY} tick={{ fontSize: 10 }} label={{ value: bivY, angle: -90, position: "insideLeft", fontSize: 11 }} />
+                        <Tooltip formatter={(v) => Number(v).toFixed(2)} />
+                        <Scatter name="Observed Records" data={bivData.x.map((xv, i) => ({ x: xv, y: bivData.y[i] }))} fill="#001E96" opacity={0.6} />
+                        {bivData.trendline?.length > 0 && (
+                          <Scatter name="Least-Squares Fit" data={bivData.trendline} line={{ stroke: "#EF4444", strokeWidth: 2 }} shape={() => null} />
+                        )}
+                      </ScatterChart>
+                    </ResponsiveContainer>
                   </div>
                 )}
               </Card>
