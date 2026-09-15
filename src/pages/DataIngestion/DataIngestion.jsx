@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState, useMemo } from 'react';
+import { ResponsiveContainer, CartesianGrid, XAxis, YAxis, Tooltip, LineChart, Line } from 'recharts';
+import { ChartTooltip } from '../../components/charts/ChartTooltip.jsx';
+import { AXIS_TICK, CHART_COLORS, GRID, LINE_TYPE, X_LABEL, Y_LABEL } from '../../components/charts/chartTheme.js';
 import cloud from '../../assets/sidebar_icon/cloud.png';
 import {
   ApiError,
@@ -109,7 +112,7 @@ const GRAN_OPTIONS = {
   Monthly: ['Yearly'],
 };
 
-const TAB_ORDER = ['mapping', 'standardize', 'filter', 'granularity'];
+const TAB_ORDER = ['mapping', 'standardize', 'filter', 'granularity', 'review'];
 
 /**
  * Has this dataset ever been applied?
@@ -149,24 +152,14 @@ function suggestCategory(filename) {
 
 // Rows past this many scroll rather than pushing the preview table off screen.
 const NULL_ROWS_BEFORE_SCROLL = 5;
-function ControlTotalsRibbon({ stats, file, isOpen, onToggle }) {
+function ControlTotalsRibbon({ stats }) {
   const { data, isLoading, error } = stats || {};
   const rowCount = data?.row_count ?? 0;
   const duplicates = data?.duplicate_rows ?? 0;
 
-  // Same rows the summary table needs, built from data this component
-  // already receives — no extra network call.
-  const summaryRows = buildSummaryRows(file || {}, stats);
-
   return (
     <div className="control-totals">
-      <button
-        type="button"
-        className="control-totals-bar"
-        onClick={onToggle}
-        aria-expanded={isOpen}
-        disabled={!data}
-      >
+      <div className="control-totals-bar" aria-live="polite">
         <span className="control-totals-kpis">
           <span className="control-kpi">
             <span className="control-kpi-label">Total Row Count</span>
@@ -182,62 +175,13 @@ function ControlTotalsRibbon({ stats, file, isOpen, onToggle }) {
           </span>
         </span>
         <span className="control-totals-toggle">
-          {error ? 'Unavailable' : isLoading ? 'Loading…' : isOpen ? 'Hide detail' : 'Show detail'}
-          {!error && !isLoading && (
-            <span className={`control-totals-caret${isOpen ? ' is-open' : ''}`} aria-hidden="true">▾</span>
-          )}
+          {/* Full per-column detail now lives on the Data Review tab — this
+              bar just confirms row count/duplicates at a glance. */}
+          {error ? 'Unavailable' : isLoading ? 'Loading…' : 'See Data Review tab for full column detail'}
         </span>
-      </button>
+      </div>
 
       {error && <p className="control-totals-error">{error}</p>}
-
-      {isOpen && data && (
-        <div className="summary-stats-table-wrapper">
-          <table className="summary-stats-table">
-            <thead>
-              <tr>
-                <th>Variable</th><th>Role</th><th>Distinct (N)</th><th>Control Totals (Sum)</th>
-                <th>Active Sparsity Health</th><th>Mean</th><th>Median</th><th>Std Dev</th>
-                <th>Min</th><th>Max</th><th>75th %ile</th><th>95th %ile</th><th>% Missing</th>
-              </tr>
-            </thead>
-            <tbody>
-              {summaryRows.map((r) => (
-                <tr key={r.column}>
-                  <td><strong>{r.column}</strong></td>
-                  <td><span className={`role-badge ${r.role.toLowerCase()}`}>{r.role}</span></td>
-                  <td>{r.distinct !== null ? r.distinct.toLocaleString() : 'NA'}</td>
-                  <td>{r.controlTotal !== null ? r.controlTotal.toLocaleString() : 'NA'}</td>
-                  <td>
-                    {r.activePct !== null ? (
-                      <span className={`health-badge ${r.activePct >= 40 ? 'good' : r.activePct >= 15 ? 'warn' : 'bad'}`}>
-                        {r.activePct.toFixed(2)}% active
-                      </span>
-                    ) : 'NA'}
-                  </td>
-                  <td>{num(r.mean)}</td>
-                  <td>{num(r.median)}</td>
-                  <td>{num(r.stdDev)}</td>
-                  <td>{num(r.min)}</td>
-                  <td>{num(r.max)}</td>
-                  <td>{num(r.p75)}</td>
-                  <td>{num(r.p95)}</td>
-                  <td>
-                    {r.nullPct !== null ? (
-                      <span className={`health-badge ${r.nullPct <= 5 ? 'good' : r.nullPct <= 20 ? 'warn' : 'bad'}`}>
-                        {r.nullPct.toFixed(2)}%
-                      </span>
-                    ) : 'NA'}
-                  </td>
-                </tr>
-              ))}
-              {!summaryRows.length && (
-                <tr><td colSpan={13} className="control-totals-error">No columns to report.</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      )}
     </div>
   );
 }
@@ -299,6 +243,238 @@ function buildSummaryRows(file, statsFor) {
       nullPct: statEntry.null_pct ?? null,
     };
   });
+}
+
+// ─── Time Trends (Data Review tab) ──────────────────────────────────────────
+// Built entirely from `file.previewRows` — the only row-level data available
+// for a raw uploaded file (there is no endpoint yet that returns a raw file's
+// full content, unlike the ARD's v2GetCsv on the Data Review *page*). This
+// means the rollup below reflects the preview sample only, not the full
+// file, and is labeled as such rather than presented as exhaustive.
+function isDateLikeName(col) { return /date|week|month|period/i.test(col); }
+
+function aggregatePreviewTrend(rows, xKey, metrics, period, xIsDateLike) {
+  const grouped = {};
+  rows.forEach((r) => {
+    const raw = r[xKey];
+    if (raw === null || raw === undefined || raw === '') return;
+    // Month-bucketing only makes sense for an actual date column; anything
+    // else groups by its exact value, same as a categorical axis would.
+    const key = (xIsDateLike && period === 'month') ? String(raw).slice(0, 7) : String(raw);
+    if (!grouped[key]) grouped[key] = {};
+    metrics.forEach((m) => {
+      grouped[key][m] = (grouped[key][m] || 0) + (Number(r[m]) || 0);
+    });
+  });
+  const labels = Object.keys(grouped).sort();
+  return labels.map((l) => ({ date: l, ...grouped[l] }));
+}
+
+function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, selectedMetrics, setSelectedMetrics, xAxisKey, setXAxisKey, startDate, setStartDate, endDate, setEndDate }) {
+  const previewRows = file.previewRows || [];
+
+  const autoDateKey = useMemo(() => {
+    const fromType = Object.keys(file.typeCastMap || {}).find((c) => file.typeCastMap[c] === 'date');
+    return fromType || (file.columns || []).find(isDateLikeName) || '';
+  }, [file]);
+
+  // '' means "not overridden yet" — fall back to the auto-detected date
+  // column, but let the user pick any column instead via the dropdown below.
+  const effectiveXAxis = xAxisKey || autoDateKey;
+  const xAxisIsDateLike = effectiveXAxis === autoDateKey && !!autoDateKey;
+
+  // Available bounds within the preview sample, so the date pickers can't
+  // be set outside what actually exists in this file's loaded rows.
+  const availableDateBounds = useMemo(() => {
+    if (!xAxisIsDateLike) return null;
+    const values = previewRows.map((r) => r[effectiveXAxis]).filter(Boolean).sort();
+    return values.length ? { min: values[0], max: values[values.length - 1] } : null;
+  }, [previewRows, effectiveXAxis, xAxisIsDateLike]);
+
+  const effectiveStart = startDate || availableDateBounds?.min || '';
+  const effectiveEnd = endDate || availableDateBounds?.max || '';
+
+  // Same "is this a Metric?" logic as buildSummaryRows above, so a column
+  // shown as "Metric" in that table always appears here too. Using only
+  // typeCastMap (the initial suggested_dtype guess) missed columns the
+  // /stats endpoint has since confirmed are numeric.
+  const metricColumns = useMemo(() => {
+    const statsByColumn = Object.fromEntries((statsFor?.data?.columns || []).map((c) => [c.column, c]));
+    return (file.profile || [])
+      .filter((p) => {
+        if (p.column === effectiveXAxis) return false;
+        const statEntry = statsByColumn[renamedName(file, p.column)] || {};
+        const dtype = file.typeCastMap?.[p.column] || p.suggested_dtype || 'string';
+        const isDate = dtype === 'date' || statEntry.kind === 'date';
+        return !p.id_like && !isDate
+          && (dtype === 'integer' || dtype === 'float' || statEntry.numeric === true);
+      })
+      .map((p) => p.column);
+  }, [file, statsFor, effectiveXAxis]);
+
+  // Default to the first two metrics once they're known, without fighting
+  // the user's own pill selections on every re-render.
+  useEffect(() => {
+    if (selectedMetrics.length === 0 && metricColumns.length > 0) {
+      setSelectedMetrics(metricColumns.slice(0, 2));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [metricColumns]);
+
+  // If the user picks a column as X Axis that was already a selected Y
+  // metric, drop it from the Y selection — the same column can't be both.
+  useEffect(() => {
+    if (selectedMetrics.includes(effectiveXAxis)) {
+      setSelectedMetrics(selectedMetrics.filter((m) => m !== effectiveXAxis));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveXAxis]);
+
+  const toggleMetric = (m) => {
+    setSelectedMetrics(selectedMetrics.includes(m)
+      ? selectedMetrics.filter((x) => x !== m)
+      : [...selectedMetrics, m]);
+  };
+
+  const rowsInRange = useMemo(() => {
+    if (!xAxisIsDateLike || (!effectiveStart && !effectiveEnd)) return previewRows;
+    return previewRows.filter((r) => {
+      const v = r[effectiveXAxis];
+      if (!v) return false;
+      if (effectiveStart && v < effectiveStart) return false;
+      if (effectiveEnd && v > effectiveEnd) return false;
+      return true;
+    });
+  }, [previewRows, effectiveXAxis, xAxisIsDateLike, effectiveStart, effectiveEnd]);
+
+  const trendRows = useMemo(() => {
+    if (!effectiveXAxis || selectedMetrics.length === 0) return [];
+    return aggregatePreviewTrend(rowsInRange, effectiveXAxis, selectedMetrics, aggregation === 'mom' ? 'month' : 'week', xAxisIsDateLike);
+  }, [rowsInRange, effectiveXAxis, selectedMetrics, aggregation, xAxisIsDateLike]);
+
+  const chartData = trendRows;
+
+  if (!effectiveXAxis) {
+    return <p className="tab-placeholder-note">No date-like column detected for this file yet — pick an X Axis column below once one is selected.</p>;
+  }
+
+  return (
+    <div style={{ marginTop: '1.5rem' }}>
+      <p className="mapping-section-label">Time-Series Trend (Preview Sample)</p>
+      <p className="tab-placeholder-note" style={{ marginBottom: '0.75rem' }}>
+        Based on the first {previewRows.length.toLocaleString()} preview rows only — a full-file
+        rollup requires a backend endpoint that returns this file's complete content, which
+        does not exist yet.
+        {xAxisIsDateLike && (startDate || endDate) && (
+          <> {rowsInRange.length.toLocaleString()} of those rows fall within the selected date range.</>
+        )}
+      </p>
+
+      <div className="trend-controls-row">
+        {xAxisIsDateLike && (
+          <div className="agg-toggle">
+            <button className={aggregation === 'wow' ? 'active' : ''} onClick={() => setAggregation('wow')}>Week-on-Week (WoW)</button>
+            <button className={aggregation === 'mom' ? 'active' : ''} onClick={() => setAggregation('mom')}>Month-on-Month (MoM)</button>
+          </div>
+        )}
+
+        {xAxisIsDateLike && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+            <label style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--color-text-secondary)' }}>From:</label>
+            <input
+              type="date"
+              value={effectiveStart}
+              min={availableDateBounds?.min}
+              max={effectiveEnd || availableDateBounds?.max}
+              onChange={(e) => setStartDate(e.target.value)}
+              style={{ padding: '0.4rem 0.6rem', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '0.8rem' }}
+            />
+            <label style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--color-text-secondary)' }}>To:</label>
+            <input
+              type="date"
+              value={effectiveEnd}
+              min={effectiveStart || availableDateBounds?.min}
+              max={availableDateBounds?.max}
+              onChange={(e) => setEndDate(e.target.value)}
+              style={{ padding: '0.4rem 0.6rem', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '0.8rem' }}
+            />
+            {(startDate || endDate) && (
+              <span
+                onClick={() => { setStartDate(''); setEndDate(''); }}
+                style={{ fontSize: '0.72rem', color: 'var(--color-primary)', cursor: 'pointer', whiteSpace: 'nowrap' }}
+              >
+                Reset range
+              </span>
+            )}
+          </div>
+        )}
+
+        <p className="metric-select-links" style={{ marginLeft: 'auto' }}>
+          <span onClick={() => setSelectedMetrics(metricColumns)}>Select All</span>{' | '}
+          <span onClick={() => setSelectedMetrics(metricColumns.slice(0, 1))}>Clear to 1</span>
+        </p>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem', marginBottom: '0.75rem' }}>
+        <div>
+          <p className="mapping-section-label" style={{ marginBottom: '0.5rem' }}>
+            X Axis — Select Column (1 selected):
+          </p>
+          <div className="metric-pills">
+            {(file.columns || []).map((c) => (
+              <span
+                key={c}
+                className={`metric-pill${effectiveXAxis === c ? ' selected' : ''}`}
+                onClick={() => setXAxisKey(c)}
+              >
+                {c}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <p className="mapping-section-label" style={{ marginBottom: '0.5rem' }}>
+            Y Axis — Select Metrics to Display on Trend Line ({selectedMetrics.length} selected):
+          </p>
+          <div className="metric-pills">
+            {metricColumns.map((m) => (
+              <span key={m} className={`metric-pill${selectedMetrics.includes(m) ? ' selected' : ''}`} onClick={() => toggleMetric(m)}>{m}</span>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="trend-chart-wrapper">
+        {chartData.length === 0 ? (
+          <p className="tab-placeholder-note">No data to plot for the selected metrics.</p>
+        ) : (
+          <ResponsiveContainer width="100%" height={280}>
+            <LineChart data={chartData} margin={{ top: 10, right: 20, bottom: 22, left: 8 }}>
+              <CartesianGrid stroke={GRID} vertical={false} />
+              <XAxis dataKey="date" tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
+                     minTickGap={24} label={{ value: xAxisIsDateLike ? (aggregation === 'mom' ? 'Month' : 'Week ending') : effectiveXAxis, ...X_LABEL }} />
+              <YAxis tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
+                     tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${Math.round(v / 1000)}k` : v)}
+                     label={{ value: 'Value', ...Y_LABEL }} />
+              <Tooltip content={<ChartTooltip />} cursor={{ stroke: '#c7d2e5', strokeWidth: 1 }} />
+              {selectedMetrics.map((key, i) => (
+                <Line key={key} type={LINE_TYPE} dataKey={key} stroke={CHART_COLORS[i % CHART_COLORS.length]}
+                      strokeWidth={2} dot={false} activeDot={{ r: 4, strokeWidth: 1.5, stroke: '#fff' }} />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        )}
+        <div className="trend-legend">
+          {selectedMetrics.map((m, i) => (
+            <div key={m} className="trend-legend-item">
+              <span className="trend-legend-swatch" style={{ backgroundColor: CHART_COLORS[i % CHART_COLORS.length] }} />{m}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /** Debounced server-side search over one column's distinct values. */
@@ -475,9 +651,29 @@ function DataIngestion() {
   // response for a file the user has switched away from is never shown against
   // the wrong file.
   const [stats, setStats] = useState(null);
-  const [statsOpen, setStatsOpen] = useState(false);
   const [statsVersion, setStatsVersion] = useState(0);
   const fileInputRef = useRef(null);
+
+  // ── Data Review tab: Time Trends chart state ──────────────────────────
+  // Built from `selectedFile.previewRows` only — there is no endpoint yet
+  // that returns a raw uploaded file's FULL content, so this is a
+  // preview-sample rollup, not a full-dataset one (see note rendered below).
+  const [trendAggregation, setTrendAggregation] = useState('wow'); // 'wow' | 'mom'
+  const [trendMetrics, setTrendMetrics] = useState([]);
+  const [trendXAxis, setTrendXAxis] = useState('');
+  const [trendStartDate, setTrendStartDate] = useState('');
+  const [trendEndDate, setTrendEndDate] = useState('');
+
+  // Fix: without this, switching files kept whatever metric names were
+  // selected for the PREVIOUS file — those columns don't exist on the new
+  // file, so the chart silently plotted flat 0-lines under the old names
+  // instead of showing the new file's actual columns.
+  useEffect(() => {
+    setTrendMetrics([]);
+    setTrendXAxis(''); // '' means "use the auto-detected date column"
+    setTrendStartDate('');
+    setTrendEndDate('');
+  }, [selectedFileId]);
 
   const unmappedCount = useMemo(
     () => uploadedFiles.filter((f) => !f.category).length,
@@ -1185,6 +1381,15 @@ function DataIngestion() {
                     >
                       Granularity
                     </button>
+                    <button
+                      className={`tab-btn${activeTab === 'review' ? ' active' : ''}`}
+                      onClick={() => {
+                        setActiveTab('review');
+                        setVisitedTabs((prev) => new Set(prev).add('review'));
+                      }}
+                    >
+                      Data Review
+                    </button>
                   </div>
                   <div className="mapping-top-actions">
                     {applyMessage && <p className="apply-config-message" role="status">{applyMessage}</p>}
@@ -1720,6 +1925,69 @@ function DataIngestion() {
                   </>
                 )}
 
+                {activeTab === 'review' && (
+                  <>
+                    <p className="mapping-section-label">Variable Health, Sparsity &amp; Distributions</p>
+                    <div className="summary-stats-table-wrapper">
+                      <table className="summary-stats-table">
+                        <thead>
+                          <tr>
+                            <th>Variable</th><th>Role</th><th>Distinct (N)</th><th>Control Totals (Sum)</th>
+                            <th>Active Sparsity Health</th><th>Mean</th><th>Median</th><th>Std Dev</th>
+                            <th>Min</th><th>Max</th><th>75th %ile</th><th>95th %ile</th><th>% Missing</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {buildSummaryRows(selectedFile, statsFor).map((r) => (
+                            <tr key={r.column}>
+                              <td><strong>{r.column}</strong></td>
+                              <td><span className={`role-badge ${r.role.toLowerCase()}`}>{r.role}</span></td>
+                              <td>{r.distinct !== null ? r.distinct.toLocaleString() : 'NA'}</td>
+                              <td>{r.controlTotal !== null ? r.controlTotal.toLocaleString() : 'NA'}</td>
+                              <td>
+                                {r.activePct !== null ? (
+                                  <span className={`health-badge ${r.activePct >= 40 ? 'good' : r.activePct >= 15 ? 'warn' : 'bad'}`}>
+                                    {r.activePct.toFixed(2)}% active
+                                  </span>
+                                ) : 'NA'}
+                              </td>
+                              <td>{num(r.mean)}</td>
+                              <td>{num(r.median)}</td>
+                              <td>{num(r.stdDev)}</td>
+                              <td>{num(r.min)}</td>
+                              <td>{num(r.max)}</td>
+                              <td>{num(r.p75)}</td>
+                              <td>{num(r.p95)}</td>
+                              <td>
+                                {r.nullPct !== null ? (
+                                  <span className={`health-badge ${r.nullPct <= 5 ? 'good' : r.nullPct <= 20 ? 'warn' : 'bad'}`}>
+                                    {r.nullPct.toFixed(2)}%
+                                  </span>
+                                ) : 'NA'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <TimeTrendsSection
+                      file={selectedFile}
+                      statsFor={statsFor}
+                      aggregation={trendAggregation}
+                      setAggregation={setTrendAggregation}
+                      selectedMetrics={trendMetrics}
+                      setSelectedMetrics={setTrendMetrics}
+                      xAxisKey={trendXAxis}
+                      setXAxisKey={setTrendXAxis}
+                      startDate={trendStartDate}
+                      setStartDate={setTrendStartDate}
+                      endDate={trendEndDate}
+                      setEndDate={setTrendEndDate}
+                    />
+                  </>
+                )}
+
                 {/* Shared across every tab: previewing from Standardize, Filter or
                     Granularity should show its result in place, not send the user
                     back to Assign Category. */}
@@ -1733,12 +2001,7 @@ function DataIngestion() {
                       on Assign Category only - that is where the user is still
                       deciding whether the file is the right one. */}
                   {activeTab === 'mapping' && statsFor && (
-                    <ControlTotalsRibbon
-                      stats={statsFor}
-                      file={selectedFile}
-                      isOpen={statsOpen}
-                      onToggle={() => setStatsOpen((open) => !open)}
-                    />
+                    <ControlTotalsRibbon stats={statsFor} />
                   )}
 
                   {isPreviewing && (
