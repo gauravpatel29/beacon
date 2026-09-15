@@ -255,10 +255,15 @@
   cursor: wait;
 }
 
+.file-item-text {
+  min-width: 0;
+}
+
 .file-item-name {
   font-size: var(--font-size-small);
   font-weight: var(--font-weight-semibold);
   color: var(--color-text-primary);
+  overflow-wrap: anywhere;
 }
 
 .file-item-filename {
@@ -271,6 +276,7 @@
 .file-item-status {
   font-size: 0.78rem;
   color: var(--color-text-secondary);
+  overflow-wrap: anywhere;
 }
 
 .file-item-status.unmapped-label {

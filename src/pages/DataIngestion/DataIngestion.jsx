@@ -1299,8 +1299,8 @@ function DataIngestion() {
                     }${!f.category ? ' unmapped' : ''}${deletingFileId === f.id ? ' deleting' : ''}`}
                     onClick={() => deletingFileId !== f.id && setSelectedFileId(f.id)}
                   >
-                    <div>
-                      <p className="file-item-name">{f.name}</p>
+                    <div className="file-item-text">
+                      <p className="file-item-name" title={f.name}>{f.name}</p>
                       {/* <p className="file-item-filename">{f.name}</p> */}
                       <p className={`file-item-status${!f.category ? ' unmapped-label' : ''}`}>
                         {categoryInfo ? categoryInfo.label : 'Unmapped'}
