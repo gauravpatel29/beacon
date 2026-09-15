@@ -873,7 +873,7 @@ function DataReview() {
   return (
     <div className="review-page">
       <div className="page-header">
-        <p className="page-header-title">Data Review</p>
+        <p className="page-header-title">EDA</p>
         <p className="page-header-subtitle">
           Sanity-check trends, inspect variable sparsity, detect outliers, and analyze correlation
         </p>

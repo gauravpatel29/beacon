@@ -16,7 +16,7 @@ function App() {
        <Route element={<Main_Layout />}>
         <Route path="/data-ingestion" element={<DataIngestion />} />
         <Route path="/data-stitching" element={<Datastitching />} />
-        <Route path="/data-review" element={<DataReview />} />
+        <Route path="/eda" element={<DataReview />} />
         <Route path="/data-transformation" element={<DataTransformation />} />
         <Route path="/model-configuration" element={<ModelConfiguration />} />
       </Route>
