@@ -8,7 +8,7 @@ import {
 import {
   v2ListArds, v2GetCsv, problemMessage, ensureWorkflow,
   edaStats, edaSparsity, edaHistogram, edaScatter, edaPoorMansCurve,
-  edaDetectOutliers, edaTrendRollup,
+  edaDetectOutliers,
   correlationMatrix as fetchCorrelationMatrix,
   computeVIF as fetchVIF,
   previewRemoval, applyRemoval,
@@ -24,7 +24,6 @@ import './DataReview.css';
 
 const TABS = [
   { id: 'summary', label: 'Summary Stats & Sparsity' },
-  { id: 'trends', label: 'Time Trends (WoW / MoM)' },
   { id: 'outliers', label: 'Distributions & Outliers' },
   { id: 'relationships', label: "Relationships & Poor Man's Curve" },
   { id: 'correlation', label: 'Correlation & Multicollinearity' },
@@ -96,9 +95,6 @@ function DataReview() {
   const [corrSubTab, setCorrSubTab] = useState('analysis');
   const [searchQuery, setSearchQuery] = useState('');
 
-  const [aggregation, setAggregation] = useState('wow');
-  const [indexedView, setIndexedView] = useState(false);
-  const [selectedMetrics, setSelectedMetrics] = useState([]);
   // Tab 2's second chart: any X against any Y, independent of the trend lines.
   const [bivarX, setBivarX] = useState('');
   const [bivarY, setBivarY] = useState('');
@@ -128,7 +124,6 @@ function DataReview() {
   // markup is untouched.
   const [statsResult, setStatsResult] = useState(null);
   const [sparsityMap, setSparsityMap] = useState({});
-  const [trendRaw, setTrendRaw] = useState([]);
   const [histRaw, setHistRaw] = useState(null);
   const [outlierRaw, setOutlierRaw] = useState(null);
   const [scatterRaw, setScatterRaw] = useState(null);
@@ -189,7 +184,7 @@ function DataReview() {
   const stateRestored = useScreenState('review', {
     ready: Boolean(columns.length),
     deps: [selectedArdFilename, activeTab, corrSubTab, dateKey, geoKey, kpiColumn,
-           selectedMetrics, aggregation, indexedView, distVariable, binWidth, outlierVariable,
+           distVariable, binWidth, outlierVariable,
            outlierMethod, outlierThreshold, outlierLowerPct, outlierUpperPct,
            xAxisVar, yAxisVar, bivarX, bivarY, corrThreshold, corrSelectedCols,
            removalTargetKpi, removalThreshold, clusterThreshold, sortField, sortAsc],
@@ -197,7 +192,6 @@ function DataReview() {
       ard: selectedArdFilename,
       activeTab, corrSubTab,
       dateKey, geoKey, kpiColumn,
-      selectedMetrics, aggregation, indexedView,
       distVariable,
       // null is a real value here - it means "let the server bin it" - so it
       // is stored as well, and restored only when it is a number.
@@ -217,9 +211,6 @@ function DataReview() {
       if (str(v.dateKey)) setDateKey(v.dateKey);
       if (str(v.geoKey)) setGeoKey(v.geoKey);
       if (str(v.kpiColumn)) setKpiColumn(v.kpiColumn);
-      if (arr(v.selectedMetrics)) setSelectedMetrics(v.selectedMetrics);
-      if (str(v.aggregation)) setAggregation(v.aggregation);
-      if (typeof v.indexedView === 'boolean') setIndexedView(v.indexedView);
       if (str(v.distVariable)) setDistVariable(v.distVariable);
       if (num(v.binWidth) && v.binWidth > 0) {
         setBinWidth(v.binWidth);
@@ -324,7 +315,6 @@ function DataReview() {
         setDateKey((prev) => keepOne(prev, guessedDate));
         setGeoKey((prev) => keepOne(prev, guessedGeo));
         setKpiColumn((prev) => keepOne(prev, guessedKpi));
-        setSelectedMetrics((prev) => keepMany(prev, metricCols.slice(0, 2)));
         setCorrSelectedCols((prev) => keepMany(prev, metricCols.slice(0, 8)));
         setOutlierVariable((prev) => keepOne(prev, metricCols[0] || ''));
         setDistVariable((prev) => keepOne(prev, metricCols[0] || ''));
@@ -339,7 +329,6 @@ function DataReview() {
       setDateKey(guessedDate);
       setGeoKey(guessedGeo);
       setKpiColumn(guessedKpi);
-      setSelectedMetrics(metricCols.slice(0, 2));
       setOutlierVariable(metricCols[0] || '');
       setDistVariable(metricCols[0] || '');
       setXAxisVar(metricCols[0] || '');
@@ -405,32 +394,18 @@ function DataReview() {
     // eslint-disable-next-line
   }, [activeCsv, dateKey, geoKey, kpiColumn]);
 
-  // ── Tab 2: trend rollup ──────────────────────────────────────────────────
+  // ── Correlation > Analysis: the bivariate explorer's own scatter ─────────
+  // Moved here from the old Time Trends tab (now removed) — gated on this
+  // sub-tab instead of the old 'trends' tab id.
   useEffect(() => {
-    if (activeTab !== 'trends' || !activeCsv || !dateKey || !selectedMetrics.length) {
-      return undefined;
-    }
-    let cancelled = false;
-    edaTrendRollup({ csv_data: activeCsv, date_column: dateKey,
-                     metric_columns: selectedMetrics,
-                     period: aggregation === 'mom' ? 'month' : 'week' })
-      .then((d) => { if (!cancelled) setTrendRaw(d.trend_data || []); })
-      .catch((err) => { if (!cancelled) { setTrendRaw([]); failed('Trend rollup')(err); } });
-    return () => { cancelled = true; };
-    // eslint-disable-next-line
-  }, [activeTab, activeCsv, dateKey, selectedMetrics, aggregation]);
-
-
-  // ── Tab 2: the bivariate explorer's own scatter ──────────────────────────
-  useEffect(() => {
-    if (activeTab !== 'trends' || !activeCsv || !bivarX || !bivarY) return undefined;
+    if (activeTab !== 'correlation' || corrSubTab !== 'analysis' || !activeCsv || !bivarX || !bivarY) return undefined;
     let cancelled = false;
     edaScatter({ csv_data: activeCsv, x_column: bivarX, y_column: bivarY })
       .then((d) => { if (!cancelled) setBivarRaw(d); })
       .catch((err) => { if (!cancelled) { setBivarRaw(null); failed('Relationship explorer')(err); } });
     return () => { cancelled = true; };
     // eslint-disable-next-line
-  }, [activeTab, activeCsv, bivarX, bivarY]);
+  }, [activeTab, corrSubTab, activeCsv, bivarX, bivarY]);
 
   // ── Tab 3: histogram ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -566,22 +541,6 @@ function DataReview() {
   };
 
   // ---- Tab 2: Time trends (server) ----
-  // The rollup is server-side because bucketing by week or month means parsing
-  // the date column, and parsing it by inference is how day and month get
-  // transposed. The API picks one explicit format for the whole column.
-  // Rebasing to 100 stays here: it is presentation, not aggregation.
-  const trendData = useMemo(() => {
-    if (!trendRaw.length || selectedMetrics.length === 0) return { labels: [], series: {} };
-    const labels = trendRaw.map((r) => r.date);
-    const series = {};
-    selectedMetrics.forEach((m) => {
-      let values = trendRaw.map((r) => Number(r[m]) || 0);
-      if (indexedView && values[0]) { const base = values[0]; values = values.map((v) => (v / base) * 100); }
-      series[m] = values;
-    });
-    return { labels, series };
-  }, [trendRaw, selectedMetrics, indexedView]);
-
   // ---- Tab 3: Distribution histogram (server) ----
   // The API gives one bin per value for small integer ranges, so a column of
   // 1..8 call counts reads as eight bars rather than "1.0 - 1.9".
@@ -790,7 +749,6 @@ function DataReview() {
     setRows(parsed.data);
     setColumns(cols);
     setExcludedRowKeys(new Set());
-    setSelectedMetrics((prev) => prev.filter((c) => cols.includes(c)));
     setCorrSelectedCols((prev) => {
       const kept = prev.filter((c) => cols.includes(c));
       return kept.length >= 2 ? kept : cols.filter((c) => c !== dateKey && c !== geoKey).slice(0, 8);
@@ -857,8 +815,6 @@ function DataReview() {
   };
 
 
-
-  const toggleMetric = (m) => setSelectedMetrics((prev) => (prev.includes(m) ? prev.filter((x) => x !== m) : [...prev, m]));
 
   const excludeOutliers = () => {
     if (!outlierResult) return;
@@ -1007,106 +963,6 @@ function DataReview() {
                       </tbody>
                     </table>
                   </div>
-                </div>
-              )}
-
-              {/* ---- Time Trends ---- */}
-              {activeTab === 'trends' && (
-                <div className="review-card">
-                  <p className="review-card-heading">Time-Series Trend Rollup (WoW &amp; MoM)</p>
-                  <div className="trend-controls-row">
-                    <div className="agg-toggle">
-                      <button className={aggregation === 'wow' ? 'active' : ''} onClick={() => setAggregation('wow')}>Week-on-Week (WoW)</button>
-                      <button className={aggregation === 'mom' ? 'active' : ''} onClick={() => setAggregation('mom')}>Month-on-Month (MoM)</button>
-                    </div>
-                    <label className="indexed-view-check">
-                      <input type="checkbox" checked={indexedView} onChange={(e) => setIndexedView(e.target.checked)} />
-                      Indexed View (Rebase to 100)
-                    </label>
-                  </div>
-                  <div className="metric-select-row">
-                    <p className="review-card-heading" style={{ marginBottom: 0 }}>Select Metrics to Display on Trend Line ({selectedMetrics.length} selected):</p>
-                    <p className="metric-select-links">
-                      <span onClick={() => setSelectedMetrics(metricColumns)}>Select All</span>{' | '}
-                      <span onClick={() => setSelectedMetrics(metricColumns.slice(0, 1))}>Clear to 1</span>
-                    </p>
-                  </div>
-                  <div className="metric-pills">
-                    {metricColumns.map((m) => (
-                      <span key={m} className={`metric-pill${selectedMetrics.includes(m) ? ' selected' : ''}`} onClick={() => toggleMetric(m)}>{m}</span>
-                    ))}
-                  </div>
-                  <div className="trend-chart-wrapper">
-                    <TrendChart
-                      labels={trendData.labels}
-                      series={trendData.series}
-                      indexed={indexedView}
-                      xLabel={aggregation === 'mom' ? 'Month' : 'Week ending'}
-                      // Several metrics can share this axis, so it is named
-                      // generically unless exactly one is plotted.
-                      yLabel={indexedView
-                        ? 'Indexed (first period = 100)'
-                        : (selectedMetrics.length === 1 ? selectedMetrics[0] : 'Value')}
-                    />
-                    <div className="trend-legend">
-                      {selectedMetrics.map((m, i) => (
-                        <div key={m} className="trend-legend-item">
-                          <span className="trend-legend-swatch" style={{ backgroundColor: CHART_COLORS[i % CHART_COLORS.length] }} />{m}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* ---- Custom Relationship Explorer (lives on the Trends tab) ---- */}
-              {activeTab === 'trends' && (
-                <div className="review-card">
-                  <p className="review-card-heading">Custom Relationship Explorer (X vs Y Comparison)</p>
-                  <p className="treatment-desc">
-                    Compare any two metrics directly, with a least-squares fit. Independent of
-                    the trend lines above.
-                  </p>
-                  <div className="trend-controls-row">
-                    <div className="ard-select-field">
-                      <label>X Metric</label>
-                      <select value={bivarX} onChange={(e) => setBivarX(e.target.value)}>
-                        {metricColumns.map((c) => <option key={c} value={c}>{c}</option>)}
-                      </select>
-                    </div>
-                    <div className="ard-select-field">
-                      <label>Y Metric</label>
-                      <select value={bivarY} onChange={(e) => setBivarY(e.target.value)}>
-                        {metricColumns.map((c) => <option key={c} value={c}>{c}</option>)}
-                      </select>
-                    </div>
-                  </div>
-
-                  {bivarRaw && typeof bivarRaw.r === 'number' && (
-                    <div className="curve-verdict-row">
-                      <span className={`shape-badge${Math.abs(bivarRaw.r) >= 0.7 ? ' saturating'
-                        : Math.abs(bivarRaw.r) >= 0.4 ? ' convex' : ''}`}>
-                        {Math.abs(bivarRaw.r) >= 0.7 ? 'Strong' : Math.abs(bivarRaw.r) >= 0.4 ? 'Moderate' : 'Weak'} relationship
-                      </span>
-                      <span className="curve-stat">
-                        r = <strong>{bivarRaw.r.toFixed(4)}</strong>
-                        {' · '}slope <strong>{Number(bivarRaw.slope || 0).toFixed(4)}</strong>
-                        {' · '}intercept <strong>{Number(bivarRaw.intercept || 0).toFixed(2)}</strong>
-                      </span>
-                    </div>
-                  )}
-
-                  {bivarRaw && (bivarRaw.x || []).length > 0 ? (
-                    <ScatterChart
-                      points={(bivarRaw.x || []).map((x, i) => ({ x, y: bivarRaw.y[i] }))}
-                      binnedLine={[]}
-                      trendline={bivarRaw.trendline || []}
-                      xLabel={bivarX}
-                      yLabel={bivarY}
-                    />
-                  ) : (
-                    <p className="review-empty">Select two metrics to compare.</p>
-                  )}
                 </div>
               )}
 
@@ -1428,6 +1284,56 @@ function DataReview() {
                           </table>
                         </div>
                       )}
+
+                      {/* ---- Custom Relationship Explorer (moved here from the
+                          old Time Trends tab, now removed) ---- */}
+                      <p className="review-card-heading" style={{ marginTop: 'var(--spacing-md)' }}>
+                        Custom Relationship Explorer (X vs Y Comparison)
+                      </p>
+                      <p className="treatment-desc">
+                        Compare any two metrics directly, with a least-squares fit. Independent of
+                        the correlation matrix above.
+                      </p>
+                      <div className="trend-controls-row">
+                        <div className="ard-select-field">
+                          <label>X Metric</label>
+                          <select value={bivarX} onChange={(e) => setBivarX(e.target.value)}>
+                            {metricColumns.map((c) => <option key={c} value={c}>{c}</option>)}
+                          </select>
+                        </div>
+                        <div className="ard-select-field">
+                          <label>Y Metric</label>
+                          <select value={bivarY} onChange={(e) => setBivarY(e.target.value)}>
+                            {metricColumns.map((c) => <option key={c} value={c}>{c}</option>)}
+                          </select>
+                        </div>
+                      </div>
+
+                      {bivarRaw && typeof bivarRaw.r === 'number' && (
+                        <div className="curve-verdict-row">
+                          <span className={`shape-badge${Math.abs(bivarRaw.r) >= 0.7 ? ' saturating'
+                            : Math.abs(bivarRaw.r) >= 0.4 ? ' convex' : ''}`}>
+                            {Math.abs(bivarRaw.r) >= 0.7 ? 'Strong' : Math.abs(bivarRaw.r) >= 0.4 ? 'Moderate' : 'Weak'} relationship
+                          </span>
+                          <span className="curve-stat">
+                            r = <strong>{bivarRaw.r.toFixed(4)}</strong>
+                            {' · '}slope <strong>{Number(bivarRaw.slope || 0).toFixed(4)}</strong>
+                            {' · '}intercept <strong>{Number(bivarRaw.intercept || 0).toFixed(2)}</strong>
+                          </span>
+                        </div>
+                      )}
+
+                      {bivarRaw && (bivarRaw.x || []).length > 0 ? (
+                        <ScatterChart
+                          points={(bivarRaw.x || []).map((x, i) => ({ x, y: bivarRaw.y[i] }))}
+                          binnedLine={[]}
+                          trendline={bivarRaw.trendline || []}
+                          xLabel={bivarX}
+                          yLabel={bivarY}
+                        />
+                      ) : (
+                        <p className="review-empty">Select two metrics to compare.</p>
+                      )}
                     </>
                   )}
 
@@ -1663,49 +1569,6 @@ function DataReview() {
 // library. The tooltip is ours: recharts' default is replaced with
 // `ChartTooltip` below via the `content` prop, so the box keeps the design it
 // had when the charts were hand-drawn SVG.
-
-/** Shared axis/grid treatment, so the three charts stay visually identical. */
-function TrendChart({ labels, series, indexed = false, xLabel = 'Period', yLabel = 'Value' }) {
-  const seriesKeys = Object.keys(series);
-  if (labels.length === 0 || seriesKeys.length === 0) {
-    return <p className="review-empty">No data to plot for the selected metrics.</p>;
-  }
-  // recharts takes one object per x value; the hand-drawn version took parallel
-  // arrays, so they are zipped here rather than changing the caller.
-  const data = labels.map((date, i) => {
-    const row = { date };
-    seriesKeys.forEach((k) => { row[k] = series[k][i]; });
-    return row;
-  });
-
-  return (
-    <ResponsiveContainer width="100%" height={280}>
-      <LineChart data={data} margin={{ top: 10, right: 20, bottom: 22, left: 8 }}>
-        <CartesianGrid stroke={GRID} vertical={false} />
-        <XAxis dataKey="date" tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
-               minTickGap={24} label={{ value: xLabel, ...X_LABEL }} />
-        <YAxis tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
-               tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${Math.round(v / 1000)}k` : v)}
-               label={{ value: yLabel, ...Y_LABEL }} />
-        <Tooltip
-          content={<ChartTooltip indexed={indexed} />}
-          cursor={{ stroke: '#c7d2e5', strokeWidth: 1 }}
-        />
-        {seriesKeys.map((key, i) => (
-          <Line
-            key={key}
-            type={LINE_TYPE}
-            dataKey={key}
-            stroke={CHART_COLORS[i % CHART_COLORS.length]}
-            strokeWidth={2}
-            dot={false}
-            activeDot={{ r: 4, strokeWidth: 1.5, stroke: '#fff' }}
-          />
-        ))}
-      </LineChart>
-    </ResponsiveContainer>
-  );
-}
 
 function HistogramChart({ bins, labels, xLabel = 'Value range', yLabel = 'Records' }) {
   if (!bins.length) return <p className="review-empty">No distribution to plot.</p>;
