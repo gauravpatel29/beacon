@@ -568,7 +568,7 @@ function Datastitching() {
     <div className="stitching-page">
       <div className="page-header">
         <div>
-          <p className="page-header-title">Data Stitching &amp; ARD Creation</p>
+          <p className="page-header-title">Data Stitching</p>
           <p className="page-header-subtitle">Join your mapped files into analytic record datasets</p>
         </div>
         <button className="new-ard-btn" onClick={addNewArdTab}>+ Add New ARD</button>
@@ -669,7 +669,7 @@ function Datastitching() {
           {/* Nothing is configured until an ARD exists. */}
           {!activeTab && (
             <div className="stitching-empty">
-              No ARD yet. Use <strong>+ Add New ARD</strong> above to create one.
+              No ARD yet. Use <strong>+ Add New</strong> above to create one.
             </div>
           )}
 
@@ -852,7 +852,7 @@ function Datastitching() {
                 disabled={draft.joinCards.length === 0 || draft.isGenerating}
                 title={draft.joinCards.length === 0 ? 'Add at least one join first' : undefined}
               >
-                {draft.isGenerating ? 'Generating...' : 'Generate ARD'}
+                {draft.isGenerating ? 'Generating...' : 'Generate Data Stitching'}
               </button>
             </div>
           </div>

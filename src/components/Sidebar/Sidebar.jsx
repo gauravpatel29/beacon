@@ -15,8 +15,8 @@ import aim from "../../assets/sidebar_icon/aim.png";
 const navItems = [
   { id: 'home',  icon: home, label: 'Home', path: '/' },
   { id: 'data-ingestion', icon: cloud, label: 'Data Ingestion', path: '/data-ingestion' },
-  { id: 'data-stitching', icon: chart, label: 'Data Stitching & ARD', path: '/data-stitching' },
-  { id: 'data-review', icon: dots, label: 'Data Review', path: '/data-review' },
+  { id: 'data-stitching', icon: chart, label: 'Data Stitching', path: '/data-stitching' },
+  { id: 'eda', icon: dots, label: 'EDA', path: '/eda' },
   { id: 'data-transformation', icon: graph, label: 'Data Transformation', path: '/data-transformation' },
   { id: 'model-configuration ', icon:bar_graph, label: 'Model Configuration', path: '/model-configuration' },
   { id: 'model-output', icon:data_lifecycle, label: 'Model Output', path: '/model-output' },
