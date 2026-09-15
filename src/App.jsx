@@ -6,6 +6,7 @@ import DataIngestion from './pages/DataIngestion/DataIngestion.jsx'
 import Datastitching from './pages/Datastitching/Datastitching.jsx'
 import DataReview from './pages/DataReview/DataReview.jsx'
 import DataTransformation from './pages/DataTransformation/DataTransformation.jsx'
+import ModelConfiguration from './pages/ModelConfiguration/ModelConfiguration.jsx';
 
 function App() {
   return (
@@ -17,7 +18,7 @@ function App() {
         <Route path="/data-stitching" element={<Datastitching />} />
         <Route path="/data-review" element={<DataReview />} />
         <Route path="/data-transformation" element={<DataTransformation />} />
-
+        <Route path="/model-configuration" element={<ModelConfiguration />} />
       </Route>
     </Routes>
   )
