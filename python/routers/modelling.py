@@ -1,5 +1,6 @@
 import io
 import pandas as pd
+import numpy as np
 from fastapi import APIRouter, HTTPException
 from core.processing import (
     run_ols_regression,
@@ -7,29 +8,52 @@ from core.processing import (
     run_ridge_regression,
     build_combined_table,
     build_waterfall_chart_data,
+    _parse_dates_robust,
 )
 
 router = APIRouter()
 
 
 def _parse_csv(csv_data: str) -> pd.DataFrame:
-    return pd.read_csv(io.BytesIO(csv_data.encode("latin-1")))
+    try:
+        return pd.read_csv(io.StringIO(csv_data), low_memory=False)
+    except Exception:
+        return pd.read_csv(io.BytesIO(csv_data.encode("latin-1")), low_memory=False)
 
 
 @router.post("/available-channels")
 async def available_channels(payload: dict):
     try:
         df = _parse_csv(payload["csv_data"])
-        df[payload["date_column"]] = pd.to_datetime(df[payload["date_column"]])
-        mask = (df[payload["date_column"]] >= pd.to_datetime(payload["start_date"])) & \
-               (df[payload["date_column"]] <= pd.to_datetime(payload["end_date"]))
-        filtered = df[mask]
-        dep = payload["dependent_variable"]
+        date_col = payload["date_column"]
+        df[date_col] = _parse_dates_robust(df[date_col].astype(str).str.strip())
+
+        start_raw = payload.get("start_date")
+        end_raw = payload.get("end_date")
+        if start_raw and end_raw:
+            start_d = _parse_dates_robust(pd.Series([str(start_raw)])).iloc[0]
+            end_d = _parse_dates_robust(pd.Series([str(end_raw)])).iloc[0]
+            if pd.notna(start_d) and pd.notna(end_d):
+                mask = (df[date_col] >= start_d) & (df[date_col] <= end_d)
+                filtered = df[mask]
+            else:
+                filtered = df
+        else:
+            filtered = df
+
+        dep = payload.get("dependent_variable", "")
         dep_user = payload.get("dependent_variable_user_input", dep)
-        remove = [payload["date_column"], payload["geo_column"], dep, dep_user, f"{dep}_transformed"]
-        channels = [c for c in filtered.columns if c not in remove and c.endswith("_transformed")]
-        return {"channels": channels, "date_range": {"start": str(filtered[payload["date_column"]].min().date()),
-                                                      "end": str(filtered[payload["date_column"]].max().date())}}
+        geo_col = payload.get("geo_column", "")
+        remove = {date_col, geo_col, dep, dep_user, f"{dep}_transformed"}
+
+        channels = [c for c in filtered.columns if c not in remove and (c.endswith("_transformed") or not c.lower().endswith("id"))]
+        min_date_str = str(filtered[date_col].min().date()) if len(filtered) > 0 and pd.notna(filtered[date_col].min()) else ""
+        max_date_str = str(filtered[date_col].max().date()) if len(filtered) > 0 and pd.notna(filtered[date_col].max()) else ""
+
+        return {
+            "channels": channels,
+            "date_range": {"start": min_date_str, "end": max_date_str},
+        }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -39,13 +63,17 @@ async def run_regression(payload: dict):
     try:
         transformed_df = _parse_csv(payload["transformed_csv"])
         granular_df = _parse_csv(payload["granular_csv"])
+        
+        dep_var = payload["dependent_variable"]
+        dep_user = payload.get("dependent_variable_user_input", dep_var)
+
         result = run_ols_regression(
             transformed_df=transformed_df,
             granular_df=granular_df,
             date_column=payload["date_column"],
             geo_column=payload["geo_column"],
-            dependent_variable=payload["dependent_variable"],
-            dependent_variable_user_input=payload.get("dependent_variable_user_input", payload["dependent_variable"]),
+            dependent_variable=dep_var,
+            dependent_variable_user_input=dep_user,
             selected_channels=payload["selected_channels"],
             start_date=payload["start_date"],
             end_date=payload["end_date"],
@@ -53,7 +81,7 @@ async def run_regression(payload: dict):
         result["model_type"] = "OLS Stage 1"
         return result
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=f"Regression failed: {str(e)}")
 
 
 @router.post("/run-ols-stage2")
@@ -77,7 +105,7 @@ async def run_ols_stage2_route(payload: dict):
         )
         return result
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=f"Stage 2 failed: {str(e)}")
 
 
 @router.post("/run-ridge")
@@ -109,7 +137,7 @@ async def run_ridge_route(payload: dict):
         )
         return result
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=f"Ridge regression failed: {str(e)}")
 
 
 @router.post("/combined-decomposition")

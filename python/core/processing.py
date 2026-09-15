@@ -1,4 +1,3 @@
-
 import re
 import math
 from datetime import datetime, timedelta, date
@@ -53,6 +52,14 @@ _DATE_FORMATS = [
 
 
 def _parse_dates_robust(s_clean: pd.Series) -> pd.Series:
+    if isinstance(s_clean, (str, bytes, date, datetime)):
+        s_clean = pd.Series([s_clean])
+    elif not isinstance(s_clean, pd.Series):
+        s_clean = pd.Series(list(s_clean))
+
+    s_clean = s_clean.astype(str).str.strip()
+    s_clean = s_clean.replace({"nan": "", "None": "", "NaT": "", "<NA>": "", "null": ""})
+
     non_empty = s_clean[s_clean != ""]
     if non_empty.empty:
         return pd.Series(pd.NaT, index=s_clean.index, dtype="datetime64[ns]")
@@ -62,14 +69,20 @@ def _parse_dates_robust(s_clean: pd.Series) -> pd.Series:
 
     best_fmt, best_hits = None, 0
     for fmt in _DATE_FORMATS:
-        hits = int(pd.to_datetime(uniques, format=fmt, errors="coerce").notna().sum())
-        if hits > best_hits:
-            best_fmt, best_hits = fmt, hits
-        if hits == total:
-            break
+        try:
+            hits = int(pd.to_datetime(uniques, format=fmt, errors="coerce").notna().sum())
+            if hits > best_hits:
+                best_fmt, best_hits = fmt, hits
+            if hits == total:
+                break
+        except Exception:
+            continue
 
     if best_fmt is None:
-        parsed = pd.Series(pd.NaT, index=s_clean.index, dtype="datetime64[ns]")
+        try:
+            parsed = pd.to_datetime(s_clean, format="mixed", errors="coerce")
+        except Exception:
+            parsed = pd.to_datetime(s_clean, errors="coerce")
     else:
         parsed = pd.to_datetime(s_clean, format=best_fmt, errors="coerce")
 
@@ -79,11 +92,17 @@ def _parse_dates_robust(s_clean: pd.Series) -> pd.Series:
                 continue
             if not parsed.isna().any():
                 break
-            parsed = parsed.fillna(pd.to_datetime(s_clean, format=fmt, errors="coerce"))
+            try:
+                parsed = parsed.fillna(pd.to_datetime(s_clean, format=fmt, errors="coerce"))
+            except Exception:
+                pass
 
     if parsed.isna().any():
         leftover = s_clean.where(parsed.isna(), "")
-        parsed = parsed.fillna(pd.to_datetime(leftover, errors="coerce", dayfirst=True))
+        try:
+            parsed = parsed.fillna(pd.to_datetime(leftover, format="mixed", errors="coerce"))
+        except Exception:
+            parsed = parsed.fillna(pd.to_datetime(leftover, errors="coerce"))
 
     return parsed
 
@@ -336,7 +355,7 @@ def infer_column_semantic_type(
     if not pd.api.types.is_numeric_dtype(series):
         s_clean = series.dropna().astype(str).str.strip()
         if len(s_clean) > 0 and s_clean.str.len().mean() >= 8:
-            sample_parsed = pd.to_datetime(s_clean.head(50), errors="coerce")
+            sample_parsed = _parse_dates_robust(s_clean.head(50))
             if sample_parsed.notna().sum() / len(sample_parsed) > 0.8:
                 return "Date"
         return "Dimension"
@@ -415,7 +434,7 @@ def compute_eda_stats(
                 })
 
         elif col_type == "Date":
-            parsed_d = pd.to_datetime(valid_raw, errors="coerce", dayfirst=True)
+            parsed_d = _parse_dates_robust(valid_raw)
             min_d = str(parsed_d.min().date()) if parsed_d.notna().any() else "—"
             max_d = str(parsed_d.max().date()) if parsed_d.notna().any() else "—"
 
@@ -456,7 +475,7 @@ def compute_eda_stats(
 
     trend_data = []
     if date_column in df.columns and len(metric_cols) > 0:
-        parsed_date_series = pd.to_datetime(df[date_column], dayfirst=True, errors="coerce")
+        parsed_date_series = _parse_dates_robust(df[date_column])
         df["_parsed_date_str"] = parsed_date_series.dt.strftime("%Y-%m-%d")
         valid_trend_df = df[df["_parsed_date_str"].notna()]
         if len(valid_trend_df) > 0:
@@ -532,30 +551,22 @@ def compute_cross_correlation_lags(
         return []
 
     df_time = df[[date_col, x_col, y_col]].copy()
-    df_time[date_col] = pd.to_datetime(df_time[date_col], dayfirst=True, errors="coerce")
+    df_time[date_col] = _parse_dates_robust(df_time[date_col].astype(str).str.strip())
     df_time = df_time.dropna().sort_values(date_col)
+    if df_time.empty:
+        return []
 
     ts = df_time.groupby(date_col)[[x_col, y_col]].sum().reset_index()
     s_x = pd.to_numeric(ts[x_col], errors="coerce").fillna(0)
     s_y = pd.to_numeric(ts[y_col], errors="coerce").fillna(0)
 
-    lag_results = []
+    lag_results: List[Dict[str, Any]] = []
     for lag in range(-max_lags, max_lags + 1):
-        if lag < 0:
-            shifted_x = s_x.shift(-lag)
-            r = shifted_x.corr(s_y)
-        elif lag > 0:
-            shifted_x = s_x.shift(lag)
-            r = shifted_x.corr(s_y)
-        else:
-            r = s_x.corr(s_y)
-
-        r_val = round(float(r), 3) if pd.notna(r) else 0.0
-        lag_label = f"Lag {lag:+d}w" if lag != 0 else "Same Week (Lag 0)"
+        r = s_x.shift(lag).corr(s_y) if lag else s_x.corr(s_y)
         lag_results.append({
             "lag": lag,
-            "label": lag_label,
-            "correlation": r_val,
+            "label": f"Lag {lag:+d}w" if lag else "Same Week (Lag 0)",
+            "correlation": round(float(r), 3) if pd.notna(r) else 0.0,
         })
 
     return lag_results
@@ -647,7 +658,7 @@ def find_corr_clusters(df: pd.DataFrame, feature_cols: List[str], threshold: flo
     if len(feature_cols) < 2:
         return []
 
-    sub = df[feature_cols].apply(pd.to_numeric, errors='coerce')
+    sub = df[feature_cols].apply(pd.to_numeric, errors='coerce').fillna(0)
     corr_matrix = sub.corr().abs().fillna(0)
 
     pairs = []
@@ -940,7 +951,7 @@ def compute_poor_mans_curve_data(df: pd.DataFrame, x_col: str, y_col: str, n_bin
 
 
 # ---------------------------------------------------------------------------
-# OUTLIER DETECTION (PERCENTILES, Z-SCORE & IQR)
+# OUTLIER DETECTION & REMOVAL ENGINE (Percentiles, Z-Score, IQR)
 # ---------------------------------------------------------------------------
 def detect_outliers_engine(
     df: pd.DataFrame,
@@ -950,15 +961,6 @@ def detect_outliers_engine(
     lower_percentile: float = 1.0,
     upper_percentile: float = 99.0,
 ) -> Dict[str, Any]:
-    """Flag outlying rows in one column by percentile, z-score, or IQR.
-
-    `threshold` means something different per method - sigmas for z-score, a
-    multiplier of the interquartile range for IQR, and nothing at all for
-    percentiles, which read their bounds from the two percentile arguments.
-
-    The percentile arguments are optional so callers that only offer z-score
-    and IQR, like /v2 review, can leave them out entirely.
-    """
     if column not in df.columns:
         raise ValueError(f"Column '{column}' not in dataset.")
 
@@ -966,37 +968,60 @@ def detect_outliers_engine(
     valid_idx = series.dropna().index
     vals = series.dropna()
 
+    if len(vals) == 0:
+        return {
+            "column": column,
+            "method": method,
+            "threshold": threshold,
+            "lower_percentile": lower_percentile,
+            "upper_percentile": upper_percentile,
+            "total_rows": len(df),
+            "outlier_count": 0,
+            "outlier_pct": 0.0,
+            "lower_bound": 0.0,
+            "upper_bound": 0.0,
+            "preview_flagged_rows": [],
+            "outlier_indices": [],
+        }
+
     m = str(method).strip().lower()
 
     if m in ("zscore", "z-score", "z_score"):
-        mean_v = vals.mean()
-        std_v = vals.std() if vals.std() != 0 else 1.0
+        mean_v = float(vals.mean())
+        std_v = float(vals.std()) if vals.std() != 0 else 1.0
         z_scores = (vals - mean_v).abs() / std_v
         outlier_mask = z_scores > float(threshold)
         lower_bound = float(mean_v - float(threshold) * std_v)
         upper_bound = float(mean_v + float(threshold) * std_v)
         method_label = f"Z-Score ({threshold} σ)"
+
     elif m == "iqr":
-        # Asked for by name only. It used to fall through to the percentile
-        # branch below, which answered a different question under the label the
-        # caller asked for - the Data Review outlier tab defaults to IQR and was
-        # reading percentile bounds the whole time.
         q25 = float(vals.quantile(0.25))
         q75 = float(vals.quantile(0.75))
         iqr = q75 - q25
         lower_bound = float(q25 - float(threshold) * iqr)
         upper_bound = float(q75 + float(threshold) * iqr)
         outlier_mask = (vals < lower_bound) | (vals > upper_bound)
-        method_label = f"IQR ({threshold} x IQR)"
-    else:  # Percentiles
-        lp = max(0.0, min(100.0, float(lower_percentile))) / 100.0
-        up = max(0.0, min(100.0, float(upper_percentile))) / 100.0
-        if lp > up:
-            lp, up = up, lp
-        lower_bound = float(vals.quantile(lp))
-        upper_bound = float(vals.quantile(up))
+        method_label = f"IQR ({threshold} × IQR)"
+
+    else:  # Percentile
+        lp = float(lower_percentile)
+        up = float(upper_percentile)
+
+        if lp > 0 and lp < 1.0:
+            lp_norm = lp
+        else:
+            lp_norm = max(0.0001, min(49.9, lp)) / 100.0
+
+        if up > 0 and up <= 1.0:
+            up_norm = up
+        else:
+            up_norm = min(0.9999, max(50.1, up)) / 100.0
+
+        lower_bound = float(vals.quantile(lp_norm))
+        upper_bound = float(vals.quantile(up_norm))
         outlier_mask = (vals < lower_bound) | (vals > upper_bound)
-        method_label = f"Percentiles ({lower_percentile}th - {upper_percentile}th %ile)"
+        method_label = f"Percentiles (Bottom {lp_norm*100:.1f}% & Top {(1-up_norm)*100:.1f}%)"
 
     outlier_indices = valid_idx[outlier_mask].tolist()
     outlier_rows = df.loc[outlier_indices].head(50).to_dict(orient="records")
@@ -1072,7 +1097,7 @@ def compute_trend_rollup(
 
 
 # ---------------------------------------------------------------------------
-# MODULE 5 TRANSFORMATION ENGINE (Normalization, Adstock, Saturation, Arithmetic)
+# MODULE 5 TRANSFORMATION ENGINE
 # ---------------------------------------------------------------------------
 
 def geometric_adstock(series: np.ndarray, lags: int, adstock_coeff: float) -> np.ndarray:
@@ -1153,7 +1178,6 @@ def transform_single_channel(
 
     raw_s = df[channel].copy()
 
-    # Extract population series
     pop_s = None
     if pop_column:
         if isinstance(pop_column, list):
@@ -1163,12 +1187,9 @@ def transform_single_channel(
         elif isinstance(pop_column, str) and pop_column in df.columns:
             pop_s = pd.to_numeric(df[pop_column], errors="coerce").fillna(1.0)
 
-    # 1. Normalization
     norm_s = normalize_series_vectorized(raw_s, normalization, pop_s)
-
     primary_geo = geo_column[0] if isinstance(geo_column, list) and len(geo_column) > 0 else geo_column
 
-    # 2. Adstock (vectorized array operations)
     if adstock_coeff is not None and float(adstock_coeff) > 0 and lags is not None and int(lags) > 0:
         if primary_geo and primary_geo in df.columns:
             df_temp = pd.DataFrame({"geo": df[primary_geo].astype(str), "val": norm_s.values})
@@ -1186,7 +1207,6 @@ def transform_single_channel(
     else:
         adstocked = norm_s
 
-    # 3. Saturation Transformation
     final_s = apply_saturation(adstocked.values, sat_function, power_k=power_k, log_k=log_k)
     return pd.Series(final_s, index=df.index)
 
@@ -1289,7 +1309,6 @@ def apply_full_transformations_pipeline(
 ) -> pd.DataFrame:
     df_out = df.copy()
 
-    # Step 1: Compute Arithmetic Derived Variables FIRST so they exist as raw columns
     if derived_variables:
         for d in derived_variables:
             out_name = d.get("name")
@@ -1320,13 +1339,7 @@ def apply_full_transformations_pipeline(
 
             df_out[out_name] = res_series
 
-    # Step 2: Transform all channels
-    safe_transformations = [
-        t for t in transformations
-        if str(t.get("Channel Name")).strip() != str(dependent_variable).strip()
-    ]
-
-    for t in safe_transformations:
+    for t in transformations:
         channel = t.get("Channel Name")
         if not channel or channel not in df_out.columns:
             continue
@@ -1345,7 +1358,6 @@ def apply_full_transformations_pipeline(
         )
         df_out[f"{channel}_transformed"] = transformed_s
 
-    # Step 3: Add Carryover (Lag 1)
     primary_geo = geo_column[0] if isinstance(geo_column, list) and len(geo_column) > 0 else geo_column
     if add_carryover and dependent_variable in df_out.columns:
         if primary_geo and primary_geo in df_out.columns:
@@ -1561,26 +1573,32 @@ def run_ols_regression(
     start_date,
     end_date,
 ) -> dict:
-    transformed_df[date_column] = pd.to_datetime(transformed_df[date_column], dayfirst=True)
-    granular_df[date_column] = pd.to_datetime(granular_df[date_column], dayfirst=True)
+    transformed_df = transformed_df.copy()
+    granular_df = granular_df.copy()
 
-    modeling_duration_days = (pd.to_datetime(end_date, dayfirst=True) - pd.to_datetime(start_date, dayfirst=True)).days + 1
-    prior_end_date = pd.to_datetime(start_date, dayfirst=True) - pd.Timedelta(days=1)
+    transformed_df[date_column] = _parse_dates_robust(transformed_df[date_column].astype(str).str.strip())
+    granular_df[date_column] = _parse_dates_robust(granular_df[date_column].astype(str).str.strip())
+
+    start_dt = _parse_dates_robust(pd.Series([str(start_date)])).iloc[0]
+    end_dt = _parse_dates_robust(pd.Series([str(end_date)])).iloc[0]
+
+    modeling_duration_days = (end_dt - start_dt).days + 1
+    prior_end_date = start_dt - pd.Timedelta(days=1)
     prior_start_date = prior_end_date - pd.Timedelta(days=modeling_duration_days - 1)
 
-    tdf = transformed_df[(transformed_df[date_column] >= pd.to_datetime(start_date, dayfirst=True)) & (transformed_df[date_column] <= pd.to_datetime(end_date, dayfirst=True))]
-    gdf = granular_df[(granular_df[date_column] >= pd.to_datetime(start_date, dayfirst=True)) & (granular_df[date_column] <= pd.to_datetime(end_date, dayfirst=True))]
+    tdf = transformed_df[(transformed_df[date_column] >= start_dt) & (transformed_df[date_column] <= end_dt)]
+    gdf = granular_df[(granular_df[date_column] >= start_dt) & (granular_df[date_column] <= end_dt)]
     gdf_prior = granular_df[(granular_df[date_column] >= prior_start_date) & (granular_df[date_column] <= prior_end_date)]
 
     tdf_filtered = tdf[[date_column, geo_column, dependent_variable_user_input] + selected_channels]
-    y = tdf_filtered[dependent_variable_user_input]
-    X = tdf_filtered[selected_channels]
+    y = tdf_filtered[dependent_variable_user_input].astype(float)
+    X = tdf_filtered[selected_channels].astype(float)
     X = sm.add_constant(X)
     model = sm.OLS(y, X).fit()
 
     sum_sales = tdf_filtered[dependent_variable_user_input].sum()
-    sum_raw_sales = gdf[dependent_variable].sum()
-    sum_raw_sales_prior = gdf_prior[dependent_variable].sum() if len(gdf_prior) > 0 else 1
+    sum_raw_sales = gdf[dependent_variable].sum() if dependent_variable in gdf.columns else sum_sales
+    sum_raw_sales_prior = gdf_prior[dependent_variable].sum() if len(gdf_prior) > 0 and dependent_variable in gdf_prior.columns else 1
 
     coefficients = pd.DataFrame({"Variable": model.params.index, "Coefficient": model.params.values})
     tdf_filtered = tdf_filtered.copy()
@@ -1618,7 +1636,7 @@ def run_ols_regression(
     carryover_pct = coefficients[coefficients["Note"] == "Carryover"]["Impactable %"]
     if not carryover_pct.empty:
         cp = carryover_pct.iloc[0] / 100
-        carryover_rate = (cp * sum_raw_sales) / sum_raw_sales_prior
+        carryover_rate = (cp * sum_raw_sales) / sum_raw_sales_prior if sum_raw_sales_prior != 0 else 0
         long_term_factor = (3 + 2 * carryover_rate + carryover_rate ** 2) / 3
         coefficients["Long Term ROI"] = long_term_factor * coefficients["ROI"]
     else:
@@ -1631,8 +1649,9 @@ def run_ols_regression(
         "long_term_factor": long_term_factor,
         "start_date": str(start_date),
         "end_date": str(end_date),
-        "r_squared": model.rsquared,
-        "adj_r_squared": model.rsquared_adj,
+        "r_squared": float(model.rsquared),
+        "adj_r_squared": float(model.rsquared_adj),
+        "rmse": float(np.sqrt(model.mse_resid)),
     }
 
 
@@ -1712,20 +1731,23 @@ def _build_stage2_coefficients_table(
 def _filter_modelling_frames(transformed_df, granular_df, date_column, start_date, end_date):
     transformed_df = transformed_df.copy()
     granular_df = granular_df.copy()
-    transformed_df[date_column] = pd.to_datetime(transformed_df[date_column], dayfirst=True)
-    granular_df[date_column] = pd.to_datetime(granular_df[date_column], dayfirst=True)
+    transformed_df[date_column] = _parse_dates_robust(transformed_df[date_column].astype(str).str.strip())
+    granular_df[date_column] = _parse_dates_robust(granular_df[date_column].astype(str).str.strip())
 
-    modeling_duration_days = (pd.to_datetime(end_date, dayfirst=True) - pd.to_datetime(start_date, dayfirst=True)).days + 1
-    prior_end_date = pd.to_datetime(start_date, dayfirst=True) - pd.Timedelta(days=1)
+    start_dt = _parse_dates_robust(pd.Series([str(start_date)])).iloc[0]
+    end_dt = _parse_dates_robust(pd.Series([str(end_date)])).iloc[0]
+
+    modeling_duration_days = (end_dt - start_dt).days + 1
+    prior_end_date = start_dt - pd.Timedelta(days=1)
     prior_start_date = prior_end_date - pd.Timedelta(days=modeling_duration_days - 1)
 
     tdf = transformed_df[
-        (transformed_df[date_column] >= pd.to_datetime(start_date, dayfirst=True)) &
-        (transformed_df[date_column] <= pd.to_datetime(end_date, dayfirst=True))
+        (transformed_df[date_column] >= start_dt) &
+        (transformed_df[date_column] <= end_dt)
     ]
     gdf = granular_df[
-        (granular_df[date_column] >= pd.to_datetime(start_date, dayfirst=True)) &
-        (granular_df[date_column] <= pd.to_datetime(end_date, dayfirst=True))
+        (granular_df[date_column] >= start_dt) &
+        (granular_df[date_column] <= end_dt)
     ]
     gdf_prior = granular_df[
         (granular_df[date_column] >= prior_start_date) &
@@ -1749,8 +1771,8 @@ def run_ols_stage2(
     if parent_channel not in tdf.columns:
         raise ValueError(f"Parent channel '{parent_channel}' not found in filtered data")
 
-    y_s2 = tdf[parent_channel] * parent_coeff
-    X_s2 = sm.add_constant(tdf[s2_channels])
+    y_s2 = (tdf[parent_channel] * parent_coeff).values.astype(float)
+    X_s2 = sm.add_constant(tdf[s2_channels].astype(float))
     model_s2 = sm.OLS(y_s2, X_s2).fit()
     coeff_s2 = _build_stage2_coefficients_table(
         model_s2.params, tdf, gdf, parent_channel, parent_coeff, parent_impactable_sales, s2_channels
@@ -1795,8 +1817,8 @@ def run_ridge_regression(
     if stage == 1:
         channels = selected_channels
         tdf_ch = tdf[[date_column, geo_column, dependent_variable_user_input] + channels]
-        y_raw = tdf_ch[dependent_variable_user_input].values
-        X_raw = tdf_ch[channels].copy()
+        y_raw = tdf_ch[dependent_variable_user_input].values.astype(float)
+        X_raw = tdf_ch[channels].astype(float).copy()
     else:
         if not parent_channel or not s2_channels or not stage1_coefficients:
             raise ValueError("Stage 2 requires parent_channel, s2_channels, and stage1_coefficients")
@@ -1807,8 +1829,8 @@ def run_ridge_regression(
         if parent_channel not in tdf.columns:
             raise ValueError(f"Parent channel '{parent_channel}' not found")
         channels = s2_channels
-        y_raw = (tdf[parent_channel] * parent_coeff).values
-        X_raw = tdf[channels].copy()
+        y_raw = (tdf[parent_channel] * parent_coeff).values.astype(float)
+        X_raw = tdf[channels].astype(float).copy()
 
     def scale_fn(X_df, scaler_obj, fit=True):
         return _ridge_scale_and_weight(X_df, scaler_obj, channels, prior_weights, use_custom_penalties, fit)
@@ -2004,47 +2026,3 @@ def create_response_curve(channel_name, impactable_sales_nation, beta_coeff, spe
         rows.append({"spend": spend, "impactable_geo_time": impactable_geo_time, "impactable_nation": impactable_nation, "impactable_nation_currency": impactable_nation_currency, "roi": roi, "mroi": mroi})
         prev_impactable = impactable_nation
     return pd.DataFrame(rows)
-
-
-def compute_cross_correlation_lags(
-    df: pd.DataFrame,
-    date_col: str,
-    x_col: str,
-    y_col: str,
-    max_lags: int = 6,
-) -> List[Dict[str, Any]]:
-    """Cross-correlation of X against Y across time lags, -max_lags..+max_lags.
-
-    A positive lag shifts X forward, so it answers "does spend in week N move
-    sales in week N+lag?".
-    """
-    if date_col not in df.columns or x_col not in df.columns or y_col not in df.columns:
-        return []
-
-    df_time = df[[date_col, x_col, y_col]].copy()
-    # One explicit format for the whole column. The original inferred with
-    # dayfirst=True, which reads ISO dates as %Y-%d-%m and scatters one week
-    # across several - silently changing every correlation below.
-    df_time[date_col] = _parse_dates_robust(df_time[date_col].astype(str).str.strip())
-    df_time = df_time.dropna().sort_values(date_col)
-    if df_time.empty:
-        return []
-
-    # Collapse to one row per date first: correlating raw HCP-level rows would
-    # measure cross-sectional spread, not movement over time.
-    ts = df_time.groupby(date_col)[[x_col, y_col]].sum().reset_index()
-    s_x = pd.to_numeric(ts[x_col], errors="coerce").fillna(0)
-    s_y = pd.to_numeric(ts[y_col], errors="coerce").fillna(0)
-
-    lag_results: List[Dict[str, Any]] = []
-    for lag in range(-max_lags, max_lags + 1):
-        r = s_x.shift(lag).corr(s_y) if lag else s_x.corr(s_y)
-        lag_results.append({
-            "lag": lag,
-            "label": f"Lag {lag:+d}w" if lag else "Same Week (Lag 0)",
-            "correlation": round(float(r), 3) if pd.notna(r) else 0.0,
-        })
-
-    return lag_results
-
-
