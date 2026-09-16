@@ -166,7 +166,7 @@ export default function ModelResults() {
     ];
   }, [selectedModel]);
 
-  // Generate / Fetch Response Curves for Finalized Model
+  // Generate / Fetch Response Curves for Finalized Model & Build mergedRc for Module 8
   useEffect(() => {
     if (!isFinalized || !selectedModel || !channelPerformanceData.length) return;
     setRcLoading(true);
@@ -186,9 +186,21 @@ export default function ModelResults() {
 
     generateResponseCurves({ channels: channelPayload, num_time: 12, num_geo: 100 })
       .then((res) => {
-        setResponseCurvesData(res.curves || {});
-        setField("responseCurves", res.curves || {});
-        const keys = Object.keys(res.curves || {});
+        const curves = res.curves || {};
+        setResponseCurvesData(curves);
+        setField("responseCurves", curves);
+
+        // Build mergedRc dictionary for Module 8 Optimizer Engine
+        const builtMergedRc = {};
+        Object.entries(curves).forEach(([ch, rows]) => {
+          builtMergedRc[`${ch}_spend`] = rows.map((r) => r.spend);
+          builtMergedRc[`${ch}_impactable_nation`] = rows.map((r) => r.impactable_nation);
+          builtMergedRc[`${ch}_roi`] = rows.map((r) => r.roi);
+          builtMergedRc[`${ch}_mroi`] = rows.map((r) => r.mroi);
+        });
+        setField("mergedRc", builtMergedRc);
+
+        const keys = Object.keys(curves);
         if (keys.length > 0 && (!activeRcChannel || !keys.includes(activeRcChannel))) {
           setActiveRcChannel(keys[0]);
         }
@@ -247,7 +259,6 @@ export default function ModelResults() {
         setBenchmarkResult(res);
       })
       .catch(() => {
-        // Fallback robust standard benchmarks
         setBenchmarkResult({
           benchmark_group: `${therapyType} • ${maturityStage} • ${competitionLevel}`,
           overall_comparison: [

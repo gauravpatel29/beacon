@@ -9,8 +9,8 @@ const initialState = {
   workflowName: null,
 
   // Ingestion (v2)
-  datasets: [],          // [{filename, row_count, columns, category, spec, applied, kind, column_roles}]
-  activeDataset: null,   // filename the downstream stages read
+  datasets: [],
+  activeDataset: null,
 
   // ARD Tracking & Stitching State Persistence
   savedArds: [],
@@ -18,7 +18,7 @@ const initialState = {
   stitchingSourceFiles: null,
 
   // Column Configuration & Ingestion Roles
-  columnRoles: {}, // { [columnName]: "Cross-sectional Variable" | "Dependent Variable" | "Time Variable" | "Independent Promotions" | "Baseline Variables" }
+  columnRoles: {},
   dateColumn: null,
   geoColumn: null,
   zipColumn: null,
@@ -33,8 +33,9 @@ const initialState = {
 
   // Transformation Parameters
   transformationConfig: [],
+  savedTransformationSets: [],
   addCarryover: false,
-  modelSpecification: "linear_log", // "linear_log" | "log_log"
+  modelSpecification: "linear_log",
 
   // Modelling
   selectedChannels: [],
@@ -43,13 +44,16 @@ const initialState = {
   regressionOutputs: [],
   selectedModelIdx: null,
 
-  // Response Curves
+  // Module 7: Finalization, Results & Response Curves
+  finalizedModelId: null,
+  channelSpendMap: {},
   responseCurves: {},
   responseCurveConfig: [],
   mergedRc: {},
 
-  // Optimization
+  // Module 8: Optimization & Scenario Planning
   optimizationResult: null,
+  savedOptimizationScenarios: [],
 };
 
 const STORAGE_KEY = "proctimize_active_state";
