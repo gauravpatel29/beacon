@@ -23,7 +23,7 @@ function Optimization() {
 
   // ── Per-channel unit cost, derived from real current spend ÷ real exposure ──
   // If a channel has no current spend entered on Model Output, there's no
-  // real $-per-unit conversion available — flagged per-channel rather than
+  // real $-per-unit conversion available - flagged per-channel rather than
   // silently assuming a cost.
   const channelMath = useMemo(() => {
     if (!finalizedModel) return [];
@@ -32,7 +32,7 @@ function Optimization() {
       const spend = Number(currentSpend[c.name]) || 0;
       const exposure = stats.sum ?? 0;
       const unitCost = spend > 0 && exposure > 0 ? spend / exposure : null;
-      // Marginal ROI per dollar — constant here because the underlying
+      // Marginal ROI per dollar - constant here because the underlying
       // response is linear (coefficient × exposure); see Model Output's
       // note on why raw-spend saturation isn't wired in yet.
       const marginalRoi = unitCost ? c.value / unitCost : null;
@@ -77,13 +77,13 @@ function Optimization() {
 
   // ── The optimizer itself: greedy fill by marginal ROI ──────────────────
   // This is the mathematically correct global optimum for a LINEAR
-  // objective under box (min/max) constraints — not a heuristic
+  // objective under box (min/max) constraints - not a heuristic
   // approximation. It would need to become an iterative/marginal-utility
   // solver instead once real diminishing-returns curves are wired in.
   const runOptimizer = () => {
     setRunError(null);
     if (usableChannels.length === 0) {
-      setRunError('No channel has a usable $-per-unit cost yet — enter current spend for at least one channel on Model Output first.');
+      setRunError('No channel has a usable $-per-unit cost yet - enter current spend for at least one channel on Model Output first.');
       return;
     }
 
@@ -130,7 +130,7 @@ function Optimization() {
       });
 
       if (!reached) {
-        setRunError(`Target not reachable within the given max constraints — best achievable is ${cumulative.toLocaleString(undefined, { maximumFractionDigits: 0 })} of your ${target.toLocaleString()} target.`);
+        setRunError(`Target not reachable within the given max constraints - best achievable is ${cumulative.toLocaleString(undefined, { maximumFractionDigits: 0 })} of your ${target.toLocaleString()} target.`);
       }
       const totalSpend = Object.values(allocation).reduce((a, b) => a + b, 0);
       finish(allocation, totalSpend, target, 0, !reached);
@@ -169,7 +169,7 @@ function Optimization() {
       </div>
 
       {!finalizedModel ? (
-        <p className="opt-empty">No finalized model found — finalize one on the Model Output page first.</p>
+        <p className="opt-empty">No finalized model found - finalize one on the Model Output page first.</p>
       ) : (
         <>
           <div className="opt-card">
@@ -246,7 +246,7 @@ function Optimization() {
                   <div className="opt-stat-card"><p className="opt-stat-value">{(result.totalProjectedImpact / result.totalSpend).toFixed(2)}x</p><p className="opt-stat-label">Blended ROI</p></div>
                   <div className="opt-stat-card">
                     <p className="opt-stat-value">
-                      {result.totalCurrentImpact > 0 ? `${(((result.totalProjectedImpact - result.totalCurrentImpact) / result.totalCurrentImpact) * 100).toFixed(1)}%` : '—'}
+                      {result.totalCurrentImpact > 0 ? `${(((result.totalProjectedImpact - result.totalCurrentImpact) / result.totalCurrentImpact) * 100).toFixed(1)}%` : '-'}
                     </p>
                     <p className="opt-stat-label">Impact Lift vs. Current</p>
                   </div>
@@ -255,7 +255,7 @@ function Optimization() {
                 {scenario === 'budget' && result.leftover > 0.01 && (
                   <div className="opt-note">
                     ${result.leftover.toLocaleString(undefined, { maximumFractionDigits: 0 })} of budget couldn't be
-                    allocated — every channel hit its max constraint.
+                    allocated - every channel hit its max constraint.
                   </div>
                 )}
 

@@ -99,9 +99,6 @@ function DataTransformation() {
   // Linear-Log keeps the KPI in linear units and out of the transformable set;
   // Log-Log puts a log curve on it, which makes it a channel Step 3 configures.
   const [modelSpec, setModelSpec] = useState('linear_log'); // linear_log | log_log
-  // KPI columns the user has chosen to keep out of the transformable set.
-  // Empty by default: nothing is locked unless it is locked deliberately.
-  const [lockedDeps, setLockedDeps] = useState([]);
 
   // Step 2
   const [selectedVars, setSelectedVars] = useState(new Set());
@@ -150,7 +147,7 @@ function DataTransformation() {
   const stateRestored = useScreenState('transformation', {
     ready: Boolean(columns.length),
     deps: [selectedArdFilename, dateKeys, geoKeys, dependentVars, zipKeys, dmaKeys,
-           popKeys, carryover, modelSpec, lockedDeps, selectedVars, derivedVars, configs, transformSetName,
+           popKeys, carryover, modelSpec, selectedVars, derivedVars, configs, transformSetName,
            corrThreshold, inspectVar, savedSet],
     snapshot: () => ({
       ard: selectedArdFilename,
@@ -177,7 +174,6 @@ function DataTransformation() {
       if (Array.isArray(s.popKeys)) setPopKeys(s.popKeys);
       if (typeof s.carryover === 'boolean') setCarryover(s.carryover);
       if (s.modelSpec === 'linear_log' || s.modelSpec === 'log_log') setModelSpec(s.modelSpec);
-      if (Array.isArray(s.lockedDeps)) setLockedDeps(s.lockedDeps);
       if (Array.isArray(s.selectedVars)) setSelectedVars(new Set(s.selectedVars));
       if (Array.isArray(s.derivedVars)) setDerivedVars(s.derivedVars);
       if (s.configs && typeof s.configs === 'object') setConfigs(s.configs);
@@ -284,20 +280,37 @@ function DataTransformation() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedArdFilename, workflowId]);
 
+  // The model's keys. Baseline columns are deliberately NOT here: a population
+  // column is both the divisor for population normalization and a variable
+  // worth transforming in its own right.
   const lockedKeys = useMemo(
-    () => new Set([...dateKeys, ...geoKeys, ...zipKeys, ...dmaKeys, ...popKeys]),
-    [dateKeys, geoKeys, zipKeys, dmaKeys, popKeys]
+    () => new Set([...dateKeys, ...geoKeys, ...zipKeys, ...dmaKeys]),
+    [dateKeys, geoKeys, zipKeys, dmaKeys]
   );
 
-  // A KPI is transformable unless the user locks it. It used to be locked
-  // unconditionally, which made "strictly locked from transformation" a rule
-  // of the screen rather than a decision anyone had taken.
-  const eligibleColumns = useMemo(
-    () => columns.filter((c) => !lockedKeys.has(c)
-      && !lockedDeps.includes(c)
-      && isNumericColumn(rows, c)),
-    [columns, rows, lockedKeys, lockedDeps]
-  );
+  /**
+   * What Step 3 can configure: promotions and baselines, plus the KPI only
+   * under Log-Log.
+   *
+   * The formulation IS the KPI lock. Linear-Log keeps the dependent variable
+   * in linear units, so it is not a channel to adstock and saturate; Log-Log
+   * puts a log curve on it, which makes it one. There is no separate lock
+   * control: an earlier version of this screen had per-KPI checkboxes, so the
+   * radio could say the KPI was un-transformed while a checkbox still put it
+   * in the table.
+   *
+   * Built from the ingestion categories rather than "every numeric column that
+   * is not a key", so a geography code or an ID that happens to be numeric is
+   * never offered as a media channel.
+   */
+  const eligibleColumns = useMemo(() => {
+    const part = rolePartition(columns, declaredRoles);
+    const list = [...part['Independent Promotions'], ...part['Baseline Variables']];
+    if (modelSpec === 'log_log') {
+      for (const dep of dependentVars) if (!list.includes(dep)) list.push(dep);
+    }
+    return list.filter((c) => !lockedKeys.has(c) && isNumericColumn(rows, c));
+  }, [columns, declaredRoles, rows, lockedKeys, dependentVars, modelSpec]);
 
   const togglePill = (setter, list, col) => {
     setter(list.includes(col) ? list.filter((c) => c !== col) : [...list, col]);
@@ -311,9 +324,6 @@ function DataTransformation() {
       return next;
     });
   };
-
-  const selectAllEligible = () => setSelectedVars(new Set(eligibleColumns));
-  const deselectAll = () => setSelectedVars(new Set());
 
   // The builder stays a draft until Add: a half-specified derived variable
   // would otherwise reach the engine, which needs at least two real columns.
@@ -393,7 +403,25 @@ function DataTransformation() {
   // from a file ingested before categories existed still gets one.
   const columnRoles = rolesFor(columns, declaredRoles);
 
-  const selectedList = Array.from(selectedVars);
+
+  /**
+   * The channels Step 2 configures, in the order they are shown.
+   *
+   * Step 1's Promotions card holds the marketing selection and its Baseline
+   * card the population and macro ones; the KPI joins them under Log-Log, and
+   * a derived channel is added at the end. There is no separate selection
+   * step: one decision, taken in one place.
+   *
+   * Everything is intersected with `eligibleColumns`, so a column that has
+   * since been chosen as the date or geography key drops out rather than being
+   * configured as a channel.
+   */
+  const selectedList = useMemo(() => {
+    const chosen = [...selectedVars, ...popKeys];
+    if (modelSpec === 'log_log') chosen.push(...dependentVars);
+    const kept = chosen.filter((c, i) => eligibleColumns.includes(c) && chosen.indexOf(c) === i);
+    return [...kept, ...derivedVars.map((d) => d.name)];
+  }, [selectedVars, popKeys, dependentVars, modelSpec, eligibleColumns, derivedVars]);
 
   // Derived rather than synced through an effect: the inspected channel is
   // always one of the currently selected variables, falling back to the first
@@ -774,28 +802,14 @@ function DataTransformation() {
                       Generate Carryover (Lag 1 of Sales KPI)
                     </label>
 
-                    {/* The lock is now a decision, not a rule. A KPI is
-                        transformable until somebody ticks it here. */}
+                    {/* What the radio above actually did, said in the terms
+                        the rest of the screen uses. */}
                     {dependentVars.length > 0 && (
-                      <>
-                        <p className="category-card-hint" style={{ marginTop: '0.7rem' }}>
-                          Lock a KPI to keep it out of the transformation table:
-                        </p>
-                        {dependentVars.map((kpi) => (
-                          <label className="formulation-option" key={kpi}>
-                            <input
-                              type="checkbox"
-                              checked={lockedDeps.includes(kpi)}
-                              onChange={() => setLockedDeps(
-                                lockedDeps.includes(kpi)
-                                  ? lockedDeps.filter((k) => k !== kpi)
-                                  : [...lockedDeps, kpi]
-                              )}
-                            />
-                            Lock {kpi}
-                          </label>
-                        ))}
-                      </>
+                      <p className="category-card-hint" style={{ marginTop: '0.7rem' }}>
+                        {modelSpec === 'log_log'
+                          ? `${dependentVars.join(', ')} is unlocked and appears in the transformation table.`
+                          : `${dependentVars.join(', ')} is locked out of the transformation table.`}
+                      </p>
                     )}
                     <p className="category-card-hint">
                       {eligibleColumns.length} channel(s) eligible for transformation.
@@ -804,141 +818,87 @@ function DataTransformation() {
                 </div>
               </div>
 
-              {/* ---- Step 2: Variable Selection Grid ---- */}
-              <div className="transform-card">
-                <p className="transform-section-title">Step 2: Variable Selection Grid</p>
-                <p className="transform-section-desc">
-                  Check the marketing variables you want to transform. Target KPI(s) are visible but locked to prevent transformation.
-                </p>
-                <div className="step-toolbar">
-                  <span className="step-toolbar-link" onClick={selectAllEligible}>Select All Eligible</span>
-                  <div className="step-toolbar-divider" />
-                  <span className="step-toolbar-link muted" onClick={deselectAll}>Deselect All</span>
-                  <button className="add-derived-btn" onClick={openDerivedBuilder} disabled={eligibleColumns.length < 2}>Add Derived Variable</button>
-                </div>
-
-                {derivedDraft && (
-                  <div className="derived-builder">
-                    <p className="transform-card-heading">Create Arithmetic Derived Variable</p>
-                    <div className="derived-builder-row">
-                      <div className="derived-builder-field">
-                        <label>Derived Channel Name</label>
-                        <input
-                          type="text"
-                          value={derivedDraft.name}
-                          placeholder={derivedDraft.parts.length >= 2
-                            ? derivedDefaultName(derivedDraft) : 'e.g. TOTAL_PERSONAL_PROMO'}
-                          onChange={(e) => setDerivedDraft({ ...derivedDraft, name: e.target.value })}
-                        />
-                      </div>
-                      <div className="derived-builder-field">
-                        <label>Operator</label>
-                        <select
-                          value={derivedDraft.operator}
-                          onChange={(e) => setDerivedDraft({ ...derivedDraft, operator: e.target.value })}
-                        >
-                          <option value="+">Addition (+)</option>
-                          <option value="-">Subtraction (-)</option>
-                          <option value="*">Multiplication (*)</option>
-                          <option value="/">Division (/)</option>
-                        </select>
-                      </div>
-                    </div>
-
-                    <p className="derived-builder-label">
-                      Source Variables (pick at least two, applied in the order shown)
-                    </p>
-                    <div className="derived-part-pills">
-                      {eligibleColumns.map((c) => {
-                        const position = derivedDraft.parts.indexOf(c);
-                        return (
-                          <button
-                            type="button"
-                            key={c}
-                            className={`col-pill${position >= 0 ? ' selected' : ''}`}
-                            onClick={() => toggleDerivedPart(c)}
-                          >
-                            {position >= 0 ? `${position + 1}. ${c}` : c}
-                          </button>
-                        );
-                      })}
-                    </div>
-
-                    <p className="derived-builder-preview">
-                      {derivedDraft.parts.length >= 2
-                        ? `${derivedDraft.name.trim().toUpperCase() || derivedDefaultName(derivedDraft)} = ${derivedDraft.parts.join(` ${derivedDraft.operator} `)}`
-                        : 'Pick a second variable to complete the expression.'}
-                    </p>
-
-                    <div className="derived-builder-actions">
-                      <button
-                        type="button"
-                        className="mapping-btn primary"
-                        disabled={derivedDraft.parts.length < 2}
-                        onClick={commitDerivedVariable}
-                      >
-                        Add
-                      </button>
-                      <button type="button" className="mapping-btn" onClick={cancelDerivedBuilder}>
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                )}
-                <div className="var-grid-table-wrapper">
-                  <table className="var-grid-table">
-                    <thead>
-                      <tr><th>Select</th><th>Variable Name</th><th>Category</th><th>Grain</th><th>Type</th><th>Transformation Status</th></tr>
-                    </thead>
-                    <tbody>
-                      {[...columns, ...derivedVars.map((d) => d.name)].map((c) => {
-                        const isKey = lockedKeys.has(c) && !dependentVars.includes(c);
-                        const isDependent = dependentVars.includes(c);
-                        const isEligible = eligibleColumns.includes(c) || derivedVars.some((d) => d.name === c);
-                        return (
-                          <tr key={c}>
-                            <td>
-                              {isEligible && (
-                                <input type="checkbox" checked={selectedVars.has(c)} onChange={() => toggleVarSelect(c)} />
-                              )}
-                            </td>
-                            <td><strong>{c}</strong></td>
-                            {/* What this column was declared to be at
-                                ingestion, shown where the decision to
-                                transform it is actually taken. */}
-                            <td>
-                              <span className={`role-chip tone-${roleMeta(columnRoles[c])?.tone || 'neutral'}`}>
-                                {roleMeta(columnRoles[c])?.short || 'Derived'}
-                              </span>
-                            </td>
-                            <td><span className="grain-badge">{geoKeys[0] ? geoKeys[0].toUpperCase() : 'HCP'}</span></td>
-                            <td>Numeric</td>
-                            <td>
-                              {isKey ? (
-                                <span className="status-preserved">ID / Group Key (Preserved)</span>
-                              ) : isDependent ? (
-                                <span className="status-locked"><span className="status-lock-icon">🔒</span>Sales (Dependent Variable) - Transform Disabled</span>
-                              ) : selectedVars.has(c) ? (
-                                <span className="status-included">✓ Included in Step 3</span>
-                              ) : (
-                                <span className="status-preserved">Not selected</span>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* ---- Step 3: Transformation Configuration Table ---- */}
+              {/* ---- Step 2: Transformation Configuration Table ----
+                  There is no separate variable-selection step. What gets
+                  configured here is what Step 1 put in the Promotions and
+                  Baseline cards, plus the KPI when the formulation is Log-Log
+                  and any derived channel added below. A grid that repeated
+                  those same selections was a second place to change one
+                  decision. */}
               {selectedList.length > 0 && (
                 <div className="transform-card">
-                  <p className="transform-section-title">Step 3: Transformation Configuration Table</p>
+                  <p className="transform-section-title">Step 2: Transformation Configuration Table</p>
                   <p className="transform-section-desc">
-                    Configure Normalization, Adstock Decay, Adstock Horizon (decay span), Lag (pure shift) and Saturation curves per channel. Use the i on any row for benchmarks.
+                    Configure Normalization, Adstock Decay, Adstock Horizon (decay span), Lag (pure
+                    shift) and Saturation curves per channel. Use the i on any row for benchmarks.
+                    {' '}Channels come from the categories in Step 1
+                    {modelSpec === 'log_log' && dependentVars.length > 0
+                      ? `, including ${dependentVars.join(', ')} under Log-Log.`
+                      : '.'}
                   </p>
+
+                  <div className="step-toolbar">
+                    <button
+                      className="add-derived-btn" onClick={openDerivedBuilder}
+                      disabled={eligibleColumns.length < 2}
+                    >
+                      Add Derived Channel
+                    </button>
+                  </div>
+
+                  {derivedDraft && (
+                    <div className="derived-builder">
+                      <p className="transform-card-heading">Create Arithmetic Derived Channel</p>
+                      <div className="derived-builder-row">
+                        <div className="derived-builder-field">
+                          <label>Name</label>
+                          <input
+                            type="text"
+                            value={derivedDraft.name}
+                            placeholder={derivedDefaultName(derivedDraft)}
+                            onChange={(e) => setDerivedDraft((p) => ({ ...p, name: e.target.value }))}
+                          />
+                        </div>
+                        <div className="derived-builder-field">
+                          <label>Operator</label>
+                          <select
+                            value={derivedDraft.operator}
+                            onChange={(e) => setDerivedDraft((p) => ({ ...p, operator: e.target.value }))}
+                          >
+                            {['+', '-', '*', '/'].map((o) => <option key={o} value={o}>{o}</option>)}
+                          </select>
+                        </div>
+                      </div>
+                      <p className="derived-builder-label">
+                        Columns, in order ({derivedDraft.parts.length} selected, at least 2):
+                      </p>
+                      <div className="pill-group-box">
+                        {eligibleColumns.map((c) => {
+                          const position = derivedDraft.parts.indexOf(c);
+                          return (
+                            <button
+                              type="button"
+                              key={c}
+                              className={`col-pill${position >= 0 ? ' selected' : ''}`}
+                              onClick={() => toggleDerivedPart(c)}
+                            >
+                              {position >= 0 ? `${position + 1}. ` : '+ '}{c}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div className="derived-builder-actions">
+                        <button
+                          className="mapping-btn primary"
+                          disabled={derivedDraft.parts.length < 2}
+                          onClick={commitDerivedVariable}
+                        >
+                          Add
+                        </button>
+                        <button className="mapping-btn" onClick={cancelDerivedBuilder}>Cancel</button>
+                      </div>
+                    </div>
+                  )}
 
                   <div className="config-table-wrapper">
                     <table className="config-table">

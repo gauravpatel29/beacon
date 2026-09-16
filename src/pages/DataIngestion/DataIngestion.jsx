@@ -912,9 +912,9 @@ function DataIngestion() {
   const fileInputRef = useRef(null);
 
   // ── Data Review tab: Time Trends chart state ──────────────────────────
-  // Built from `selectedFile.previewRows` only - there is no endpoint yet
-  // that returns a raw uploaded file's FULL content, so this is a
-  // preview-sample rollup, not a full-dataset one (see note rendered below).
+  // Rolled up from the file's COMPLETE content, fetched through the dataset
+  // /csv endpoint. This was a preview-sample rollup until that endpoint was
+  // found; the note under the chart says which one it is drawing.
   const [trendAggregation, setTrendAggregation] = useState('wow'); // 'wow' | 'mom'
   const [trendMetrics, setTrendMetrics] = useState([]);
   const [trendXAxis, setTrendXAxis] = useState('');

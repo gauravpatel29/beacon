@@ -7,7 +7,7 @@ const FINALIZED_KEY = 'mmm_finalized_model';
 const spendKeyFor = (modelId) => `mmm_spend_${modelId}`;
 
 // ─── Channel bucket classification (baseline vs promotion types) ───────────
-// Pattern-matched from channel/column names — there's no explicit "channel
+// Pattern-matched from channel/column names - there's no explicit "channel
 // category" field anywhere upstream, so this is a best-effort heuristic.
 // Anything that doesn't match a known pattern falls into "Other Marketing"
 // rather than being force-fit into one of the three named buckets.
@@ -200,7 +200,7 @@ function ModelOutput() {
         <>
           {/* ---- High-level impact ---- */}
           <div className="mo-card">
-            <p className="mo-section-title">High-Level Impact — {finalizedModel.name}</p>
+            <p className="mo-section-title">High-Level Impact - {finalizedModel.name}</p>
             <p className="mo-section-desc">
               Baseline vs. promotional impact, computed as coefficient × total observed exposure per channel,
               classified by channel name pattern (personal / NPP / DTC / other).
@@ -248,7 +248,7 @@ function ModelOutput() {
                       <td><span className="bucket-badge" style={{ backgroundColor: `${BUCKET_COLORS[d.bucket]}22`, color: BUCKET_COLORS[d.bucket] }}>{BUCKET_LABELS[d.bucket]}</span></td>
                       <td>{d.value.toFixed(4)}</td>
                       <td>{d.contribution.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
-                      <td>{highLevelImpact ? ((d.contribution / highLevelImpact.total) * 100).toFixed(1) : '—'}%</td>
+                      <td>{highLevelImpact ? ((d.contribution / highLevelImpact.total) * 100).toFixed(1) : '-'}%</td>
                       <td>
                         <input
                           type="number"
@@ -260,7 +260,7 @@ function ModelOutput() {
                       </td>
                       <td>
                         {d.roi === null ? (
-                          <span className="roi-value neutral">—</span>
+                          <span className="roi-value neutral">-</span>
                         ) : (
                           <span className={`roi-value ${d.roi >= 1 ? 'good' : 'bad'}`}>{d.roi.toFixed(2)}x</span>
                         )}
@@ -279,7 +279,7 @@ function ModelOutput() {
               Predicted contribution vs. the channel's observed (Adstock/Saturation-transformed) exposure range from Data Transformation.
             </p>
             <div className="mo-note">
-              This plots contribution against the already-transformed variable, not raw spend — the regression itself
+              This plots contribution against the already-transformed variable, not raw spend - the regression itself
               is linear in that space. Mapping this back to a raw-spend diminishing-returns curve requires linking to
               the channel's saturation parameters from Data Transformation, which isn't wired between these two modules yet.
             </div>
@@ -300,7 +300,7 @@ function ModelOutput() {
           <div className="mo-card">
             <p className="mo-section-title">Benchmark Comparison</p>
             <div className="mo-note">
-              Benchmark figures below are illustrative reference values only — there's no live external benchmark
+              Benchmark figures below are illustrative reference values only - there's no live external benchmark
               data source connected yet. Swap `lookupBenchmark()` for a real API call once one exists.
             </div>
             <div className="benchmark-controls-row">
@@ -358,13 +358,13 @@ function ModelOutput() {
                         <tr key={b.channel}>
                           <td>{b.channel}</td>
                           <td>{b.roi}x</td>
-                          <td>{yourRoi !== null ? `${yourRoi.toFixed(2)}x` : '—'}</td>
+                          <td>{yourRoi !== null ? `${yourRoi.toFixed(2)}x` : '-'}</td>
                           <td>
                             {yourRoi !== null ? (
                               <span className={`benchmark-delta ${yourRoi >= Number(b.roi) ? 'above' : 'below'}`}>
                                 {yourRoi >= Number(b.roi) ? '▲' : '▼'} {Math.abs(yourRoi - Number(b.roi)).toFixed(2)}x
                               </span>
-                            ) : '—'}
+                            ) : '-'}
                           </td>
                         </tr>
                       );

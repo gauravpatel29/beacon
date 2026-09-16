@@ -61,16 +61,67 @@ t('no per-row Auto button', !/auto-fill-btn/.test(tx), 'button remains');
 t('no Auto Select All button', !/auto-select-all-btn/.test(tx), 'button remains');
 t('and no leftover state for it', !/isAutoSelecting/.test(tx), 'dead state');
 
-console.log('\n5. the KPI lock is a choice, not a rule');
-t('the lock list starts empty', /const \[lockedDeps, setLockedDeps\] = useState\(\[\]\)/.test(tx),
-  'locked by default');
-t('eligibility respects only what was locked',
-  /!lockedDeps\.includes\(c\)/.test(tx), 'still unconditional');
-t('the KPI is no longer excluded outright',
-  !/modelSpec === 'log_log' \|\| !dependentVars\.includes\(c\)/.test(tx), 'the rule survives');
-t('there is a lock control per KPI', /Lock \{kpi\}/.test(tx), 'no control');
-t('and the choice is persisted',
-  /if \(Array\.isArray\(s\.lockedDeps\)\) setLockedDeps/.test(tx), 'lost on resume');
+console.log('\n5. the formulation IS the KPI lock');
+// Linear-Log keeps the dependent variable in linear units, so it is not a
+// channel to adstock and saturate; Log-Log puts a log curve on it, which makes
+// it one. That is the whole lock, exactly as the reference app has it.
+t('the KPI joins the transformable set only under Log-Log',
+  /if \(modelSpec === 'log_log'\) \{\s*\n\s*for \(const dep of dependentVars\)/.test(tx),
+  'the formulation does not control it');
+// Two controls for one decision meant the radio could say "un-transformed"
+// while a checkbox still put the KPI in the table.
+t('there is no second lock control', !/lockedDeps/.test(tx), 'a competing control');
+t('and none in the markup', !/Lock \{kpi\}/.test(tx), 'checkbox survives');
+t('the panel says which way it is set',
+  /is unlocked and appears in the transformation table/.test(tx)
+  && /is locked out of the transformation table/.test(tx), 'silent state');
+
+console.log('\n5b. the transformable set is the ingestion categories');
+// Not "every numeric column that is not a key": a geography code or an ID that
+// happens to be numeric would be offered as a media channel.
+t('it is built from promotions and baselines',
+  /\[\.\.\.part\['Independent Promotions'\], \.\.\.part\['Baseline Variables'\]\]/.test(tx),
+  'still every numeric column');
+t('and no longer filters the whole column list',
+  !/columns\.filter\(\(c\) => !lockedKeys\.has\(c\)\s*\n?\s*&& isNumericColumn/.test(tx),
+  'the old rule survives');
+// A population column is the divisor for population normalization AND a
+// variable worth transforming, so it is not a key.
+t('baseline columns are not treated as keys',
+  /new Set\(\[\.\.\.dateKeys, \.\.\.geoKeys, \.\.\.zipKeys, \.\.\.dmaKeys\]\)/.test(tx),
+  'population would be excluded from its own category');
+t('the keys still are', /!lockedKeys\.has\(c\)/.test(tx), 'a date column could be transformed');
+
+console.log('\n5c. there is no separate variable-selection step');
+// The reference app has two steps: categorize, then configure. Tushar's had a
+// Variable Selection Grid between them, which restated the Step 1 category
+// selections as checkboxes - a second place to change one decision, and a
+// grid whose Grain column printed the ARD's geography key on every row and
+// whose Type column said "Numeric" for the date column and the NPI key.
+t('the grid is gone', !/Variable Selection Grid/.test(tx), 'still there');
+t('and its table with it', !/var-grid-table/.test(tx), 'markup survives');
+t('the config table is Step 2 now',
+  /Step 2: Transformation Configuration Table/.test(tx), 'still numbered 3');
+t('no orphaned select-all helpers', !/selectAllEligible|deselectAll/.test(tx), 'dead code');
+// The house rule is no emoji in the UI; the lock glyph sat in a table cell,
+// which the button-focused emoji check did not cover.
+t('the lock emoji went with it', !/status-lock-icon/.test(tx), 'emoji in a cell');
+
+console.log('\n5d. what Step 2 configures comes from Step 1');
+t('promotions and baselines are the channels',
+  /const chosen = \[\.\.\.selectedVars, \.\.\.popKeys\];/.test(tx), 'a separate selection');
+t('the KPI joins them under Log-Log',
+  /if \(modelSpec === 'log_log'\) chosen\.push\(\.\.\.dependentVars\);/.test(tx), 'never configurable');
+t('derived channels are appended',
+  /\.\.\.derivedVars\.map\(\(d\) => d\.name\)/.test(tx), 'a derived channel cannot be configured');
+// A column later chosen as the date or geography key must drop out rather
+// than staying in the table as a channel.
+t('a column promoted to a key drops out',
+  /eligibleColumns\.includes\(c\)/.test(tx), 'a date column could be configured');
+t('and nothing is listed twice',
+  /chosen\.indexOf\(c\) === i/.test(tx), 'a duplicate row');
+t('the derived builder moved into the config card',
+  /Create Arithmetic Derived Channel/.test(tx), 'lost with the grid');
 
 console.log('\n6. the config table columns');
 t('there is a Category column', /<th>Category<\/th>/.test(tx), 'missing');

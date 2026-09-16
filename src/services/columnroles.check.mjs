@@ -193,8 +193,11 @@ for (const [index, title, hint, role] of [
 // ZIP and DMA had pickers that were never sent to the engine; they only kept a
 // column out of the transformable set, which the cross-sectional card does.
 t('the ZIP and DMA pickers are gone', !/ZIP Column\(s\)/.test(tx), 'dead controls remain');
+// A saved ZIP or DMA choice still keeps that column out of the transformation
+// table. Population is deliberately not in this set: a baseline column is both
+// the divisor for population normalization and a variable worth transforming.
 t('but a saved ZIP or DMA choice still locks its column',
-  /new Set\(\[\.\.\.dateKeys, \.\.\.geoKeys, \.\.\.zipKeys, \.\.\.dmaKeys, \.\.\.popKeys\]\)/.test(tx),
+  /new Set\(\[\.\.\.dateKeys, \.\.\.geoKeys, \.\.\.zipKeys, \.\.\.dmaKeys\]\)/.test(tx),
   'an old saved state would put them back in play');
 t('the promotions card is the channel inclusion list',
   /selected=\{selectedList\}\s*\n\s*onToggle=\{toggleVarSelect\}/.test(tx), 'read-only');

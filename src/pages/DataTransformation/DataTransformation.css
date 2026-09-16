@@ -312,7 +312,6 @@
 .status-preserved { color: var(--color-text-light); font-style: italic; }
 .status-locked { color: #c0392b; font-weight: var(--font-weight-semibold); }
 .status-included { color: #1f8a4c; font-weight: var(--font-weight-semibold); }
-.status-lock-icon { margin-right: 0.3rem; }
 
 .auto-select-all-btn {
   padding: 0.65rem 1.2rem;
@@ -1098,4 +1097,9 @@
   display: flex;
   align-items: center;
   gap: 0.35rem;
+}
+
+.var-type-cell {
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
 }
