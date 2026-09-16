@@ -55,14 +55,16 @@ export const transformationAutoSelect = (payload) => API.post("/transformation/a
 export const transformationPreviewSingle = (payload) => API.post("/transformation/preview-single", payload).then((r) => r.data);
 export const transformationCorrelation = (payload) => API.post("/transformation/correlation", payload).then((r) => r.data);
 
-// ─── Modelling ────────────────────────────────────────────────────────────────
+// ─── Modelling (Module 6) ─────────────────────────────────────────────────────
 export const getAvailableChannels = (payload) => API.post("/modelling/available-channels", payload).then((r) => r.data);
 export const runRegression = (payload) => API.post("/modelling/run-regression", payload).then((r) => r.data);
 export const runOlsStage2 = (payload) => API.post("/modelling/run-ols-stage2", payload).then((r) => r.data);
 export const runRidge = (payload) => API.post("/modelling/run-ridge", payload).then((r) => r.data);
 export const getCombinedDecomposition = (payload) => API.post("/modelling/combined-decomposition", payload).then((r) => r.data);
 
-// ─── Response Curves & Optimization ───────────────────────────────────────────
+// ─── Module 7: Results, Response Curves & Benchmarks ──────────────────────────
+export const resultsSummary = (payload) => API.post("/results/summary", payload).then((r) => r.data);
+export const fetchBenchmarkComparison = (payload) => API.post("/results/benchmarks", payload).then((r) => r.data);
 export const generateResponseCurves = (payload) => API.post("/response-curves/generate", payload).then((r) => r.data);
 export const runOptimization = (payload) => API.post("/optimization/run", payload).then((r) => r.data);
 
