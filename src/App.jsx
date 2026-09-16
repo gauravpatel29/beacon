@@ -7,6 +7,8 @@ import Datastitching from './pages/Datastitching/Datastitching.jsx'
 import DataReview from './pages/DataReview/DataReview.jsx'
 import DataTransformation from './pages/DataTransformation/DataTransformation.jsx'
 import ModelConfiguration from './pages/ModelConfiguration/ModelConfiguration.jsx';
+import ModelOutput from './pages/ModelOutput/ModelOutput.jsx';
+import Optimization from './pages/Optimization/Optimization.jsx';
 
 function App() {
   return (
@@ -19,6 +21,8 @@ function App() {
         <Route path="/eda" element={<DataReview />} />
         <Route path="/data-transformation" element={<DataTransformation />} />
         <Route path="/model-configuration" element={<ModelConfiguration />} />
+        <Route path="/model-output" element={<ModelOutput />} />
+        <Route path="/optimization" element={<Optimization />} />
       </Route>
     </Routes>
   )
