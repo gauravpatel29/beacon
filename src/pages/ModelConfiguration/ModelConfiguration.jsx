@@ -430,6 +430,9 @@ function ModelConfiguration() {
         r2: s1.r_squared,
         adjR2: s1.adj_r_squared,
         rmse: s1.rmse,
+        coefficients: s1.coefficients,
+        summary: s1.summary,
+        alpha: s1.alpha,
         startDate, endDate,
         createdAt: new Date().toISOString(),
       }, ...prev].slice(0, 30));
