@@ -395,7 +395,7 @@ function DataReview() {
   }, [activeCsv, dateKey, geoKey, kpiColumn]);
 
   // ── Correlation > Analysis: the bivariate explorer's own scatter ─────────
-  // Moved here from the old Time Trends tab (now removed) — gated on this
+  // Moved here from the old Time Trends tab (now removed) - gated on this
   // sub-tab instead of the old 'trends' tab id.
   useEffect(() => {
     if (activeTab !== 'correlation' || corrSubTab !== 'analysis' || !activeCsv || !bivarX || !bivarY) return undefined;
@@ -940,19 +940,19 @@ function DataReview() {
                             <td><strong>{s.col}</strong></td>
                             <td><span className={`role-badge ${s.role}`}>{s.role.charAt(0).toUpperCase() + s.role.slice(1)}</span></td>
                             <td>{s.distinct.toLocaleString()}</td>
-                            <td>{s.controlTotal != null ? s.controlTotal.toLocaleString() : '—'}</td>
+                            <td>{s.controlTotal != null ? s.controlTotal.toLocaleString() : '-'}</td>
                             <td>{s.role === 'metric' ? (
                               <span className={`health-badge ${s.pctActive >= 40 ? 'good' : s.pctActive >= 15 ? 'warn' : 'bad'}`}>
                                 {s.pctActive.toFixed(2)}% active ({s.activeCount.toLocaleString()})
                               </span>
-                            ) : '—'}</td>
-                            <td>{s.role === 'metric' ? s.mean.toFixed(2) : '—'}</td>
-                            <td>{s.role === 'metric' ? s.median.toFixed(2) : '—'}</td>
-                            <td>{s.role === 'metric' ? s.std.toFixed(2) : '—'}</td>
-                            <td>{s.role === 'metric' ? s.min : s.role === 'date' ? s.min : '—'}</td>
-                            <td>{s.role === 'metric' ? s.max : s.role === 'date' ? s.max : '—'}</td>
-                            <td>{s.role === 'metric' ? s.p75.toFixed(2) : '—'}</td>
-                            <td>{s.role === 'metric' ? s.p95.toFixed(2) : '—'}</td>
+                            ) : '-'}</td>
+                            <td>{s.role === 'metric' ? s.mean.toFixed(2) : '-'}</td>
+                            <td>{s.role === 'metric' ? s.median.toFixed(2) : '-'}</td>
+                            <td>{s.role === 'metric' ? s.std.toFixed(2) : '-'}</td>
+                            <td>{s.role === 'metric' ? s.min : s.role === 'date' ? s.min : '-'}</td>
+                            <td>{s.role === 'metric' ? s.max : s.role === 'date' ? s.max : '-'}</td>
+                            <td>{s.role === 'metric' ? s.p75.toFixed(2) : '-'}</td>
+                            <td>{s.role === 'metric' ? s.p95.toFixed(2) : '-'}</td>
                             <td>
                               <span className={`health-badge ${s.missingPct === 0 ? 'good' : s.missingPct <= 5 ? 'warn' : 'bad'}`}>
                                 {s.missingPct.toFixed(2)}%
@@ -1519,7 +1519,7 @@ function DataReview() {
                               <tr key={i}>
                                 {treatmentResult.columns.map((c) => (
                                   <td key={c}>
-                                    {row[c] === null || row[c] === undefined ? '—' : String(row[c])}
+                                    {row[c] === null || row[c] === undefined ? '-' : String(row[c])}
                                   </td>
                                 ))}
                               </tr>
@@ -1592,7 +1592,7 @@ function HistogramChart({ bins, labels, xLabel = 'Value range', yLabel = 'Record
                 const count = payload[0]?.value ?? 0;
                 return [
                   { label: 'Records', value: count.toLocaleString(), color: '#1d2a6b' },
-                  { label: 'Share', value: total ? `${((count / total) * 100).toFixed(1)}%` : '—' },
+                  { label: 'Share', value: total ? `${((count / total) * 100).toFixed(1)}%` : '-' },
                 ];
               }}
             />

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useMemo } from 'react';
+import Papa from 'papaparse';
 import { ResponsiveContainer, CartesianGrid, XAxis, YAxis, Tooltip, LineChart, Line } from 'recharts';
 import { ChartTooltip } from '../../components/charts/ChartTooltip.jsx';
 import { AXIS_TICK, CHART_COLORS, GRID, LINE_TYPE, X_LABEL, Y_LABEL } from '../../components/charts/chartTheme.js';
@@ -12,13 +13,28 @@ import {
   forgetWorkflow,
   getFile,
   getColumnValues,
+  getCsv,
   getProfile,
   getStats,
   listFiles,
   previewSpec,
+  problemMessage,
   storedWorkflowId,
   uploadFiles,
 } from '../../services/api.js';
+import {
+  COLUMN_ROLES,
+  ROLE_IDS,
+  restoreColumnRoles,
+  roleMeta,
+  rolesFor,
+} from '../../services/columnRoles.js';
+import {
+  AGGREGATIONS,
+  aggregateTrend,
+  aggregationsFor,
+  isDateLikeName,
+} from '../../services/trendRollup.js';
 import { forgetFile, recordStage } from '../../services/workflowState.js';
 import { useScreenState } from '../../services/useScreenState.js';
 import {
@@ -39,6 +55,7 @@ import {
   localWarnings,
   numericColumns,
   renamedName,
+  toIsoDate,
 } from '../../services/manifest.js';
 import { nullPctColor } from '../../services/nullscale.js';
 import './DataIngestion.css';
@@ -175,7 +192,7 @@ function ControlTotalsRibbon({ stats }) {
           </span>
         </span>
         <span className="control-totals-toggle">
-          {/* Full per-column detail now lives on the Data Review tab — this
+          {/* Full per-column detail now lives on the Data Review tab - this
               bar just confirms row count/duplicates at a glance. */}
           {error ? 'Unavailable' : isLoading ? 'Loading…' : 'See Data Review tab for full column detail'}
         </span>
@@ -196,7 +213,7 @@ function ControlTotalsRibbon({ stats }) {
 // Builds per-column summary rows from real fields confirmed on this project:
 //   /profile → column, non_null, null_count, unique_count, suggested_dtype, id_like
 //   /stats   → column, null_pct, control_total, (min/max if present)
-// mean/median/std_dev/p75/p95 do not exist anywhere yet — shown as "—" until
+// mean/median/std_dev/p75/p95 do not exist anywhere yet - shown as "-" until
 // the backend adds them.
 /**
  * One summary cell. Numbers get thousands separators; date bounds arrive as
@@ -246,50 +263,113 @@ function buildSummaryRows(file, statsFor) {
 }
 
 // ─── Time Trends (Data Review tab) ──────────────────────────────────────────
-// Built entirely from `file.previewRows` — the only row-level data available
-// for a raw uploaded file (there is no endpoint yet that returns a raw file's
-// full content, unlike the ARD's v2GetCsv on the Data Review *page*). This
-// means the rollup below reflects the preview sample only, not the full
-// file, and is labeled as such rather than presented as exhaustive.
-function isDateLikeName(col) { return /date|week|month|period/i.test(col); }
-
-function aggregatePreviewTrend(rows, xKey, metrics, period, xIsDateLike) {
-  const grouped = {};
-  rows.forEach((r) => {
-    const raw = r[xKey];
-    if (raw === null || raw === undefined || raw === '') return;
-    // Month-bucketing only makes sense for an actual date column; anything
-    // else groups by its exact value, same as a categorical axis would.
-    const key = (xIsDateLike && period === 'month') ? String(raw).slice(0, 7) : String(raw);
-    if (!grouped[key]) grouped[key] = {};
-    metrics.forEach((m) => {
-      grouped[key][m] = (grouped[key][m] || 0) + (Number(r[m]) || 0);
-    });
-  });
-  const labels = Object.keys(grouped).sort();
-  return labels.map((l) => ({ date: l, ...grouped[l] }));
-}
+// Rolled up from the file's COMPLETE content, fetched once per file through
+// GET /v2/workflows/{id}/files/{name}/csv - the same endpoint the Data Review
+// page uses for an ARD. It works for an upload too, and returns the resolved
+// frame, so renames, drops and filters are already applied to what arrives.
+//
+// This used to chart `file.previewRows`, the first hundred rows, and say so.
+// A hundred rows of a weekly file is under two years for one geography: the
+// shape was whatever the top of the CSV happened to hold.
+//
+// Because the frame is resolved, its column names are the RENAMED ones. The
+// pills still show the original names, as the rest of this screen does, so
+// every row lookup goes through `renamedName`.
+// The rollup itself lives in services/trendRollup.js so it can be checked
+// directly - see trendrollup.check.mjs.
 
 function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, selectedMetrics, setSelectedMetrics, xAxisKey, setXAxisKey, startDate, setStartDate, endDate, setEndDate }) {
   const previewRows = file.previewRows || [];
+  const [fullRows, setFullRows] = useState(null); // null until the fetch lands
+  const [isLoadingFull, setIsLoadingFull] = useState(false);
+  const [fullError, setFullError] = useState(null);
 
-  const autoDateKey = useMemo(() => {
-    const fromType = Object.keys(file.typeCastMap || {}).find((c) => file.typeCastMap[c] === 'date');
-    return fromType || (file.columns || []).find(isDateLikeName) || '';
-  }, [file]);
+  // Column names as they exist in the fetched frame.
+  const derived = (col) => renamedName(file, col);
 
-  // '' means "not overridden yet" — fall back to the auto-detected date
-  // column, but let the user pick any column instead via the dropdown below.
-  const effectiveXAxis = xAxisKey || autoDateKey;
-  const xAxisIsDateLike = effectiveXAxis === autoDateKey && !!autoDateKey;
+  // Anything that changes the resolved frame changes this, so the rollup is
+  // refetched: a different file, a filter that drops rows, a rename or a drop
+  // that changes the columns.
+  const frameSignature = `${file.filename}|${file.totalRows || 0}|`
+    + `${(file.previewColumns || []).join(',')}`;
 
-  // Available bounds within the preview sample, so the date pickers can't
-  // be set outside what actually exists in this file's loaded rows.
+  useEffect(() => {
+    if (!file.workflowId || !file.filename) return undefined;
+    let cancelled = false;
+    // Inside the async body, not the effect's: setting state straight out of
+    // an effect is a cascading render, and the linter says so.
+    const load = async () => {
+      setIsLoadingFull(true);
+      setFullError(null);
+      return getCsv(file.workflowId, file.filename);
+    };
+    load()
+      .then((text) => {
+        if (cancelled) return;
+        // `dynamicTyping` is off on purpose: it turns an ID like 0123 into 123
+        // and a date into a Date object, and every consumer below wants the
+        // text as written.
+        const parsed = Papa.parse(String(text || '').trim(), {
+          header: true, skipEmptyLines: true,
+        });
+        setFullRows(parsed.data || []);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        // The preview rows are still there, so the chart falls back to them
+        // rather than disappearing - but it says which it is drawing.
+        setFullRows(null);
+        setFullError(problemMessage(err, 'Could not load the full file.'));
+      })
+      .finally(() => { if (!cancelled) setIsLoadingFull(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [frameSignature, file.workflowId]);
+
+  const usingFullFile = Array.isArray(fullRows);
+  const sourceRows = usingFullFile ? fullRows : previewRows;
+
+  // X axis is date columns only. Plotting a total against a geography or a
+  // product code produced a line joining categories in alphabetical order,
+  // which looks like a trend and is not one.
+  //
+  // "Date" means the column is typed as one, or /stats read it as one. Name
+  // matching is a fallback for a file nobody has typed yet, where it is the
+  // only signal available - it is not consulted when a real date column
+  // exists, so a `week_number` integer cannot displace one.
+  const dateColumns = useMemo(() => {
+    const statsByColumn = Object.fromEntries((statsFor?.data?.columns || []).map((c) => [c.column, c]));
+    const all = (file.profile || []).map((p) => p.column);
+    const typed = all.filter((col) => {
+      const p = (file.profile || []).find((x) => x.column === col) || {};
+      const dtype = file.typeCastMap?.[col] || p.suggested_dtype || 'string';
+      return dtype === 'date' || statsByColumn[derived(col)]?.kind === 'date';
+    });
+    if (typed.length) return typed;
+    return (all.length ? all : (file.columns || [])).filter(isDateLikeName);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file, statsFor]);
+
+  // A stored choice that is no longer a date column - the user retyped it, or
+  // it came from a saved state written before this was restricted - must not
+  // strand the chart on a column that is not offered any more.
+  const effectiveXAxis = (xAxisKey && dateColumns.includes(xAxisKey))
+    ? xAxisKey
+    : (dateColumns[0] || '');
+  const xAxisIsDateLike = Boolean(effectiveXAxis);
+
+  // Bounds across every row, so the pickers span the file rather than the
+  // first hundred rows of it. Normalised, because a DD/MM/YYYY column sorted
+  // as text puts the 1st of every month first.
   const availableDateBounds = useMemo(() => {
     if (!xAxisIsDateLike) return null;
-    const values = previewRows.map((r) => r[effectiveXAxis]).filter(Boolean).sort();
+    const values = sourceRows
+      .map((r) => toIsoDate(String(r[derived(effectiveXAxis)] ?? '')))
+      .filter(Boolean)
+      .sort();
     return values.length ? { min: values[0], max: values[values.length - 1] } : null;
-  }, [previewRows, effectiveXAxis, xAxisIsDateLike]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceRows, effectiveXAxis, xAxisIsDateLike]);
 
   const effectiveStart = startDate || availableDateBounds?.min || '';
   const effectiveEnd = endDate || availableDateBounds?.max || '';
@@ -322,7 +402,7 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
   }, [metricColumns]);
 
   // If the user picks a column as X Axis that was already a selected Y
-  // metric, drop it from the Y selection — the same column can't be both.
+  // metric, drop it from the Y selection - the same column can't be both.
   useEffect(() => {
     if (selectedMetrics.includes(effectiveXAxis)) {
       setSelectedMetrics(selectedMetrics.filter((m) => m !== effectiveXAxis));
@@ -337,79 +417,140 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
   };
 
   const rowsInRange = useMemo(() => {
-    if (!xAxisIsDateLike || (!effectiveStart && !effectiveEnd)) return previewRows;
-    return previewRows.filter((r) => {
-      const v = r[effectiveXAxis];
+    if (!xAxisIsDateLike || (!effectiveStart && !effectiveEnd)) return sourceRows;
+    const xCol = derived(effectiveXAxis);
+    return sourceRows.filter((r) => {
+      // Compared as ISO, so the bounds mean the same thing whatever format the
+      // column is stored in.
+      const v = toIsoDate(String(r[xCol] ?? ''));
       if (!v) return false;
       if (effectiveStart && v < effectiveStart) return false;
       if (effectiveEnd && v > effectiveEnd) return false;
       return true;
     });
-  }, [previewRows, effectiveXAxis, xAxisIsDateLike, effectiveStart, effectiveEnd]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceRows, effectiveXAxis, xAxisIsDateLike, effectiveStart, effectiveEnd]);
 
-  const trendRows = useMemo(() => {
-    if (!effectiveXAxis || selectedMetrics.length === 0) return [];
-    return aggregatePreviewTrend(rowsInRange, effectiveXAxis, selectedMetrics, aggregation === 'mom' ? 'month' : 'week', xAxisIsDateLike);
-  }, [rowsInRange, effectiveXAxis, selectedMetrics, aggregation, xAxisIsDateLike]);
+  // What this file's rows actually are. `target` wins when a rollup has been
+  // configured on the Granularity tab: after rolling daily rows up to monthly,
+  // the file is monthly, whatever detection said about the original.
+  const fileGrain = file.granularityConfig?.target || file.granularityConfig?.detected || '';
+  const aggOptions = aggregationsFor(fileGrain);
 
-  const chartData = trendRows;
+  // A stored aggregation that this granularity does not support - saved before
+  // the rollup was configured, or before this was restricted - would otherwise
+  // leave the chart on a period none of the buttons is showing as active.
+  useEffect(() => {
+    if (!aggOptions.includes(aggregation)) setAggregation(aggOptions[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileGrain]);
+
+  const activeAgg = aggOptions.includes(aggregation) ? aggregation : aggOptions[0];
+
+  const trend = useMemo(() => {
+    if (!effectiveXAxis || selectedMetrics.length === 0) return { points: [], unparseable: 0 };
+    return aggregateTrend(
+      rowsInRange, derived(effectiveXAxis), selectedMetrics,
+      AGGREGATIONS[activeAgg].period, xAxisIsDateLike, derived,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rowsInRange, effectiveXAxis, selectedMetrics, activeAgg, xAxisIsDateLike]);
+
+  const chartData = trend.points;
+  // Roughly a year of weeks. Past this the markers touch and become a band.
+  const showVertices = chartData.length <= 60;
 
   if (!effectiveXAxis) {
-    return <p className="tab-placeholder-note">No date-like column detected for this file yet — pick an X Axis column below once one is selected.</p>;
+    return (
+      <p className="tab-placeholder-note">
+        No date column in this file yet. Type one as a date on the Standardize tab
+        and it will appear here as an X Axis option.
+      </p>
+    );
   }
 
   return (
     <div style={{ marginTop: '1.5rem' }}>
-      <p className="mapping-section-label">Time-Series Trend (Preview Sample)</p>
+      <p className="mapping-section-label">
+        Time-Series Trend{usingFullFile ? '' : ' (Preview Sample)'}
+      </p>
       <p className="tab-placeholder-note" style={{ marginBottom: '0.75rem' }}>
-        Based on the first {previewRows.length.toLocaleString()} preview rows only — a full-file
-        rollup requires a backend endpoint that returns this file's complete content, which
-        does not exist yet.
-        {xAxisIsDateLike && (startDate || endDate) && (
-          <> {rowsInRange.length.toLocaleString()} of those rows fall within the selected date range.</>
+        {isLoadingFull && !usingFullFile && <>Loading the full file…</>}
+        {usingFullFile && (
+          <>
+            All {sourceRows.length.toLocaleString()} rows in this file, summed per
+            {` ${AGGREGATIONS[activeAgg].period}`}.
+            {/* Why there may be only one button to press. */}
+            {fileGrain && <> This file is {String(fileGrain).toLowerCase()}.</>}
+            {(startDate || endDate) && (
+              <> {rowsInRange.length.toLocaleString()} fall within the selected range.</>
+            )}
+            {/* Said out loud: a bad date is a row missing from the totals, not
+                a row plotted in the wrong place. */}
+            {trend.unparseable > 0 && (
+              <> {trend.unparseable.toLocaleString()} rows have a date that could not be
+                read and are not included.</>
+            )}
+          </>
+        )}
+        {!usingFullFile && !isLoadingFull && (
+          <>
+            {fullError ? `${fullError} ` : ''}
+            Showing the first {previewRows.length.toLocaleString()} preview rows instead.
+          </>
         )}
       </p>
 
       <div className="trend-controls-row">
         {xAxisIsDateLike && (
+          // Only the periods this file's granularity can actually be rolled
+          // up to. A monthly file offered Week-on-Week before, which drew one
+          // point per month under a weekly label.
           <div className="agg-toggle">
-            <button className={aggregation === 'wow' ? 'active' : ''} onClick={() => setAggregation('wow')}>Week-on-Week (WoW)</button>
-            <button className={aggregation === 'mom' ? 'active' : ''} onClick={() => setAggregation('mom')}>Month-on-Month (MoM)</button>
+            {aggOptions.map((key) => (
+              <button
+                key={key}
+                className={activeAgg === key ? 'active' : ''}
+                onClick={() => setAggregation(key)}
+              >
+                {AGGREGATIONS[key].label}
+              </button>
+            ))}
           </div>
         )}
 
+        {/* Was a stack of inline styles, which is why the inputs ended up a
+            different height from the toggle beside them. */}
         {xAxisIsDateLike && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-            <label style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--color-text-secondary)' }}>From:</label>
+          <div className="trend-date-range">
+            <label htmlFor="trend-from">From:</label>
             <input
+              id="trend-from"
               type="date"
               value={effectiveStart}
               min={availableDateBounds?.min}
               max={effectiveEnd || availableDateBounds?.max}
               onChange={(e) => setStartDate(e.target.value)}
-              style={{ padding: '0.4rem 0.6rem', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '0.8rem' }}
             />
-            <label style={{ fontSize: '0.78rem', fontWeight: 600, color: 'var(--color-text-secondary)' }}>To:</label>
+            <label htmlFor="trend-to">To:</label>
             <input
+              id="trend-to"
               type="date"
               value={effectiveEnd}
               min={effectiveStart || availableDateBounds?.min}
               max={availableDateBounds?.max}
               onChange={(e) => setEndDate(e.target.value)}
-              style={{ padding: '0.4rem 0.6rem', border: '1px solid var(--color-border)', borderRadius: '6px', fontSize: '0.8rem' }}
             />
             {(startDate || endDate) && (
-              <span
-                onClick={() => { setStartDate(''); setEndDate(''); }}
-                style={{ fontSize: '0.72rem', color: 'var(--color-primary)', cursor: 'pointer', whiteSpace: 'nowrap' }}
-              >
+              <button type="button" className="trend-range-reset"
+                      onClick={() => { setStartDate(''); setEndDate(''); }}>
                 Reset range
-              </span>
+              </button>
             )}
           </div>
         )}
 
-        <p className="metric-select-links" style={{ marginLeft: 'auto' }}>
+        <p className="metric-select-links trend-metric-links">
           <span onClick={() => setSelectedMetrics(metricColumns)}>Select All</span>{' | '}
           <span onClick={() => setSelectedMetrics(metricColumns.slice(0, 1))}>Clear to 1</span>
         </p>
@@ -418,10 +559,12 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem', marginBottom: '0.75rem' }}>
         <div>
           <p className="mapping-section-label" style={{ marginBottom: '0.5rem' }}>
-            X Axis — Select Column (1 selected):
+            X Axis - Select Date Column (1 selected):
           </p>
           <div className="metric-pills">
-            {(file.columns || []).map((c) => (
+            {/* Date columns only. A trend against anything else is a line
+                joining categories in whatever order they sort in. */}
+            {dateColumns.map((c) => (
               <span
                 key={c}
                 className={`metric-pill${effectiveXAxis === c ? ' selected' : ''}`}
@@ -435,7 +578,7 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
 
         <div>
           <p className="mapping-section-label" style={{ marginBottom: '0.5rem' }}>
-            Y Axis — Select Metrics to Display on Trend Line ({selectedMetrics.length} selected):
+            Y Axis - Select Metrics to Display on Trend Line ({selectedMetrics.length} selected):
           </p>
           <div className="metric-pills">
             {metricColumns.map((m) => (
@@ -453,14 +596,24 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
             <LineChart data={chartData} margin={{ top: 10, right: 20, bottom: 22, left: 8 }}>
               <CartesianGrid stroke={GRID} vertical={false} />
               <XAxis dataKey="date" tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
-                     minTickGap={24} label={{ value: xAxisIsDateLike ? (aggregation === 'mom' ? 'Month' : 'Week ending') : effectiveXAxis, ...X_LABEL }} />
+                     minTickGap={24}
+                     label={{ value: xAxisIsDateLike ? AGGREGATIONS[activeAgg].xLabel : effectiveXAxis, ...X_LABEL }} />
               <YAxis tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
                      tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${Math.round(v / 1000)}k` : v)}
                      label={{ value: 'Value', ...Y_LABEL }} />
               <Tooltip content={<ChartTooltip />} cursor={{ stroke: '#c7d2e5', strokeWidth: 1 }} />
+              {/* A marker at each period, while there is room for them. The
+                  line is straight between points - `type` is 'linear', never a
+                  spline - but with the vertices hidden a dense series reads as
+                  a smooth curve, because the only thing that shows a segment
+                  is straight is seeing where it starts and ends. Past the
+                  threshold the dots merge into a band and hide the line, so
+                  they come off. */}
               {selectedMetrics.map((key, i) => (
                 <Line key={key} type={LINE_TYPE} dataKey={key} stroke={CHART_COLORS[i % CHART_COLORS.length]}
-                      strokeWidth={2} dot={false} activeDot={{ r: 4, strokeWidth: 1.5, stroke: '#fff' }} />
+                      strokeWidth={2}
+                      dot={showVertices ? { r: 2.5, strokeWidth: 0, fill: CHART_COLORS[i % CHART_COLORS.length] } : false}
+                      activeDot={{ r: 4, strokeWidth: 1.5, stroke: '#fff' }} />
               ))}
             </LineChart>
           </ResponsiveContainer>
@@ -474,6 +627,110 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * What each column in this file IS, for the screens downstream.
+ *
+ * Every column starts on a guess from its name, so the table is answerable by
+ * exception rather than one dropdown at a time. The roles ride along in the
+ * manifest's `config_metadata`, which the engine stores without interpreting.
+ */
+function ColumnRoleTable({ file, onChange, onBulk }) {
+  const columns = file.columns || [];
+  const roles = rolesFor(columns, file.columnRoles);
+  const dropped = new Set(columns.filter((c) => !(file.selectedCols || columns).includes(c)));
+
+  // A count per role, so a file with no Dependent Variable is visible without
+  // reading every row.
+  const counts = Object.fromEntries(
+    ROLE_IDS.map((id) => [id, columns.filter((c) => !dropped.has(c) && roles[c] === id).length])
+  );
+
+  const sampleFor = (col) => (file.previewRows || [])
+    .slice(0, 3)
+    .map((r) => r[renamedName(file, col)] ?? r[col])
+    .filter((v) => v !== undefined && v !== null && v !== '')
+    .join(' · ');
+
+  if (!columns.length) return null;
+
+  return (
+    <>
+      <hr className="mapping-divider" />
+      <p className="mapping-section-label">
+        Column categories ({columns.length} columns)
+      </p>
+      <p className="tab-placeholder-note" style={{ marginBottom: '0.6rem' }}>
+        What each column is used for when modelling. Data Transformation, Data Review and
+        Model Configuration all read these instead of guessing from column names.
+      </p>
+
+      <div className="role-summary">
+        {COLUMN_ROLES.map((role) => (
+          <span key={role.id} className={`role-chip tone-${role.tone}`}>
+            {role.short}: <strong>{counts[role.id]}</strong>
+          </span>
+        ))}
+        {/* Resetting is one click rather than re-picking every row, for the
+            case where a rename or a retype has moved things on. */}
+        <button
+          type="button"
+          className="role-reset"
+          onClick={() => onBulk(rolesFor(columns))}
+          title="Re-apply the name-based guess to every column"
+        >
+          Reset to suggested
+        </button>
+      </div>
+
+      <div className="role-table-wrap">
+        <table className="role-table">
+          <thead>
+            <tr>
+              <th>Column</th>
+              <th>Category</th>
+              <th>Sample values</th>
+            </tr>
+          </thead>
+          <tbody>
+            {columns.map((col) => {
+              const meta = roleMeta(roles[col]);
+              return (
+                <tr key={col} className={dropped.has(col) ? 'is-dropped' : ''}>
+                  <td className="role-col-name">
+                    {col}
+                    {/* A dropped column keeps its row so the role is not lost
+                        by an accidental untick, but it says it is going. */}
+                    {dropped.has(col) && <span className="role-dropped-tag">dropped</span>}
+                    {renamedName(file, col) !== col && (
+                      <span className="role-renamed-tag">→ {renamedName(file, col)}</span>
+                    )}
+                  </td>
+                  <td>
+                    <select
+                      className={`role-select tone-${meta?.tone || 'neutral'}`}
+                      value={roles[col]}
+                      disabled={dropped.has(col)}
+                      onChange={(e) => onChange(col, e.target.value)}
+                      aria-label={`Category for ${col}`}
+                    >
+                      {COLUMN_ROLES.map((role) => (
+                        <option key={role.id} value={role.id}>
+                          {role.short} - {role.hint}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td className="role-samples">{sampleFor(col) || '-'}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </>
   );
 }
 
@@ -655,7 +912,7 @@ function DataIngestion() {
   const fileInputRef = useRef(null);
 
   // ── Data Review tab: Time Trends chart state ──────────────────────────
-  // Built from `selectedFile.previewRows` only — there is no endpoint yet
+  // Built from `selectedFile.previewRows` only - there is no endpoint yet
   // that returns a raw uploaded file's FULL content, so this is a
   // preview-sample rollup, not a full-dataset one (see note rendered below).
   const [trendAggregation, setTrendAggregation] = useState('wow'); // 'wow' | 'mom'
@@ -665,7 +922,7 @@ function DataIngestion() {
   const [trendEndDate, setTrendEndDate] = useState('');
 
   // Fix: without this, switching files kept whatever metric names were
-  // selected for the PREVIOUS file — those columns don't exist on the new
+  // selected for the PREVIOUS file - those columns don't exist on the new
   // file, so the chart silently plotted flat 0-lines under the old names
   // instead of showing the new file's actual columns.
   useEffect(() => {
@@ -752,6 +1009,10 @@ function DataIngestion() {
           return {
             id: `file-${++fileIdCounter}`, filename: dataset.filename, name: dataset.filename, workflowId,
             category: spec.config_metadata?.category || suggestCategory(dataset.filename),
+            // Roles are stored under the renamed column name, which is what the
+            // rest of the app sees; this screen works in original names, so
+            // they are mapped back on the way in.
+            columnRoles: restoreColumnRoles(spec.config_metadata?.column_roles, renameMap),
             columns: rawColumns,
             previewRows: currentDataset.preview || [],
             // `dataset.columns` is the DERIVED column list. The preview rows are
@@ -853,6 +1114,7 @@ function DataIngestion() {
         return {
           id: `file-${++fileIdCounter}`, filename: dataset.filename, name: dataset.filename, workflowId,
           category: suggestCategory(dataset.filename), columns, previewRows: dataset.preview || [],
+          columnRoles: rolesFor(columns),
           totalRows: dataset.row_count || 0, isParsing: false, parseError: null, selectedCols: columns,
           renameMap: {},
           profile,
@@ -939,6 +1201,12 @@ function DataIngestion() {
       prev.map((f) => (f.id === fileId ? { ...f, ...updates } : f))
     );
   };
+
+  // Assign Category tab: one column's modelling role.
+  const setColumnRole = (file, column, role) =>
+    updateFileConfig(file.id, {
+      columnRoles: { ...rolesFor(file.columns, file.columnRoles), [column]: role },
+    });
 
   // Standardize tab
   const toggleKeepColumn = (file, col, keep) => {
@@ -1032,7 +1300,7 @@ function DataIngestion() {
       granularityConfig: { ...file.granularityConfig, [key]: value },
     });
 
-  // PLACEHOLDER: no backend endpoint yet — just marks a granularity as
+  // PLACEHOLDER: no backend endpoint yet - just marks a granularity as
   // "detected" locally so the UI flow can be reviewed. Replace with a real
   // API call once available.
   const handleDetectGranularity = async (file) => {
@@ -1474,6 +1742,18 @@ function DataIngestion() {
                 {/* The all-clear now sits with the file list, next to the rows
                     it is reporting on, alongside the "still needs a category"
                     count it replaces. */}
+
+                {/* Column-level roles. The file category says what the FILE is;
+                    this says what each column in it is, which is what every
+                    screen downstream needs and was previously guessing for
+                    itself - three heuristics with three chances to disagree
+                    about the same column, and no way to correct any of them
+                    except per screen, every time. */}
+                <ColumnRoleTable
+                  file={selectedFile}
+                  onChange={(column, role) => setColumnRole(selectedFile, column, role)}
+                  onBulk={(next) => updateFileConfig(selectedFile.id, { columnRoles: next })}
+                />
                   </>
                 )}
 

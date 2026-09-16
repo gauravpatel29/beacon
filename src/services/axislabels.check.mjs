@@ -20,6 +20,7 @@ const read = (rel) => readFileSync(new URL(rel, import.meta.url), 'utf8');
 
 const review = read('../pages/DataReview/DataReview.jsx');
 const tx = read('../pages/DataTransformation/DataTransformation.jsx');
+const ingest = read('../pages/DataIngestion/DataIngestion.jsx');
 const shared = read('../components/charts/ChartTooltip.jsx');
 const theme = read('../components/charts/chartTheme.js');
 const sharedCss = read('../components/charts/ChartTooltip.css');
@@ -65,12 +66,16 @@ t('DataTransformation shares one margin with room for the title',
   /const CHART_MARGIN = \{[^}]*bottom: (1[6-9]|[2-9]\d)/.test(tx), 'title would overlap');
 
 console.log('\n4. labels name the selection, not just the axis');
+// The Time Trends tab left Data Review and is now the ingestion screen's Data
+// Review section, so its labels are checked where the chart actually lives.
+// One entry per aggregation carries both the bucket and its axis title, so a
+// chart bucketed by month cannot be labelled by week.
 t('the trend x axis follows the aggregation',
-  /xLabel=\{aggregation === 'mom' \? 'Month' : 'Week ending'\}/.test(review), 'static label');
-t('the trend y axis names the metric when only one is plotted',
-  /selectedMetrics\.length === 1 \? selectedMetrics\[0\]/.test(review), 'always generic');
-t('and says so when the view is indexed',
-  /Indexed \(first period = 100\)/.test(review), 'indexed view looks like raw values');
+  /value: xAxisIsDateLike \? AGGREGATIONS\[activeAgg\]\.xLabel/.test(ingest), 'static label');
+t('and names the column when the axis is not a date',
+  /: effectiveXAxis, \.\.\.X_LABEL/.test(ingest), 'generic label');
+t('the trend y axis is labelled',
+  /label=\{\{ value: 'Value', \.\.\.Y_LABEL \}\}/.test(ingest), 'bare numbers');
 t('the review histogram names the column being binned',
   /xLabel=\{`\$\{distVariable\} \(binned\)`\}/.test(review), 'generic label');
 t('the inspector histograms name the channel',

@@ -625,10 +625,39 @@ export function buildGranularity(file) {
   };
 }
 
+/**
+ * What goes in `config_metadata`: the declarations that describe the data
+ * rather than change it.
+ *
+ * The engine does not read this block - it applies `live_updates`, `filters`
+ * and `granularity` - but it stores it, which is what makes the file category
+ * and the per-column roles survive a reload and reach the screens downstream.
+ *
+ * Roles are keyed by the column's name AFTER any rename, because that is the
+ * name every later screen sees. Storing the original would leave Data
+ * Transformation looking up a column that is not in the frame.
+ */
+export function buildConfigMetadata(file) {
+  const meta = {};
+  if (file.category) meta.category = file.category;
+
+  const roles = file.columnRoles || {};
+  const kept = new Set(file.selectedCols || file.columns || []);
+  const declared = {};
+  for (const [column, role] of Object.entries(roles)) {
+    // A role for a column the user has since dropped would name a column that
+    // does not reach the derived frame.
+    if (!kept.has(column)) continue;
+    declared[renamedName(file, column)] = role;
+  }
+  if (Object.keys(declared).length) meta.column_roles = declared;
+  return meta;
+}
+
 /** The complete manifest for one file. */
 export function buildSpec(file) {
   const spec = {
-    config_metadata: file.category ? { category: file.category } : {},
+    config_metadata: buildConfigMetadata(file),
     live_updates: buildLiveUpdates(file),
     // The chain drives the engine; the flat list is its projection, sent so a
     // backend that predates the chain still filters - just without the

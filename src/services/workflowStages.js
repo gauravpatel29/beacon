@@ -8,12 +8,25 @@
 export const STAGES = {
   ingestion: { stage: 'Data Ingestion', route: '/data-ingestion' },
   stitching: { stage: 'Data Stitching', route: '/data-stitching' },
-  review: { stage: 'Data Review', route: '/data-review' },
+  // The screen is called Data Review; its route is /eda, which is what App.jsx
+  // registers and what the sidebar links to. They have to agree here or a
+  // resumed workflow navigates to a path no route matches.
+  review: { stage: 'Data Review', route: '/eda' },
   transformation: { stage: 'Data Transformation', route: '/data-transformation' },
+  modelling: { stage: 'Model Configuration', route: '/model-configuration' },
 };
 
 /** Routes a stored `current_route` is allowed to send you to. */
 const KNOWN_ROUTES = new Set(Object.values(STAGES).map((s) => s.route));
+
+/**
+ * Routes that used to exist, and where they went.
+ *
+ * A workflow last open on Data Review has `/data-review` written into its
+ * saved state. Without this it fails the check below and resumes at ingestion
+ * - silently sending the user back three screens.
+ */
+const MOVED_ROUTES = { '/data-review': '/eda' };
 
 /**
  * Where a resumed workflow should open.
@@ -23,6 +36,6 @@ const KNOWN_ROUTES = new Set(Object.values(STAGES).map((s) => s.route));
  * blank screen.
  */
 export function resumeRouteFor(workflow) {
-  const route = workflow?.current_route;
+  const route = MOVED_ROUTES[workflow?.current_route] || workflow?.current_route;
   return KNOWN_ROUTES.has(route) ? route : STAGES.ingestion.route;
 }

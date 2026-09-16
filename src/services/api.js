@@ -170,7 +170,7 @@ const edaPost = (endpoint, payload) =>
 /** Summary table (with control totals), trend series and per-geo breakdown. */
 export const edaStats = (payload) => edaPost('stats', payload);
 
-/** Non-zero share per metric — which tactics are too sparse to model. */
+/** Non-zero share per metric - which tactics are too sparse to model. */
 export const edaSparsity = (payload) => edaPost('sparsity', payload);
 
 /** Binned distribution of one numeric column. */
@@ -179,7 +179,7 @@ export const edaHistogram = (payload) => edaPost('histogram', payload);
 /** Scatter of two columns, with r and a least-squares trendline. */
 export const edaScatter = (payload) => edaPost('scatter', payload);
 
-/** Binned average of Y against X — the response shape before any model. */
+/** Binned average of Y against X - the response shape before any model. */
 export const edaPoorMansCurve = (payload) => edaPost('poor-mans-curve', payload);
 
 /** IQR or Z-score outliers, with the bounds used and the flagged rows. */
@@ -223,6 +223,43 @@ export const transformationPreviewSingle = (payload) =>
 /** Correlation over the transformed columns, plus the pairs above a threshold. */
 export const transformationCorrelation = (payload) =>
   transformationPost('correlation', payload);
+
+// ─── Modelling (/api/modelling) ──────────────────────────────────────────
+// Every one of these takes BOTH frames: `transformed_csv` is what the model is
+// fitted on, `granular_csv` is the raw ARD behind it. The second is not
+// optional detail - impactable sales, spend and therefore ROI are all computed
+// against the raw activity, and the prior-period window that the long-term ROI
+// factor needs is read from it too.
+const modellingPost = (endpoint, payload) =>
+  request(`/api/modelling/${endpoint}`, { method: 'POST', ...json(payload) });
+
+/**
+ * Channels available to model, within a date window.
+ * -> { channels: string[], date_range: { start, end } }
+ *
+ * The server decides this, not the screen: it drops the date, geo and
+ * dependent columns, keeps anything `_transformed`, and excludes ID-like
+ * columns. A client-side guess at that list is how a geography code ends up
+ * as a media channel.
+ */
+export const getAvailableChannels = (payload) =>
+  modellingPost('available-channels', payload);
+
+/**
+ * OLS, stage 1.
+ * -> { summary, coefficients[], long_term_factor, r_squared, adj_r_squared, rmse }
+ */
+export const runRegression = (payload) => modellingPost('run-regression', payload);
+
+/** OLS stage 2: split one parent channel into its sub-channels. */
+export const runOlsStage2 = (payload) => modellingPost('run-ols-stage2', payload);
+
+/** Ridge, either stage. Alpha is chosen by CV unless `alpha_mode` is manual. */
+export const runRidge = (payload) => modellingPost('run-ridge', payload);
+
+/** Stage 1 and stage 2 as one decomposition, plus waterfall chart data. */
+export const getCombinedDecomposition = (payload) =>
+  modellingPost('combined-decomposition', payload);
 
 // ─── Correlation & multicollinearity ─────────────────────────────────────
 // Same csv_data contract as the EDA engines. These replace a browser-side
@@ -283,7 +320,7 @@ export const deleteFile = (workflowId, filename) =>
     method: 'DELETE',
   });
 
-/** The resolved dataset as CSV text — for handing off to later screens. */
+/** The resolved dataset as CSV text - for handing off to later screens. */
 export const getCsv = (workflowId, filename) =>
   request(`/v2/workflows/${workflowId}/files/${encodeURIComponent(filename)}/csv`, {
     raw: true,
@@ -344,11 +381,11 @@ export async function ensureWorkflow() {
 // ─── Data Stitching & ARD (/v2/workflows/{id}/ard) ────────────────────────
 // For the Data Stitching & ARD Creation screen only. See
 // ARD_STITCHING_API.md for the full contract. Four calls, all scoped to the
-// current workflow. The screen sends step *definitions*, not data — the
+// current workflow. The screen sends step *definitions*, not data - the
 // server loads named datasets from storage itself.
  
 /**
- * On page load — fill the source-file dropdowns.
+ * On page load - fill the source-file dropdowns.
  * GET /v2/workflows/{workflow_id}/files
  * Returns { items: [{ filename, columns, row_count, kind }] }.
  * Callers should filter out kind === 'ard' so a previously built ARD can't
@@ -371,7 +408,7 @@ export const v2ListFiles = (workflowId) =>
  *   }
  *
  * left_file/right_file: a dataset filename, or "Step N Result" to chain off
- * an earlier step. left_key/right_key: array (or comma-separated string) —
+ * an earlier step. left_key/right_key: array (or comma-separated string) -
  * both sides must have the same count. join_type: 'left' | 'inner'.
  *
  * Resolves to the built/dry-run ARD:
@@ -398,7 +435,7 @@ export const v2ListArds = (workflowId) =>
  * Hand off a built ARD to the next screen (EDA, etc.) as CSV text.
  * GET /v2/workflows/{workflow_id}/files/{filename}/csv
  * Call this once, right after a successful build, and pass the result
- * along — don't put it in localStorage.
+ * along - don't put it in localStorage.
  */
 export const v2GetCsv = (workflowId, filename) =>
   request(`/v2/workflows/${workflowId}/files/${encodeURIComponent(filename)}/csv`, {

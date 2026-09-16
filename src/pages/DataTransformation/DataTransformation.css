@@ -866,3 +866,236 @@
   background-color: #eef1f6;
   color: var(--color-text-light);
 }
+
+/* ---- Step 1 pickers: category-scoped ---- */
+/* The escape hatch out of a category, and back into it. Reads as a link
+   because it changes what is listed, not what is selected. */
+.pill-group-toggle {
+  color: var(--color-primary);
+  font-size: inherit;
+  font-weight: var(--font-weight-semibold);
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+}
+
+.pill-group-toggle:hover { text-decoration: underline; }
+
+.pill-group-empty {
+  font-size: 0.72rem;
+  color: var(--color-text-light);
+}
+
+.pill-group-note-text { color: var(--color-text-light); }
+
+/* ---- Step 1: one card per ingestion category ---- */
+.category-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--spacing-md);
+  margin-top: var(--spacing-sm);
+}
+
+@media (max-width: 1180px) {
+  .category-card-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (max-width: 760px) {
+  .category-card-grid { grid-template-columns: 1fr; }
+}
+
+.category-card {
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  padding: 0.85rem 1rem;
+  background-color: var(--color-white);
+}
+
+.category-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.category-card-title {
+  font-size: 0.78rem;
+  font-weight: var(--font-weight-bold);
+  color: var(--color-text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+/* Selected over available, so a card nobody has touched still says how much
+   is in it. */
+.category-card-count {
+  flex: 0 0 auto;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: var(--font-weight-bold);
+}
+
+.category-card-count.tone-violet  { background: #eee6fd; color: #6935c4; }
+.category-card-count.tone-red     { background: #fde4e4; color: #b3261e; }
+.category-card-count.tone-blue    { background: #e2ecff; color: #1c47b0; }
+.category-card-count.tone-green   { background: #dcf5e4; color: #1a7a41; }
+.category-card-count.tone-amber   { background: #fdf0d5; color: #a8710d; }
+.category-card-count.tone-neutral { background: #eef1f6; color: #55627a; }
+
+.category-card-hint {
+  margin: 0.15rem 0 0.6rem;
+  font-size: 0.72rem;
+  color: var(--color-text-light);
+}
+
+.category-card-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-content: flex-start;
+  min-height: 42px;
+  padding: 0.45rem;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  background-color: #fbfcfe;
+}
+
+.category-card-empty {
+  font-size: 0.72rem;
+  font-style: italic;
+  color: var(--color-text-light);
+}
+
+/* The sixth panel: not a category, so it is tinted to read as a control. */
+.formulation-card {
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-md);
+  padding: 0.85rem 1rem;
+  background-color: #f5f8ff;
+}
+
+.formulation-option {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-top: 0.35rem;
+  font-size: 0.76rem;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.formulation-option.is-check {
+  margin-top: 0.7rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid #d8e2f8;
+}
+
+/* ---- Step 3: category, effect and guidance ---- */
+.config-table tr.is-derived td { background-color: #fffaf0; }
+.config-table tr.is-dependent td { background-color: #fef6f6; }
+
+.derived-formula {
+  display: block;
+  margin-top: 0.1rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.64rem;
+  font-weight: 400;
+  color: #a8710d;
+}
+
+/* What the row will actually do, which the decay and horizon labels alone do
+   not say. */
+.effect-cell {
+  font-size: 0.7rem;
+  color: var(--color-text-light);
+  white-space: nowrap;
+}
+
+.guidance-btn {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background-color: var(--color-white);
+  color: var(--color-primary);
+  font-size: 0.72rem;
+  font-weight: var(--font-weight-bold);
+  font-style: italic;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.guidance-btn:hover {
+  border-color: var(--color-primary);
+  background-color: var(--color-primary-light);
+}
+
+/* Inline under the table rather than a modal over it: the point is to compare
+   the benchmark against the row that is still on screen. */
+.guidance-panel {
+  margin-top: var(--spacing-md);
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-md);
+  background-color: #f5f8ff;
+}
+
+.guidance-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.guidance-title {
+  font-size: 0.82rem;
+  font-weight: var(--font-weight-bold);
+  color: var(--color-text-primary);
+}
+
+.guidance-close {
+  flex: 0 0 auto;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  color: var(--color-text-light);
+  cursor: pointer;
+}
+
+.guidance-close:hover { background-color: #e4ecfb; }
+
+.guidance-rationale {
+  margin-top: 0.3rem;
+  font-size: 0.76rem;
+  color: var(--color-text-secondary);
+}
+
+.guidance-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0.6rem;
+  margin: 0.75rem 0;
+}
+
+.guidance-grid span {
+  display: block;
+  font-size: 0.66rem;
+  font-weight: var(--font-weight-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-light);
+}
+
+.guidance-grid strong {
+  font-size: 0.76rem;
+  color: var(--color-text-primary);
+}
+
+.source-badge.guided { background-color: #e2ecff; color: #1c47b0; }
+
+.config-name-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}

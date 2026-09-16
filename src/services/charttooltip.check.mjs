@@ -9,7 +9,7 @@
 
 const fmt = (v) => (Number.isFinite(v)
   ? (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : Number(Number(v).toFixed(2)).toLocaleString())
-  : '—');
+  : '-');
 
 // Mirrors ChartTooltip in pages/DataReview/DataReview.jsx.
 function tooltip({ active, payload, label, title, rows, indexed = false }) {
@@ -67,7 +67,7 @@ r = tooltip({
     const total = 1000;
     return [
       { label: 'Records', value: count.toLocaleString(), color: '#1d2a6b' },
-      { label: 'Share', value: total ? `${((count / total) * 100).toFixed(1)}%` : '—' },
+      { label: 'Share', value: total ? `${((count / total) * 100).toFixed(1)}%` : '-' },
     ];
   },
 });
@@ -96,8 +96,8 @@ console.log('\n6. number formatting holds up at the edges');
 t('zero', fmt(0) === '0', fmt(0));
 t('negative', fmt(-1234.6) === '-1,235', fmt(-1234.6));
 t('trailing zeros trimmed', fmt(5.0) === '5', fmt(5.0));
-t('non-numeric falls back to a dash', fmt(undefined) === '—', fmt(undefined));
-t('NaN falls back to a dash', fmt(NaN) === '—', fmt(NaN));
+t('non-numeric falls back to a dash', fmt(undefined) === '-', fmt(undefined));
+t('NaN falls back to a dash', fmt(NaN) === '-', fmt(NaN));
 
 console.log('\n' + '='.repeat(56));
 console.log(`PASSED ${pass} / ${pass + fail}`);

@@ -1,5 +1,5 @@
 /* ==========================================================================
-   App.css — Global foundation styles for Beacon
+   App.css - Global foundation styles for Beacon
    Contains: CSS variables (design tokens), resets, base typography
    ========================================================================== */
 
@@ -119,7 +119,7 @@ img, svg {
   padding: 0 var(--spacing-lg);
 }
 
-/* Generic placeholder box — used wherever an image/icon/graphic
+/* Generic placeholder box - used wherever an image/icon/graphic
    needs to be swapped in later. Dashed border makes it obvious
    during development. Remove/replace once real assets are added. */
 .placeholder {

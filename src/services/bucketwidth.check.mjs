@@ -14,6 +14,8 @@
 //     to join what was measured.
 
 import { readFileSync } from 'node:fs';
+import { line, curveLinear, curveMonotoneX } from 'd3-shape';
+import { LINE_TYPE } from '../components/charts/chartTheme.js';
 
 let pass = 0, fail = 0;
 const t = (label, cond, got) => {
@@ -24,21 +26,46 @@ const read = (rel) => readFileSync(new URL(rel, import.meta.url), 'utf8');
 
 const review = read('../pages/DataReview/DataReview.jsx');
 const tx = read('../pages/DataTransformation/DataTransformation.jsx');
+const ingest = read('../pages/DataIngestion/DataIngestion.jsx');
 const theme = read('../components/charts/chartTheme.js');
 const css = read('../pages/DataReview/DataReview.css');
 
 console.log('\n1. straight lines, from one shared constant');
 t('the app declares a line type', /export const LINE_TYPE = 'linear'/.test(theme), 'not defined');
 t('no spline is left anywhere',
-  !/monotone|type="basis"|type="natural"|type="cardinal"/.test(review + tx), 'a curve survives');
+  !/monotone|type="basis"|type="natural"|type="cardinal"/.test(review + tx + ingest),
+  'a curve survives');
 const lines = (src) => (src.match(/<Line\b/g) || []).length;
 const typed = (src) => (src.match(/type=\{LINE_TYPE\}/g) || []).length;
-for (const [name, src] of [['DataReview', review], ['DataTransformation', tx]]) {
+for (const [name, src] of [['DataReview', review], ['DataTransformation', tx],
+                           ['DataIngestion', ingest]]) {
   t(`${name} draws lines`, lines(src) > 0, 0);
   t(`${name}: every Line uses the constant`, typed(src) === lines(src),
     { lines: lines(src), typed: typed(src) });
   t(`${name} imports it`, /LINE_TYPE,/.test(src.slice(0, 2000)), 'not imported');
 }
+
+// Asserting the prop is set only says what was asked for. This draws the path
+// the way recharts does - d3-shape, the library underneath it - and reads the
+// commands back. A straight segment is an L; a spline is a C.
+const PTS = [[0, 0], [1, 5], [2, 1], [3, 4]];
+const CURVES = { linear: curveLinear, monotoneX: curveMonotoneX };
+const pathFor = (name) => line().curve(CURVES[name])(PTS);
+t('LINE_TYPE is a curve d3 knows', Boolean(CURVES[LINE_TYPE]), LINE_TYPE);
+const drawn = pathFor(LINE_TYPE);
+t('it draws straight segments', drawn.includes('L') && !drawn.includes('C'), drawn);
+t('and is not the spline it replaced', drawn !== pathFor('monotoneX'), drawn);
+// Proves the assertion above can fail: the spline really does emit curves.
+t('a spline would have emitted curve commands', pathFor('monotoneX').includes('C'),
+  pathFor('monotoneX'));
+
+console.log('\n1b. the vertices are visible while there is room');
+// The type alone is not enough to SEE: with the points hidden, a dense linear
+// series is indistinguishable from a smooth one.
+t('the ingestion trend marks each period',
+  /dot=\{showVertices \? \{ r: 2\.5/.test(ingest), 'corners are invisible');
+t('and drops the markers once they would merge',
+  /const showVertices = chartData\.length <= 60/.test(ingest), 'dots would hide the line');
 
 console.log('\n2. the width is a control, not a keystroke');
 // Refetching per keystroke would fire a request for "1", "12", "125" on the

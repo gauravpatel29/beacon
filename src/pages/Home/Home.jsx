@@ -103,6 +103,7 @@ const STAGE_TONES = {
   'Correlation Analysis': 'blue',
   'Exploratory Data Analysis': 'violet',
   'Data Transformation': 'green',
+  'Model Configuration': 'red',
   'MMM Modelling': 'red',
   'Response Curves': 'green',
   Optimization: 'green',
@@ -193,7 +194,7 @@ function Home() {
     setOnlyCreateForm(true);
     setWorkflowQuery('');
     setWorkflowStage('all');
-    // No loadWorkflows() call — the list is never shown in this mode, so
+    // No loadWorkflows() call - the list is never shown in this mode, so
     // there's no need to fetch it.
   };
 

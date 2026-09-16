@@ -3,7 +3,7 @@
 const shownFor = (draft, cards = []) => {
   const previewedCard = draft.activePreview ? cards[draft.activePreview.cardIndex] : null;
   return draft.activePreview
-    ? { kind: 'step', heading: previewedCard ? `Step ${previewedCard.step} result — ${previewedCard.left} + ${previewedCard.right}` : null,
+    ? { kind: 'step', heading: previewedCard ? `Step ${previewedCard.step} result - ${previewedCard.left} + ${previewedCard.right}` : null,
         isLoading: draft.activePreview.isLoading, error: draft.activePreview.error, data: draft.activePreview.data }
     : draft.generatedArd
     ? { kind: 'ard', heading: `Generated ${draft.generatedArd.filename}` + (draft.generatedArd.version ? ` (version ${draft.generatedArd.version})` : ''),
@@ -38,7 +38,7 @@ t('no dangling separator', nov.heading === 'Generated HCP_Master_ARD.csv', nov.h
 console.log('\n4. an open step preview wins over the generated ARD');
 const both = shownFor({ activePreview: { cardIndex: 0, data: { columns: ['a'], preview: [], row_count: 0 }, isLoading: false, error: null }, generatedArd: ard }, cards);
 t('step preview takes precedence', both.kind === 'step', both.kind);
-t('step heading used', both.heading === 'Step 1 result — sales.csv + xwalk.csv', both.heading);
+t('step heading used', both.heading === 'Step 1 result - sales.csv + xwalk.csv', both.heading);
 
 console.log('\n5. hiding the step preview falls back to the ARD');
 t('ard returns after hide', shownFor({ activePreview: null, generatedArd: ard }, cards).kind === 'ard');

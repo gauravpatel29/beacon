@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Home.css — Styles for the Beacon Landing/Home page
+   Home.css - Styles for the Beacon Landing/Home page
    Sections: Hero, Full MMM Pipeline (feature cards), Footer
    ========================================================================== */
 
@@ -242,7 +242,7 @@
 
 
 
-/* The concave notch — sits behind the button, redraws the corner */
+/* The concave notch - sits behind the button, redraws the corner */
 .pipeline-card {
   position: relative;
   z-index: 1;

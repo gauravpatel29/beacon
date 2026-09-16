@@ -1,6 +1,6 @@
 // The sticky tab ribbon's prerequisites. Run: node src/services/sticky.check.mjs
 //
-// `position: sticky` fails by doing nothing at all — no error, no warning, the
+// `position: sticky` fails by doing nothing at all - no error, no warning, the
 // element just scrolls away. It needs a scrolling ancestor, and it must not be
 // clipped by an overflow between itself and that ancestor. Both live in a
 // different file (Main_Layout.css) from the rule that depends on them, so this

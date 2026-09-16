@@ -5,11 +5,18 @@ import {
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts';
 import {
-  ensureWorkflow, problemMessage, transformationApply, transformationAutoSelect,
+  ensureWorkflow, listFiles, problemMessage, transformationApply,
   transformationCorrelation, transformationPreviewSingle, v2GetCsv, v2ListArds,
 } from '../../services/api.js';
 import { recordStage } from '../../services/workflowState.js';
 import { useScreenState } from '../../services/useScreenState.js';
+import { roleMeta, rolePartition, rolesFor, rolesFromDatasets } from '../../services/columnRoles.js';
+import { getChannelGuidance } from '../../services/channelGuidance.js';
+import {
+  configFor as sharedConfigFor,
+  toDerivedVariables as sharedToDerivedVariables,
+  toTransformation as sharedToTransformation,
+} from '../../services/transformationSet.js';
 import { ChartTooltip } from '../../components/charts/ChartTooltip.jsx';
 import {
   AXIS_TICK, fmt, GRID, LINE_TYPE, X_LABEL, Y_LABEL,
@@ -43,6 +50,14 @@ const HORIZON_OPTIONS = [
   { value: 2, label: '2 weeks' },
   { value: 4, label: '4 weeks (1 month)' },
   { value: 8, label: '8 weeks' },
+];
+// A pure delay applied beside the decay, sent as its own `Lag` key.
+const PURE_LAG_OPTIONS = [
+  { value: 0, label: '0 (none)' },
+  { value: 1, label: '1 week' },
+  { value: 2, label: '2 weeks' },
+  { value: 3, label: '3 weeks' },
+  { value: 4, label: '4 weeks' },
 ];
 const SATURATION_OPTIONS = [
   { value: 'none', label: 'None (Linear)' },
@@ -81,11 +96,23 @@ function DataTransformation() {
   const [dmaKeys, setDmaKeys] = useState([]);
   const [popKeys, setPopKeys] = useState([]);
   const [carryover, setCarryover] = useState(false);
+  // Linear-Log keeps the KPI in linear units and out of the transformable set;
+  // Log-Log puts a log curve on it, which makes it a channel Step 3 configures.
+  const [modelSpec, setModelSpec] = useState('linear_log'); // linear_log | log_log
+  // KPI columns the user has chosen to keep out of the transformable set.
+  // Empty by default: nothing is locked unless it is locked deliberately.
+  const [lockedDeps, setLockedDeps] = useState([]);
 
   // Step 2
   const [selectedVars, setSelectedVars] = useState(new Set());
+  // What the user declared each column IS, on the ingestion screen. Empty for a
+  // workflow whose files predate column categories, in which case every
+  // fallback below is the name-based guess this screen used to make on its own.
+  const [declaredRoles, setDeclaredRoles] = useState({});
   const [derivedVars, setDerivedVars] = useState([]); // [{id, name, operator, parts}]
   const [derivedDraft, setDerivedDraft] = useState(null); // {name, operator, parts}
+  // Which channel's benchmark panel is open, if any.
+  const [guidanceFor, setGuidanceFor] = useState('');
 
   // Step 3: per-variable config
   const [configs, setConfigs] = useState({}); // { [varName]: {decay, horizon, saturation, param, source} }
@@ -98,7 +125,6 @@ function DataTransformation() {
   const [transformResult, setTransformResult] = useState(null); // { rows, transformedCols, corrThreshold... }
   const [inspectVar, setInspectVar] = useState('');
   const [corrThreshold, setCorrThreshold] = useState(0.7);
-  const [isAutoSelecting, setIsAutoSelecting] = useState(false);
   const [correlation, setCorrelation] = useState(null);
   const [corrError, setCorrError] = useState(null);
   const [isScoringCorr, setIsScoringCorr] = useState(false);
@@ -124,12 +150,13 @@ function DataTransformation() {
   const stateRestored = useScreenState('transformation', {
     ready: Boolean(columns.length),
     deps: [selectedArdFilename, dateKeys, geoKeys, dependentVars, zipKeys, dmaKeys,
-           popKeys, carryover, selectedVars, derivedVars, configs, transformSetName,
+           popKeys, carryover, modelSpec, lockedDeps, selectedVars, derivedVars, configs, transformSetName,
            corrThreshold, inspectVar, savedSet],
     snapshot: () => ({
       ard: selectedArdFilename,
       dateKeys, geoKeys, dependentVars, zipKeys, dmaKeys, popKeys,
       carryover,
+      modelSpec,
       // A Set does not survive JSON.
       selectedVars: Array.from(selectedVars),
       derivedVars,
@@ -149,6 +176,8 @@ function DataTransformation() {
       if (Array.isArray(s.dmaKeys)) setDmaKeys(s.dmaKeys);
       if (Array.isArray(s.popKeys)) setPopKeys(s.popKeys);
       if (typeof s.carryover === 'boolean') setCarryover(s.carryover);
+      if (s.modelSpec === 'linear_log' || s.modelSpec === 'log_log') setModelSpec(s.modelSpec);
+      if (Array.isArray(s.lockedDeps)) setLockedDeps(s.lockedDeps);
       if (Array.isArray(s.selectedVars)) setSelectedVars(new Set(s.selectedVars));
       if (Array.isArray(s.derivedVars)) setDerivedVars(s.derivedVars);
       if (s.configs && typeof s.configs === 'object') setConfigs(s.configs);
@@ -170,9 +199,16 @@ function DataTransformation() {
       try {
         const id = await ensureWorkflow();
         setWorkflowId(id);
-        const data = await v2ListArds(id);
+        const [data, uploads] = await Promise.all([
+          v2ListArds(id),
+          // Roles are declared per source file; an ARD is those files joined,
+          // so they are merged into one map covering its columns. A failure
+          // here costs the defaults, not the screen - hence the catch.
+          listFiles(id, { kind: 'upload' }).catch(() => ({ items: [] })),
+        ]);
         const items = data.items || [];
         setArds(items);
+        setDeclaredRoles(rolesFromDatasets(uploads.items));
         if (items.length) {
           // Reopen the ARD the user was working on, when it still exists.
           const wanted = items.find((x) => x.filename === restoredArd.current);
@@ -211,13 +247,24 @@ function DataTransformation() {
       // falls through to fresh guesses, which is the intended behaviour.
       const keepConfig = restoredArd.current === filename;
       if (!keepConfig) {
-        const guessedDate = cols.find((c) => /date|week|month/i.test(c));
-        const guessedGeo = cols.find((c) => /npi|dma|zip|id$/i.test(c));
-        setDateKeys(guessedDate ? [guessedDate] : []);
-        setGeoKeys(guessedGeo ? [guessedGeo] : []);
-        setDependentVars([]);
-        setZipKeys([]); setDmaKeys([]); setPopKeys([]);
-        setSelectedVars(new Set());
+        // Step 1 is answered from what the user declared at ingestion rather
+        // than re-guessed here. The old guesses were a second, weaker set of
+        // rules - `/npi|dma|zip|id$/` took the first match and had no way to be
+        // told it was wrong - and they disagreed with the ones Data Review and
+        // Model Configuration were each making separately.
+        //
+        // `rolePartition` falls back to the same kind of name matching for any
+        // column with no declared role, so an ARD built before column
+        // categories existed still opens with something sensible selected.
+        const part = rolePartition(cols, declaredRoles);
+        setDateKeys(part['Time Variable'].slice(0, 1));
+        setGeoKeys(part['Cross-sectional Variable'].slice(0, 1));
+        setDependentVars(part['Dependent Variable'].slice(0, 1));
+        setZipKeys([]); setDmaKeys([]);
+        setPopKeys(part['Baseline Variables'].slice(0, 1));
+        // Promotions are what a marketing mix model transforms, so they start
+        // ticked - the same default as the reference app.
+        setSelectedVars(new Set(part['Independent Promotions']));
         setDerivedVars([]);
         setDerivedDraft(null);
         setConfigs({});
@@ -242,9 +289,14 @@ function DataTransformation() {
     [dateKeys, geoKeys, zipKeys, dmaKeys, popKeys]
   );
 
+  // A KPI is transformable unless the user locks it. It used to be locked
+  // unconditionally, which made "strictly locked from transformation" a rule
+  // of the screen rather than a decision anyone had taken.
   const eligibleColumns = useMemo(
-    () => columns.filter((c) => !lockedKeys.has(c) && !dependentVars.includes(c) && isNumericColumn(rows, c)),
-    [columns, rows, lockedKeys, dependentVars]
+    () => columns.filter((c) => !lockedKeys.has(c)
+      && !lockedDeps.includes(c)
+      && isNumericColumn(rows, c)),
+    [columns, rows, lockedKeys, lockedDeps]
   );
 
   const togglePill = (setter, list, col) => {
@@ -318,85 +370,28 @@ function DataTransformation() {
     });
   };
 
-  const configFor = (name) => configs[name]
-    || { normalization: 'none', decay: 0.5, horizon: 2, saturation: 'log', param: 1, source: 'manual' };
+  const configFor = (name) => sharedConfigFor(configs, name);
 
   const updateConfig = (name, updates) => {
     setConfigs((prev) => ({ ...prev, [name]: { ...configFor(name), ...updates, source: 'manual' } }));
   };
 
   // ── Engine payloads ─────────────────────────────────────────────────────
-  // The engine keys its config by these exact names. `param` is one control in
-  // the UI but two fields on the wire, because log and power take different
-  // constants; the one the chosen curve does not use keeps its default rather
-  // than being overwritten with the other curve's value.
-  const toTransformation = (name) => {
-    const c = configFor(name);
-    const sat = c.saturation === 'log' ? 'Log' : c.saturation === 'power' ? 'Power' : 'none';
-    return {
-      'Channel Name': name,
-      'Normalization': c.normalization || 'none',
-      'Adstock': Number(c.decay),
-      'Lags': Number(c.horizon),
-      'Saturation Function': sat,
-      'Power (k)': c.saturation === 'power' ? Number(c.param) : 0.5,
-      'Log (k)': c.saturation === 'log' ? Number(c.param) : 1.0,
-    };
-  };
+  // Shared with Model Configuration, which replays this same set to rebuild
+  // the transformed frame the regression is fitted on. Two copies would mean
+  // two frames from one saved set.
+  const toTransformation = (name) => sharedToTransformation(configs, name);
+  const toDerivedVariables = () => sharedToDerivedVariables(derivedVars);
 
-  // Weights are left empty: the builder offers an operator across whole
-  // columns, not per-column coefficients, and the engine defaults each to 1.
-  const toDerivedVariables = () => derivedVars.map((d) => ({
-    name: d.name, operator: d.operator || '+', variables: d.parts, weights: {},
-  }));
+  // Auto Select was removed: the reference application no longer offers it,
+  // and a per-channel fit that nothing else in the app agrees with is worse
+  // than the benchmarks the guidance panel gives. The endpoint still exists
+  // server-side; nothing here calls it.
 
-  const fromRecommendation = (rec) => {
-    const sat = String(rec['Saturation Function'] || 'none').toLowerCase();
-    return {
-      decay: Number(rec['Adstock'] ?? 0.5),
-      horizon: Number(rec['Lags'] ?? 2),
-      saturation: sat === 'log' || sat === 'power' ? sat : 'none',
-      param: sat === 'power' ? Number(rec['Power (k)'] ?? 0.5) : Number(rec['Log (k)'] ?? 1),
-      normalization: rec['Normalization'] || 'none',
-      source: 'auto',
-    };
-  };
 
-  const runAutoSelect = async (names) => {
-    if (!activeCsv || !names.length) return;
-    if (!geoKeys.length || !dependentVars.length) {
-      setApplyError('Set Geo and Dependent Variable columns in Step 1 first.');
-      return;
-    }
-    setApplyError(null);
-    setIsAutoSelecting(true);
-    try {
-      const data = await transformationAutoSelect({
-        csv_data: activeCsv,
-        geo_column: geoKeys[0],
-        date_column: dateKeys[0] || '',
-        dependent_variable: dependentVars[0],
-        channels: names,
-        derived_variables: toDerivedVariables(),
-        pop_column: popKeys[0] || null,
-      });
-      setConfigs((prev) => {
-        const next = { ...prev };
-        (data.recommendations || []).forEach((rec) => {
-          if (rec['Channel Name']) next[rec['Channel Name']] = fromRecommendation(rec);
-        });
-        return next;
-      });
-    } catch (err) {
-      setApplyError(problemMessage(err, 'Auto-selection failed.'));
-    } finally {
-      setIsAutoSelecting(false);
-    }
-  };
-
-  const autoFillConfig = (name) => runAutoSelect([name]);
-
-  const autoSelectAllVariables = () => runAutoSelect(Array.from(selectedVars));
+  // Roles for the columns in THIS frame, so a derived variable or a column
+  // from a file ingested before categories existed still gets one.
+  const columnRoles = rolesFor(columns, declaredRoles);
 
   const selectedList = Array.from(selectedVars);
 
@@ -671,7 +666,7 @@ function DataTransformation() {
       {isLoadingArds && <p className="transform-empty">Loading ARDs...</p>}
       {!isLoadingArds && loadError && <div className="transform-error-banner">{loadError}</div>}
       {!isLoadingArds && !loadError && ards.length === 0 && (
-        <p className="transform-empty">No ARDs found — build one on the Data Stitching &amp; ARD Creation page first.</p>
+        <p className="transform-empty">No ARDs found - build one on the Data Stitching &amp; ARD Creation page first.</p>
       )}
 
       {!isLoadingArds && !loadError && ards.length > 0 && (
@@ -697,91 +692,115 @@ function DataTransformation() {
 
           {!isLoadingData && !dataError && rows.length > 0 && (
             <>
-              {/* ---- Step 1: Key Columns & Model Target ---- */}
+              {/* ---- Step 1: Column categorization ---- */}
               <div className="transform-card">
-                <p className="transform-section-title">Step 1: Key Columns &amp; Model Target</p>
-                <div className="pill-groups-row">
-                  <div>
-                    <div className="pill-group-heading">
-                      Date Column(s) ({dateKeys.length} selected)
-                      <span className="pill-group-clear" onClick={() => setDateKeys([])}>Clear</span>
-                    </div>
-                    <div className="pill-group-box">
-                      {columns.map((c) => (
-                        <span key={c} className={`col-pill${dateKeys.includes(c) ? ' selected' : ''}`} onClick={() => togglePill(setDateKeys, dateKeys, c)}>
-                          {dateKeys.includes(c) ? '✓ ' : '+ '}{c}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="pill-group-heading">
-                      Geo Column(s) (HCP/DMA Keys) ({geoKeys.length} selected)
-                      <span className="pill-group-clear" onClick={() => setGeoKeys([])}>Clear</span>
-                    </div>
-                    <div className="pill-group-box">
-                      {columns.map((c) => (
-                        <span key={c} className={`col-pill${geoKeys.includes(c) ? ' selected' : ''}`} onClick={() => togglePill(setGeoKeys, geoKeys, c)}>
-                          {geoKeys.includes(c) ? '✓ ' : '+ '}{c}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="pill-group-heading locked">
-                      Dependent Variable(s) (Sales KPI) ({dependentVars.length} selected)
-                      <span className="pill-group-clear" onClick={() => setDependentVars([])}>Clear</span>
-                    </div>
-                    <div className="pill-group-box locked-box">
-                      {columns.map((c) => (
-                        <span key={c} className={`col-pill selected-check${dependentVars.includes(c) ? ' selected locked' : ''}`} onClick={() => togglePill(setDependentVars, dependentVars, c)}>
-                          {dependentVars.includes(c) ? '✓ ' : '+ '}{c}
-                        </span>
-                      ))}
-                    </div>
-                    <p className="pill-group-note">* Selected sales KPI(s) are strictly locked from transformation.</p>
-                  </div>
-                </div>
+                <p className="transform-section-title">
+                  Step 1: Column Categorization (from Ingestion)
+                </p>
+                <p className="transform-section-desc">
+                  Variables are categorized according to their Ingestion roles. You can adjust
+                  channel inclusions or switch model formulation below.
+                </p>
 
-                <div className="pill-groups-row">
-                  <div>
-                    <div className="pill-group-heading">ZIP Column(s) (Optional)</div>
-                    <div className="pill-group-box">
-                      {columns.map((c) => (
-                        <span key={c} className={`col-pill${zipKeys.includes(c) ? ' selected' : ''}`} onClick={() => togglePill(setZipKeys, zipKeys, c)}>
-                          {zipKeys.includes(c) ? '✓ ' : '+ '}{c}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="pill-group-heading">DMA Column(s) (Optional)</div>
-                    <div className="pill-group-box">
-                      {columns.map((c) => (
-                        <span key={c} className={`col-pill${dmaKeys.includes(c) ? ' selected' : ''}`} onClick={() => togglePill(setDmaKeys, dmaKeys, c)}>
-                          {dmaKeys.includes(c) ? '✓ ' : '+ '}{c}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="pill-group-heading">Population / Universe Column(s)</div>
-                    <div className="pill-group-box">
-                      {columns.map((c) => (
-                        <span key={c} className={`col-pill${popKeys.includes(c) ? ' selected' : ''}`} onClick={() => togglePill(setPopKeys, popKeys, c)}>
-                          {popKeys.includes(c) ? '✓ ' : '+ '}{c}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                </div>
+                <div className="category-card-grid">
+                  <CategoryCard
+                    index={1} title="Time Variable" hint="Dates, Weeks, Periods"
+                    role="Time Variable"
+                    columns={columns} columnRoles={columnRoles}
+                    selected={dateKeys}
+                    onToggle={(c) => togglePill(setDateKeys, dateKeys, c)}
+                  />
+                  {/* ZIP and DMA had pickers of their own that were never sent
+                      to the engine - they only excluded a column from
+                      transformation, which selecting it here already does. */}
+                  <CategoryCard
+                    index={2} title="Cross-sectional Variable" hint="HCP IDs, DMA, Zip, Region Keys"
+                    role="Cross-sectional Variable"
+                    columns={columns} columnRoles={columnRoles}
+                    selected={geoKeys}
+                    onToggle={(c) => togglePill(setGeoKeys, geoKeys, c)}
+                  />
+                  <CategoryCard
+                    index={3} title="Dependent Variable (KPI)" hint="Sales, TRx, NRx, Revenue"
+                    role="Dependent Variable"
+                    columns={columns} columnRoles={columnRoles}
+                    selected={dependentVars}
+                    onToggle={(c) => togglePill(setDependentVars, dependentVars, c)}
+                  />
+                  {/* The promotions card IS the channel inclusion list: these
+                      are the columns Step 3 will configure. */}
+                  <CategoryCard
+                    index={4} title="Independent Promotions" hint="Calls, Details, Spend, Emails, Media"
+                    role="Independent Promotions"
+                    columns={columns} columnRoles={columnRoles}
+                    selected={selectedList}
+                    onToggle={toggleVarSelect}
+                  />
+                  <CategoryCard
+                    index={5} title="Baseline Variables" hint="Target Population, Macro, Universe"
+                    role="Baseline Variables"
+                    columns={columns} columnRoles={columnRoles}
+                    selected={popKeys}
+                    onToggle={(c) => togglePill(setPopKeys, popKeys, c)}
+                  />
 
-                <div className="carryover-row">
-                  <label className="carryover-checkbox-label">
-                    <input type="checkbox" checked={carryover} onChange={(e) => setCarryover(e.target.checked)} />
-                    Create Lagged Dependent Variable as Carryover (Lag 1)
-                  </label>
-                  <span className="eligible-count-text">{eligibleColumns.length} channel(s) eligible for transformation</span>
+                  <div className="formulation-card">
+                    <p className="category-card-title">Model Formulation &amp; KPI Lock</p>
+                    <p className="category-card-hint">
+                      Decide whether the Dependent Variable is transformed (Log-Log) or kept in
+                      linear units (Linear-Log).
+                    </p>
+                    <label className="formulation-option">
+                      <input
+                        type="radio" name="model-formulation"
+                        checked={modelSpec === 'linear_log'}
+                        onChange={() => setModelSpec('linear_log')}
+                      />
+                      Linear-Log (Keep Sales KPI Linear / Un-transformed)
+                    </label>
+                    <label className="formulation-option">
+                      <input
+                        type="radio" name="model-formulation"
+                        checked={modelSpec === 'log_log'}
+                        onChange={() => setModelSpec('log_log')}
+                      />
+                      Log-Log (Transform Sales KPI with Log Curve)
+                    </label>
+                    <label className="formulation-option is-check">
+                      <input
+                        type="checkbox" checked={carryover}
+                        onChange={(e) => setCarryover(e.target.checked)}
+                      />
+                      Generate Carryover (Lag 1 of Sales KPI)
+                    </label>
+
+                    {/* The lock is now a decision, not a rule. A KPI is
+                        transformable until somebody ticks it here. */}
+                    {dependentVars.length > 0 && (
+                      <>
+                        <p className="category-card-hint" style={{ marginTop: '0.7rem' }}>
+                          Lock a KPI to keep it out of the transformation table:
+                        </p>
+                        {dependentVars.map((kpi) => (
+                          <label className="formulation-option" key={kpi}>
+                            <input
+                              type="checkbox"
+                              checked={lockedDeps.includes(kpi)}
+                              onChange={() => setLockedDeps(
+                                lockedDeps.includes(kpi)
+                                  ? lockedDeps.filter((k) => k !== kpi)
+                                  : [...lockedDeps, kpi]
+                              )}
+                            />
+                            Lock {kpi}
+                          </label>
+                        ))}
+                      </>
+                    )}
+                    <p className="category-card-hint">
+                      {eligibleColumns.length} channel(s) eligible for transformation.
+                    </p>
+                  </div>
                 </div>
               </div>
 
@@ -869,7 +888,7 @@ function DataTransformation() {
                 <div className="var-grid-table-wrapper">
                   <table className="var-grid-table">
                     <thead>
-                      <tr><th>Select</th><th>Variable Name</th><th>Grain</th><th>Type</th><th>Transformation Status</th></tr>
+                      <tr><th>Select</th><th>Variable Name</th><th>Category</th><th>Grain</th><th>Type</th><th>Transformation Status</th></tr>
                     </thead>
                     <tbody>
                       {[...columns, ...derivedVars.map((d) => d.name)].map((c) => {
@@ -884,13 +903,21 @@ function DataTransformation() {
                               )}
                             </td>
                             <td><strong>{c}</strong></td>
+                            {/* What this column was declared to be at
+                                ingestion, shown where the decision to
+                                transform it is actually taken. */}
+                            <td>
+                              <span className={`role-chip tone-${roleMeta(columnRoles[c])?.tone || 'neutral'}`}>
+                                {roleMeta(columnRoles[c])?.short || 'Derived'}
+                              </span>
+                            </td>
                             <td><span className="grain-badge">{geoKeys[0] ? geoKeys[0].toUpperCase() : 'HCP'}</span></td>
                             <td>Numeric</td>
                             <td>
                               {isKey ? (
                                 <span className="status-preserved">ID / Group Key (Preserved)</span>
                               ) : isDependent ? (
-                                <span className="status-locked"><span className="status-lock-icon">🔒</span>Sales (Dependent Variable) — Transform Disabled</span>
+                                <span className="status-locked"><span className="status-lock-icon">🔒</span>Sales (Dependent Variable) - Transform Disabled</span>
                               ) : selectedVars.has(c) ? (
                                 <span className="status-included">✓ Included in Step 3</span>
                               ) : (
@@ -910,26 +937,61 @@ function DataTransformation() {
                 <div className="transform-card">
                   <p className="transform-section-title">Step 3: Transformation Configuration Table</p>
                   <p className="transform-section-desc">
-                    Configure Normalization, Adstock Decay, Horizon smoothing (weeks), and Functional Saturation (Log/Power) per channel.
+                    Configure Normalization, Adstock Decay, Adstock Horizon (decay span), Lag (pure shift) and Saturation curves per channel. Use the i on any row for benchmarks.
                   </p>
-                  <button className="auto-select-all-btn" onClick={autoSelectAllVariables} disabled={isAutoSelecting}>{isAutoSelecting ? 'Selecting…' : 'Auto Select All Variables'}</button>
 
                   <div className="config-table-wrapper">
                     <table className="config-table">
                       <thead>
                         <tr>
-                          <th>Variable</th><th>Normalization</th><th>Adstock (Decay)</th>
-                          <th>Horizon (Time Horizon)</th>
-                          <th>Saturation Curve</th><th>Param (k / p)</th><th>Source</th><th>Actions</th>
+                          <th>Variable</th><th>Category</th><th>Normalization</th><th>Adstock (Decay)</th>
+                          <th>Adstock Horizon</th><th>Lag (Shift)</th>
+                          <th>Saturation Curve</th><th>Param (k / p)</th><th>Guidance</th>
                         </tr>
                       </thead>
                       <tbody>
                         {selectedList.map((name) => {
                           const cfg = configFor(name);
                           const derived = derivedVars.find((d) => d.name === name);
+                          const isDep = dependentVars.includes(name);
                           return (
-                            <tr key={name}>
-                              <td><strong>{name}</strong></td>
+                            <tr key={name} className={derived ? 'is-derived' : isDep ? 'is-dependent' : ''}>
+                              <td>
+                                <div className="config-name-cell">
+                                  <strong>{name}</strong>
+                                  {/* Deleting a derived channel lives with its
+                                      name now that the Actions column is gone;
+                                      guidance has a column of its own. */}
+                                  {derived && (
+                                    <button
+                                      className="remove-derived-btn"
+                                      title="Delete this derived channel"
+                                      onClick={() => removeDerivedVariable(derived.id, name)}
+                                    >
+                                      ✕
+                                    </button>
+                                  )}
+                                </div>
+                                {/* A derived channel's formula, so a row named
+                                    "promo_total" says what it is made of. */}
+                                {derived && (
+                                  <span className="derived-formula">
+                                    = {derived.parts.join(` ${derived.operator} `)}
+                                  </span>
+                                )}
+                              </td>
+                              <td>
+                                {/* Derived and KPI rows are not promotions, and
+                                    a KPI only appears here at all under
+                                    Log-Log. */}
+                                <span className={`role-chip tone-${
+                                  derived ? 'amber' : isDep ? 'red'
+                                    : roleMeta(columnRoles[name])?.tone || 'neutral'}`}
+                                >
+                                  {derived ? 'Derived' : isDep ? 'KPI'
+                                    : roleMeta(columnRoles[name])?.short || '-'}
+                                </span>
+                              </td>
                               <td>
                                 <select
                                   value={cfg.normalization || 'none'}
@@ -957,6 +1019,14 @@ function DataTransformation() {
                                   {HORIZON_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                                 </select>
                               </td>
+                              {/* The pure shift, separate from the horizon and
+                                  sent as its own `Lag` key, exactly as the
+                                  reference app sends it. */}
+                              <td>
+                                <select value={cfg.lag ?? 0} onChange={(e) => updateConfig(name, { lag: Number(e.target.value) })}>
+                                  {PURE_LAG_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                                </select>
+                              </td>
                               <td>
                                 <select value={cfg.saturation} onChange={(e) => updateConfig(name, { saturation: e.target.value })}>
                                   {SATURATION_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
@@ -965,16 +1035,16 @@ function DataTransformation() {
                               <td>
                                 {cfg.saturation !== 'none' ? (
                                   <input type="number" step="0.1" value={cfg.param} onChange={(e) => updateConfig(name, { param: Number(e.target.value) })} />
-                                ) : '—'}
+                                ) : '-'}
                               </td>
-                              <td><span className={`source-badge ${cfg.source}`}>{cfg.source.toUpperCase()}</span></td>
                               <td>
-                                <div className="config-action-btns">
-                                  <button className="auto-fill-btn" onClick={() => autoFillConfig(name)} disabled={isAutoSelecting}>{isAutoSelecting ? '…' : 'Auto'}</button>
-                                  {derived && (
-                                    <button className="remove-derived-btn" onClick={() => removeDerivedVariable(derived.id, name)}>✕</button>
-                                  )}
-                                </div>
+                                <button
+                                  type="button" className="guidance-btn"
+                                  onClick={() => setGuidanceFor(name)}
+                                  title="Benchmarks for this kind of channel"
+                                >
+                                  i
+                                </button>
                               </td>
                             </tr>
                           );
@@ -982,6 +1052,42 @@ function DataTransformation() {
                       </tbody>
                     </table>
                   </div>
+
+                  {guidanceFor && (() => {
+                    const g = getChannelGuidance(guidanceFor);
+                    return (
+                      <div className="guidance-panel">
+                        <div className="guidance-head">
+                          <p className="guidance-title">{guidanceFor} - {g.tacticType}</p>
+                          <button
+                            type="button" className="guidance-close"
+                            onClick={() => setGuidanceFor('')} aria-label="Close guidance"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                        <p className="guidance-rationale">{g.rationale}</p>
+                        <div className="guidance-grid">
+                          <div><span>Adstock decay</span><strong>{g.adstockDecay}</strong></div>
+                          <div><span>Adstock horizon</span><strong>{g.adstockHorizon}</strong></div>
+                          <div><span>Saturation</span><strong>{g.saturation}</strong></div>
+                        </div>
+                        {/* The reference app wrote these numbers into a
+                            sentence for the user to retype into four
+                            dropdowns. Applying them is the same information,
+                            minus the transcription. */}
+                        <button
+                          type="button" className="mapping-btn"
+                          onClick={() => {
+                            updateConfig(guidanceFor, { ...g.suggested, source: 'guided' });
+                            setGuidanceFor('');
+                          }}
+                        >
+                          Apply these settings to {guidanceFor}
+                        </button>
+                      </div>
+                    );
+                  })()}
 
                   <div className="set-name-row">
                     <div className="set-name-field">
@@ -1144,7 +1250,7 @@ function DataTransformation() {
                               <div><p className="detail-item-label">Adstock Decay (α)</p><p className="detail-item-value">{inspectDetail.config.decay}</p></div>
                               <div><p className="detail-item-label">Adstock Horizon</p><p className="detail-item-value">{inspectDetail.config.horizon} weeks</p></div>
                               <div><p className="detail-item-label">Saturation Transform</p><p className="detail-item-value">{SATURATION_OPTIONS.find((o) => o.value === inspectDetail.config.saturation)?.label.split(':')[0]}</p></div>
-                              <div><p className="detail-item-label">Param (k  p)</p><p className="detail-item-value">{inspectDetail.config.saturation === 'none' ? '—' : inspectDetail.config.param}</p></div>
+                              <div><p className="detail-item-label">Param (k  p)</p><p className="detail-item-value">{inspectDetail.config.saturation === 'none' ? '-' : inspectDetail.config.param}</p></div>
                               <div><p className="detail-item-label">Configuration Source</p><p className="detail-item-value"><span className={`source-badge ${inspectDetail.config.source}`}>{inspectDetail.config.source === 'auto' ? 'Auto Selected' : 'Manual'}</span></p></div>
                             </div>
                           </div>
@@ -1210,6 +1316,59 @@ function DataTransformation() {
 // add that is exactly what recharts already does.
 const CHART_MARGIN = { top: 10, right: 20, bottom: 24, left: 10 };
 
+/**
+ * One of the five categories, and the columns the ingestion screen put in it.
+ *
+ * Step 1 used to be six pickers - Date, Geo, Dependent, ZIP, DMA, Population -
+ * each listing every column in the ARD. On a sales file that is the same 32
+ * names rendered six times, so choosing the date column meant reading past
+ * thirty call-detail columns to find it, and the ZIP and DMA pickers were never
+ * sent to the engine at all.
+ *
+ * The categories already answer "which of these could this be", so the step now
+ * shows them: one card per category, holding what was declared for it. The
+ * count reads selected-over-available, so a card nobody has touched still says
+ * how much is in it.
+ *
+ * `extra` carries columns chosen for this card that the ingestion screen filed
+ * elsewhere - a selection has to stay visible, or it could be counted but not
+ * unpicked.
+ */
+function CategoryCard({ index, title, hint, role, columns, columnRoles, selected, onToggle }) {
+  const inRole = columns.filter((c) => columnRoles[c] === role);
+  const extra = selected.filter((c) => columnRoles[c] !== role && columns.includes(c));
+  const offered = [...inRole, ...extra];
+
+  return (
+    <div className="category-card">
+      <div className="category-card-head">
+        <p className="category-card-title">{index}. {title}</p>
+        <span className={`category-card-count tone-${roleMeta(role)?.tone || 'neutral'}`}>
+          {selected.filter((c) => columns.includes(c)).length} / {offered.length}
+        </span>
+      </div>
+      <p className="category-card-hint">{hint}</p>
+      <div className="category-card-pills">
+        {offered.map((c) => (
+          <span
+            key={c}
+            className={`col-pill${selected.includes(c) ? ' selected' : ''}`}
+            onClick={() => onToggle(c)}
+            title={columnRoles[c] !== role ? `Categorised as ${roleMeta(columnRoles[c])?.short}` : undefined}
+          >
+            {selected.includes(c) ? '✓ ' : '+ '}{c}
+          </span>
+        ))}
+        {/* Not an error - a file may genuinely have no population column - so
+            it says what is missing rather than looking broken. */}
+        {!offered.length && (
+          <span className="category-card-empty">No columns mapped to this category</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function MiniBarChart({ bins, color, xLabel = '', yLabel = 'Records', binLabels = [] }) {
   if (!bins.length) return null;
   const total = bins.reduce((a, b) => a + b, 0);
@@ -1239,7 +1398,7 @@ function MiniBarChart({ bins, color, xLabel = '', yLabel = 'Records', binLabels 
                 const count = payload[0]?.value ?? 0;
                 return [
                   { label: 'Records', value: count.toLocaleString(), color },
-                  { label: 'Share', value: total ? `${((count / total) * 100).toFixed(1)}%` : '—' },
+                  { label: 'Share', value: total ? `${((count / total) * 100).toFixed(1)}%` : '-' },
                 ];
               }}
             />

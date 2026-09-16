@@ -27,7 +27,12 @@ const SCREENS = [
 console.log('\n1. resume sends you where you left off');
 t('a stored route is honoured',
   resumeRouteFor({ current_route: '/data-stitching' }) === '/data-stitching');
-t('data review too', resumeRouteFor({ current_route: '/data-review' }) === '/data-review');
+t('data review too', resumeRouteFor({ current_route: '/eda' }) === '/eda');
+// Data Review is routed at /eda. Workflows saved while it was at /data-review
+// carry that in their state and must still resume onto the screen, rather than
+// failing the known-route check and falling back three screens to ingestion.
+t('the route it used to have still resumes onto it',
+  resumeRouteFor({ current_route: '/data-review' }) === '/eda');
 // A route from an older build, or a stage that no longer exists, must not
 // strand the user on a blank screen.
 t('an unknown route falls back to ingestion',
@@ -71,7 +76,9 @@ t('and no longer hardcodes ingestion in resume',
 console.log('\n6. every screen persists its configuration');
 const PERSISTED = {
   ingestion: ['activeTab', 'openFile', 'pendingCategories', 'visitedTabs'],
-  review: ['dateKey', 'geoKey', 'kpiColumn', 'selectedMetrics', 'corrSelectedCols',
+  // `selectedMetrics` left with the Time Trends tab, which moved to the
+  // ingestion screen. `binWidth` arrived with the bucket width control.
+  review: ['dateKey', 'geoKey', 'kpiColumn', 'binWidth', 'corrSelectedCols',
            'outlierMethod', 'outlierThreshold', 'removalThreshold', 'clusterThreshold',
            'activeTab', 'corrSubTab'],
   transformation: ['dateKeys', 'geoKeys', 'dependentVars', 'popKeys', 'carryover',

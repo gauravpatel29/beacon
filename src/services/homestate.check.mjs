@@ -58,7 +58,9 @@ t('sidebar and Home share no class names', shared.length === 0, shared);
 
 console.log('\n3. every recorded stage has a tone of its own');
 const recorded = [...stages.matchAll(/stage: '([^']+)'/g)].map((m) => m[1]);
-t('workflowStages declares the stages', recorded.length === 4, recorded);
+// Every stage a screen can record, whatever the count - the point of the loop
+// below is that none of them falls through to the neutral tone.
+t('workflowStages declares the stages', recorded.length >= 4, recorded);
 const tones = homeJsx.slice(homeJsx.indexOf('const STAGE_TONES'));
 for (const stage of recorded) {
   const row = new RegExp(`'${stage}': '(\\w+)'`).exec(tones);

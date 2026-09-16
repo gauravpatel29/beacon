@@ -23,7 +23,7 @@ const SECTIONS = {
     ['  Status column',            '<th>Status</th>'],
     ['  server status rendered',   'v.status ||'],
   ],
-  '2. Treatment — Removal': [
+  '2. Treatment - Removal': [
     ['Target KPI select',          'Target KPI for Correlation Comparison'],
     ['Removal threshold',          'Removal Threshold'],
     ['Scan button',                'Scan Correlated Pairs'],
@@ -34,7 +34,7 @@ const SECTIONS = {
     ['  drop one, not all',        'applyRemovalTreatment([p.drop])'],
     ['bulk apply still there',     'Apply All ('],
   ],
-  '3. Treatment — Combination (Sum)': [
+  '3. Treatment - Combination (Sum)': [
     ['Pairwise threshold',         'Pairwise Correlation Threshold'],
     ['drop-originals checkbox',    'Drop original features after summing'],
     ['Find button',                'Find Correlated Pairs'],
@@ -132,7 +132,7 @@ const ABSENT = {
   'no wrapper for a missing route': 'preview-combination',
   'no raw scatter under it': 'binnedLine={bivariateData',
   'removal scans only on request': 'queueMicrotask(() => { if (!cancelled) findRemovalCandidates',
-  'no long dashes in labels': "Treatment —",
+  'no long dashes in labels': "Treatment -",
   // A treatment must never scope itself to the Analysis tab's selection.
   'treatments ignore the selection': 'columns: corrSelectedCols,\n      threshold',
 };

@@ -35,4 +35,4 @@ export const fmt = (v) => (Number.isFinite(v)
   ? (Math.abs(v) >= 1000
       ? Math.round(v).toLocaleString()
       : Number(Number(v).toFixed(2)).toLocaleString())
-  : '—');
+  : '-');

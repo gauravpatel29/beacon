@@ -1,12 +1,12 @@
 import { useNavigate } from 'react-router-dom';
 import './PageFooterNav.css';
 
-// Single source of truth for pipeline order AND descriptions — matches the
+// Single source of truth for pipeline order AND descriptions - matches the
 // sidebar and the Home page's pipeline cards. Add a new page here once and
 // every existing PageFooterNav automatically knows where "Back"/"Proceed"
 // should go, and what to say about it.
 //
-// `description` is written as "what this step does" — reused both as the
+// `description` is written as "what this step does" - reused both as the
 // card description on Home, and here as the "what you're about to do next"
 // text when this step is the *next* one in the sequence.
 export const PIPELINE_STEPS = [
@@ -69,7 +69,7 @@ export const PIPELINE_STEPS = [
 ];
 
 /**
- * Drop this at the bottom of any pipeline page — it's fully dynamic by
+ * Drop this at the bottom of any pipeline page - it's fully dynamic by
  * default, no need to write per-page status text:
  *
  *   <PageFooterNav currentStepId="data-review" />

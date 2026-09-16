@@ -9,8 +9,8 @@ import './Datastitching.css';
 const DEFAULT_TABS = [];
 
 // The five join_type values the build endpoint accepts. Labels deliberately
-// carry no file name — the guide warns that a label like "Left Join (Keep all
-// crosswalk.csv rows)" is ambiguous — and only `value` is ever sent.
+// carry no file name - the guide warns that a label like "Left Join (Keep all
+// crosswalk.csv rows)" is ambiguous - and only `value` is ever sent.
 const JOIN_TYPES = [
   { value: 'left', label: 'Left Join | keep every left row' },
   { value: 'inner', label: 'Inner Join | keep only rows matching on both sides' },
@@ -397,7 +397,7 @@ function Datastitching() {
   });
 
   // Re-runs the whole pipeline (dry run) for a given steps array and turns
-  // the result into joinCards — used after add/edit/delete so the cards
+  // the result into joinCards - used after add/edit/delete so the cards
   // and final row/column counts always reflect what's really configured.
   const rebuildCardsFromSteps = async (steps) => {
     if (steps.length === 0) {
@@ -816,7 +816,7 @@ function Datastitching() {
                             {(shownPreview.data.preview || []).slice(0, 15).map((row, ri) => (
                               <tr key={ri}>
                                 {(shownPreview.data.columns || []).map((c) => (
-                                  <td key={c}>{row[c] === null || row[c] === undefined ? '—' : row[c]}</td>
+                                  <td key={c}>{row[c] === null || row[c] === undefined ? '-' : row[c]}</td>
                                 ))}
                               </tr>
                             ))}

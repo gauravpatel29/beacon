@@ -55,7 +55,7 @@
 }
 
 /* ==========================================================================
-   1. DEFAULT VIEW — empty dropzone
+   1. DEFAULT VIEW - empty dropzone
    ========================================================================== */
 
 .upload-card {
@@ -124,7 +124,7 @@
 }
 
 /* ==========================================================================
-   2. MAPPING VIEW — shown after files are uploaded
+   2. MAPPING VIEW - shown after files are uploaded
    ========================================================================== */
 
 .mapping-layout {
@@ -634,7 +634,7 @@
   border-color: var(--color-primary);
 }
 
-/* Info box shown once a category is picked — grain + description */
+/* Info box shown once a category is picked - grain + description */
 .category-info-box {
   margin-top: var(--spacing-sm);
   background-color: var(--color-primary-light);
@@ -1374,4 +1374,187 @@
 
 .chain-add-btn:hover {
   background-color: #eef1f6;
+}
+
+/* ---- Time-Series Trend controls (Data Review section) ----
+   The toggle, the date range and the metric links share one row. They were a
+   mix of a class and three sets of inline styles, so the pill stood taller
+   than the date inputs and sat higher than them as well. */
+.trend-controls-row {
+  /* Wraps rather than pushing the metric links off the right edge, which is
+     what `space-between` on one line was doing at this width. */
+  flex-wrap: wrap;
+  gap: 0.6rem 1rem;
+}
+
+/* The toggle carries a bottom margin of its own for the Data Review layout it
+   came from. Inside a centred flex row that margin is counted in its height,
+   which pushes its centre line above everything beside it. */
+.trend-controls-row .agg-toggle {
+  margin-bottom: 0;
+}
+
+.trend-date-range {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.trend-date-range label {
+  font-size: 0.78rem;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-secondary);
+}
+
+/* Same height as an .agg-toggle button: 0.5rem of padding on a 0.78rem line,
+   so the two controls have one top edge and one bottom edge. */
+.trend-date-range input {
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 0.78rem;
+  line-height: 1;
+  background-color: var(--color-white);
+}
+
+.trend-date-range input:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+/* A button, not a span with an onClick: it is reachable by keyboard and it
+   announces itself. */
+.trend-range-reset {
+  padding: 0.35rem 0.5rem;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  color: var(--color-primary);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.trend-range-reset:hover {
+  background-color: #eef1f6;
+}
+
+/* Pushed to the end of the row, and allowed to drop to its own line when the
+   controls before it need the width. */
+.trend-metric-links {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+/* ---- Column categories (Assign Category tab) ---- */
+.role-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.6rem;
+}
+
+.role-chip {
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.role-chip.tone-violet { background: #eee6fd; color: #6935c4; }
+.role-chip.tone-red    { background: #fde4e4; color: #b3261e; }
+.role-chip.tone-blue   { background: #e2ecff; color: #1c47b0; }
+.role-chip.tone-green  { background: #dcf5e4; color: #1a7a41; }
+.role-chip.tone-amber  { background: #fdf0d5; color: #a8710d; }
+
+.role-reset {
+  margin-left: auto;
+  padding: 0.25rem 0.6rem;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--color-primary);
+  cursor: pointer;
+}
+
+.role-reset:hover { background-color: #eef1f6; }
+
+/* Scrolls on its own so a wide file does not push the page sideways, and caps
+   its height so a hundred-column file does not bury the tab below it. */
+.role-table-wrap {
+  max-height: 340px;
+  overflow: auto;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+}
+
+.role-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.76rem;
+}
+
+.role-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background-color: #f7f9fc;
+  text-align: left;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.role-table td {
+  padding: 0.4rem 0.7rem;
+  border-bottom: 1px solid #f2f5f9;
+  vertical-align: middle;
+}
+
+.role-table tr:hover td { background-color: #fafbfd; }
+
+.role-table tr.is-dropped td { opacity: 0.55; }
+
+.role-col-name {
+  font-weight: 600;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+}
+
+.role-dropped-tag,
+.role-renamed-tag {
+  margin-left: 0.4rem;
+  font-size: 0.66rem;
+  font-weight: 500;
+  color: var(--color-text-light);
+}
+
+.role-select {
+  width: 100%;
+  max-width: 330px;
+  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  background-color: var(--color-white);
+}
+
+/* The role is readable from the row without reading the label. */
+.role-select.tone-violet { background: #f6f1ff; color: #6935c4; border-color: #ddd0f7; }
+.role-select.tone-red    { background: #fef3f3; color: #b3261e; border-color: #f6cfcc; }
+.role-select.tone-blue   { background: #f1f6ff; color: #1c47b0; border-color: #cfdcf8; }
+.role-select.tone-green  { background: #f1fbf4; color: #1a7a41; border-color: #cbead7; }
+.role-select.tone-amber  { background: #fefaf0; color: #a8710d; border-color: #f3e2bd; }
+
+.role-samples {
+  color: var(--color-text-light);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.68rem;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
