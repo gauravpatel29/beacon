@@ -1000,7 +1000,7 @@ function ModelOutput() {
                             <div className="cohort-banner">Benchmark Cohort: {benchmarkResult.benchmark_group}{benchmarkIsFallback && ' (estimated live service unavailable)'}</div>
                             <p className="mo-section-title" style={{ fontSize: '0.75rem' }}>Overall Metric Comparisons</p>
                             <table className="benchmark-table">
-                              <thead><tr><th>Metric</th><th>Benchmark</th><th>Status</th></tr></thead>
+                              <thead><tr><th>Metric</th><th>Benchmark</th></tr></thead>
                               <tbody>
                                 {(benchmarkResult.overall_comparison || []).map((row, i) => {
                                   const status = parseStatus(row.status);
@@ -1009,7 +1009,7 @@ function ModelOutput() {
                                       <td>{row.metric}</td>
                                       {/* <td>{resolveYours(row.metric, row.yours)}</td> */}
                                       <td>{row.benchmark}</td>
-                                      <td className={`status-cell ${status.tone}`}>{status.text}</td>
+                                      {/* <td className={`status-cell ${status.tone}`}>{status.text}</td> */}
                                     </tr>
                                   );
                                 })}
