@@ -1,0 +1,289 @@
+"""Full-frame column statistics: control totals, and what a filter needs to
+offer sensible bounds.
+
+Distinct from `core.profile`, and the difference matters:
+
+  * `profile` samples the first 200 rows of the RAW upload to *suggest* how a
+    column should be configured. Sampling is right there - it feeds a form that
+    a human confirms, and reading a large file twice to pre-fill a dropdown is
+    waste.
+
+  * This module reads the WHOLE frame, and the frame as the user will actually
+    see it (post-rename, post-dtype, post-format). A "3% null" ribbon computed
+    from the first 200 rows would be a number that looks authoritative and
+    isn't, and a min/max that excludes 99% of the file gives a range filter
+    that silently drops rows. Control totals have to be true totals.
+
+Types are taken from the manifest rather than from pandas. Everything is read
+back as `dtype=object` text (see `transform.read_table`), so the spec's
+`dtype_changes` is the only statement of what a column *is* - and dates are
+parsed with the explicit format `date_formats` wrote them in, never inferred.
+"""
+
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+import pandas as pd
+
+from core.manifest import LiveUpdates, ResolvedSpec
+from core.transform import output_date_formats
+
+# How many distinct values a categorical search may return at once. The UI
+# searches as the user types rather than rendering the whole domain, so this
+# caps one response, not the column.
+VALUES_LIMIT = 50
+MAX_VALUES_LIMIT = 500
+
+NUMERIC_DTYPES = {"integer", "bigint", "float", "decimal"}
+DATE_DTYPES = {"date", "timestamp"}
+
+# Name fragments that mark a column as an identifier rather than a measure.
+# Summing an NPI or a ZIP produces a number with no meaning, so these never get
+# a control total however numeric they look. Same list the EDA summary uses, so
+# the two screens agree on what counts as a metric.
+ID_TOKENS = ("id", "code", "zip", "postal", "fips", "key", "account", "phone",
+             "npi", "num")
+
+
+def _is_identifier(name: str) -> bool:
+    return any(token in name.lower() for token in ID_TOKENS)
+
+
+def _blank(series: pd.Series) -> pd.Series:
+    """Null, or whitespace-only text. Matches `profile._blank` so the two
+    modules never disagree about what counts as missing."""
+    return series.isna() | (series.astype(str).str.strip() == "")
+
+
+def _to_numeric(values: pd.Series) -> pd.Series:
+    """Thousands separators and a leading currency symbol are formatting, not
+    data - the same cleaning `profile._numeric_rate` uses to decide a column is
+    numeric in the first place."""
+    cleaned = (
+        values.astype(str)
+        .str.strip()
+        .str.replace(",", "", regex=False)
+        .str.replace(r"^\$", "", regex=True)
+    )
+    return pd.to_numeric(cleaned, errors="coerce")
+
+
+def _kind_map(spec: Optional[ResolvedSpec]) -> Dict[str, str]:
+    """Post-rename column -> "number" | "date" | "string".
+
+    Read off the manifest the user configured. A column they never re-typed is
+    a string here, which is the honest answer: the profile only ever *suggested*
+    a type, and an unconfirmed suggestion is not a fact about the data.
+    """
+    if spec is None:
+        return {}
+    lu: LiveUpdates = spec.live_updates
+    renames = {r.from_: r.to for r in lu.column_renames}
+    kinds: Dict[str, str] = {}
+
+    for change in lu.dtype_changes:
+        name = renames.get(change.column, change.column)
+        if change.to in NUMERIC_DTYPES:
+            kinds[name] = "number"
+        elif change.to in DATE_DTYPES:
+            kinds[name] = "date"
+        else:
+            kinds[name] = "string"
+
+    # A date_formats entry is itself a statement that the column holds dates,
+    # even when no dtype_change accompanies it.
+    for name in output_date_formats(lu):
+        kinds[name] = "date"
+
+    return kinds
+
+
+def _numeric_bounds(values: pd.Series) -> Dict[str, Any]:
+    nums = _to_numeric(values).dropna()
+    if nums.empty:
+        return {"min": None, "max": None, "control_total": None}
+    lo, hi = float(nums.min()), float(nums.max())
+    # Integral bounds come back as ints so a range input doesn't show "0.0".
+    whole = bool(np.all(np.equal(np.mod(nums, 1), 0)))
+    total = float(nums.sum())
+    return {
+        "min": int(lo) if whole else lo,
+        "max": int(hi) if whole else hi,
+        # The figure a reviewer reconciles against the source system. Rounded
+        # only for display; a column of whole numbers stays whole so a row count
+        # or a script count does not read as "26000.0".
+        "control_total": int(total) if whole else round(total, 2),
+    }
+
+
+def _numeric_summary(values: pd.Series, total: int) -> Dict[str, Any]:
+    """Distribution of one numeric column, for the ingestion summary table.
+
+    `active_pct` is the share of rows that are NON-ZERO, matching
+    `compute_sparsity_stats` on the Data Review screen. Non-null would be the
+    easier number and the wrong one: a spend column that is present but zero for
+    fifty weeks is sparse, and reporting it as 100% healthy hides exactly the
+    problem this column exists to surface.
+    """
+    nums = _to_numeric(values).dropna()
+    if nums.empty:
+        return {"mean": None, "median": None, "std_dev": None,
+                "p75": None, "p95": None, "active_pct": None}
+
+    # Population of one has no spread; pandas returns NaN, which is not JSON.
+    std = float(nums.std(ddof=1)) if len(nums) > 1 else 0.0
+    non_zero = int((nums != 0).sum())
+
+    return {
+        "mean": round(float(nums.mean()), 2),
+        "median": round(float(nums.median()), 2),
+        "std_dev": round(std, 2),
+        "p75": round(float(nums.quantile(0.75)), 2),
+        "p95": round(float(nums.quantile(0.95)), 2),
+        "active_pct": round(100.0 * non_zero / total, 2) if total else 0.0,
+    }
+
+
+EMPTY_SUMMARY = {"mean": None, "median": None, "std_dev": None,
+                 "p75": None, "p95": None, "active_pct": None}
+
+
+def _date_bounds(values: pd.Series, fmt: Optional[str]) -> Dict[str, Any]:
+    """Bounds as ISO `YYYY-MM-DD`, which is what `date_range` accepts.
+
+    `fmt` is the format `date_formats` wrote the column in. Without it there is
+    nothing to do but infer, and inference on day-first text is exactly the
+    transposition bug - so an unparseable column reports no bounds rather than
+    a plausible wrong one.
+    """
+    parsed = pd.to_datetime(values, format=fmt, errors="coerce") if fmt \
+        else pd.to_datetime(values, errors="coerce")
+    parsed = parsed.dropna()
+    if parsed.empty:
+        return {"min": None, "max": None}
+    return {"min": parsed.min().strftime("%Y-%m-%d"),
+            "max": parsed.max().strftime("%Y-%m-%d")}
+
+
+def column_stats(
+    name: str, series: pd.Series, kind: str, date_fmt: Optional[str], total: int
+) -> Dict[str, Any]:
+    blank = _blank(series)
+    null_count = int(blank.sum())
+    values = series[~blank]
+
+    info: Dict[str, Any] = {
+        "column": name,
+        "kind": kind,
+        "null_count": null_count,
+        # Rounded for display; the counts above stay exact for anyone who needs
+        # to compute their own. A zero-row file is 0% null, not undefined.
+        "null_pct": round(100.0 * null_count / total, 2) if total else 0.0,
+        "distinct_count": int(values.nunique()) if len(values) else 0,
+    }
+
+    # `numeric` is what the stats pass actually determined, which is not the
+    # same as what the user has typed on the Columns & Types tab yet. The
+    # summary table reads it to decide whether a column is a metric, so a
+    # freshly uploaded file classifies correctly instead of everything landing
+    # under "Dimension" until someone visits that tab.
+    info["numeric"] = False
+    info.update(EMPTY_SUMMARY)
+
+    if not len(values):
+        info["min"] = info["max"] = info["control_total"] = None
+        return info
+
+    if kind == "number":
+        info.update(_numeric_bounds(values))
+        info.update(_numeric_summary(values, total))
+        info["numeric"] = True
+    elif kind == "date":
+        info.update(_date_bounds(values, date_fmt))
+        info["control_total"] = None
+    else:
+        info["min"] = info["max"] = info["control_total"] = None
+        # A column the user has not typed yet is a string here, which is the
+        # honest answer for the FILTER controls - an unconfirmed guess is not a
+        # fact. But a control total is arithmetic, not a claim about intent: if
+        # every value in the column is a number, it has a sum, and refusing to
+        # show one until someone visits the Columns & Types tab would leave the
+        # ribbon blank on a file that was just uploaded.
+        if not _is_identifier(name):
+            nums = _to_numeric(values)
+            if nums.notna().all():
+                # The whole distribution, on the same reasoning as the total: a
+                # mean or a minimum is arithmetic on values that are all
+                # numbers, not a claim that the column is meant to be a metric.
+                #
+                # These bounds are safe to report even though they also feed the
+                # filter hints, because the filter picks its control from
+                # `kind`, which is still "string" here - so the numeric branch
+                # that reads min/max never renders for this column.
+                info.update(_numeric_bounds(values))
+                info.update(_numeric_summary(values, total))
+                info["numeric"] = True
+
+    return info
+
+
+def frame_stats(df: pd.DataFrame, spec: Optional[ResolvedSpec] = None) -> Dict[str, Any]:
+    """Control totals for the ribbon plus per-column filter bounds.
+
+    One pass over the whole frame serving both, because they are the same read:
+    the ribbon wants null counts, the filter wants bounds, and splitting them
+    would mean loading a large file twice to answer one screen.
+    """
+    total = int(len(df))
+    kinds = _kind_map(spec)
+    fmts = output_date_formats(spec.live_updates) if spec else {}
+
+    columns = [
+        column_stats(
+            str(col), df[col], kinds.get(str(col), "string"),
+            fmts.get(str(col)), total,
+        )
+        for col in df.columns
+    ]
+
+    return {
+        "row_count": total,
+        # A duplicate is a row identical to an earlier one across every column.
+        # `keep="first"` counts the copies, not the originals, so subtracting
+        # gives the distinct-row count the user expects.
+        "duplicate_rows": int(df.duplicated(keep="first").sum()) if total else 0,
+        "columns": columns,
+    }
+
+
+def search_values(
+    df: pd.DataFrame, column: str, q: str = "", limit: int = VALUES_LIMIT
+) -> Dict[str, Any]:
+    """Distinct values of one column, optionally narrowed by a search term.
+
+    Backs the categorical filter's type-ahead. Returning the whole domain would
+    be fine for a status column and ruinous for an ID column, so the search
+    happens here, over the real data, and only a page of matches crosses the
+    wire.
+    """
+    limit = max(1, min(int(limit or VALUES_LIMIT), MAX_VALUES_LIMIT))
+    series = df[column]
+    values = series[~_blank(series)].astype(str).str.strip()
+
+    total_distinct = int(values.nunique())
+    if q:
+        values = values[values.str.contains(q, case=False, regex=False, na=False)]
+
+    counts = values.value_counts()
+    items = [{"value": str(v), "count": int(n)} for v, n in counts.head(limit).items()]
+
+    return {
+        "column": column,
+        "query": q,
+        "values": items,
+        # Distinct values MATCHING the query, so the UI can say "showing 50 of
+        # 312" rather than implying it listed everything.
+        "match_count": int(counts.size),
+        "distinct_count": total_distinct,
+        "truncated": bool(counts.size > len(items)),
+    }

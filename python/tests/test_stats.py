@@ -1,0 +1,197 @@
+"""Control totals + filter bounds, end to end against the live Neon branch.
+
+    python/.venv/Scripts/python.exe python/tests/test_stats.py
+
+Uploads one small file with known nulls and one exact duplicate row, then
+checks /stats and /values. Cleans up after itself.
+
+The assertion that matters most is the date bound: the source is day-first
+(04-01-2026 .. 12-01-2026 = 4 Jan .. 12 Jan). Read by inference those become
+April .. December, and a date filter seeded from them would silently exclude
+the whole file.
+"""
+import os
+import uuid
+
+import httpx
+BASE = os.environ.get("BEACON_BASE_URL", "http://127.0.0.1:8090")
+c=httpx.Client(base_url=BASE,timeout=180.0)
+PASS,FAIL=[],[]
+def check(l,cond,d=""):
+    (PASS if cond else FAIL).append(l)
+    print(("  PASS  " if cond else "  FAIL  ")+l+(f"  :: {d}" if d and not cond else ""))
+
+# 10 rows; row 9 duplicates row 1 exactly. `region` blank twice, `trx` blank once.
+CSV=(
+ "npi,region,trx,month\n"
+ "1234567893,East,100,04-01-2026\n"
+ "1234567891,West,200,05-01-2026\n"
+ "1234567892,,300,06-01-2026\n"
+ "1234567894,East,,07-01-2026\n"
+ "1234567895,North,500,08-01-2026\n"
+ "1234567896,,600,09-01-2026\n"
+ "1234567897,West,700,10-01-2026\n"
+ "1234567898,South,800,11-01-2026\n"
+ "1234567893,East,100,04-01-2026\n"   # exact duplicate of row 1
+ "1234567899,East,900,12-01-2026\n"
+).encode()
+
+wf=c.post("/v1/workflows",json={"workflow_name":"stats "+uuid.uuid4().hex[:6]}).json()["id"]
+try:
+    c.post(f"/v2/workflows/{wf}/files",params={"overwrite":True},
+           files=[("files",("s.csv",CSV,"text/csv"))],data={"manifest":"{}"})
+
+    print("\n1. control totals on the raw upload")
+    r=c.get(f"/v2/workflows/{wf}/files/s.csv/stats")
+    check("stats 200", r.status_code==200, r.text[:300])
+    d=r.json()
+    check("row_count is the whole file", d["row_count"]==10, d["row_count"])
+    check("duplicate_rows counts the copy, not the original", d["duplicate_rows"]==1, d["duplicate_rows"])
+    cols={x["column"]:x for x in d["columns"]}
+    check("region: 2 of 10 null -> 20%", cols["region"]["null_count"]==2 and cols["region"]["null_pct"]==20.0,
+          (cols["region"]["null_count"],cols["region"]["null_pct"]))
+    check("trx: 1 of 10 null -> 10%", cols["trx"]["null_pct"]==10.0, cols["trx"]["null_pct"])
+    check("npi: no nulls -> 0%", cols["npi"]["null_pct"]==0.0, cols["npi"]["null_pct"])
+    check("untyped column reports as string", cols["trx"]["kind"]=="string", cols["trx"]["kind"])
+
+    print("\n2. after typing the columns, bounds appear")
+    spec={"live_updates":{"dtype_changes":[{"column":"trx","to":"integer","on_error":"null_out"}],
+                          "date_formats":[{"column":"month","from":"%d-%m-%Y","to":"%Y-%m-%d"}]},
+          "filters":[],"granularity":None}
+    r=c.patch(f"/v2/workflows/{wf}/files/s.csv/spec",json=spec)
+    check("spec committed", r.status_code==200, r.text[:300])
+    d=c.get(f"/v2/workflows/{wf}/files/s.csv/stats").json()
+    cols={x["column"]:x for x in d["columns"]}
+    check("trx now numeric", cols["trx"]["kind"]=="number", cols["trx"]["kind"])
+    check("numeric bounds are whole numbers", cols["trx"]["min"]==100 and cols["trx"]["max"]==900,
+          (cols["trx"]["min"],cols["trx"]["max"]))
+    check("month now a date", cols["month"]["kind"]=="date", cols["month"]["kind"])
+    # THE BUG THAT MATTERS: source is day-first 04-01-2026 = 4 Jan .. 12-01-2026 = 12 Jan.
+    check("date bounds read day-first correctly (not Apr..Dec)",
+          cols["month"]["min"]=="2026-01-04" and cols["month"]["max"]=="2026-01-12",
+          (cols["month"]["min"],cols["month"]["max"]))
+    check("string column reports no bounds", cols["region"]["min"] is None, cols["region"]["min"])
+    check("distinct counts present (blanks excluded)", cols["region"]["distinct_count"]==4, cols["region"]["distinct_count"])
+
+    print("\n2b. control totals for the ingestion ribbon")
+    # The ribbon reports the same figure the Data Review summary calls a
+    # control total, so the two screens reconcile against each other.
+    check("trx totals 100+200+300+500+600+700+800+100+900 = 4200",
+          cols["trx"]["control_total"] == 4200, cols["trx"]["control_total"])
+    check("a whole-number column stays whole",
+          isinstance(cols["trx"]["control_total"], int), cols["trx"]["control_total"])
+    check("a text column has no total", cols["region"]["control_total"] is None,
+          cols["region"]["control_total"])
+    check("a date column has no total", cols["month"]["control_total"] is None,
+          cols["month"]["control_total"])
+    # Summing an NPI produces a number with no meaning.
+    check("an identifier column has no total, however numeric it looks",
+          cols["npi"]["control_total"] is None, cols["npi"]["control_total"])
+
+    print("\n2c. a total does not wait for the Columns & Types tab")
+    # Before any dtype is committed every column reads as a string, but a column
+    # whose values are all numbers still has a sum. Requiring the manifest first
+    # would leave the ribbon blank on a file that was just uploaded.
+    fresh = c.post("/v1/workflows", json={"workflow_name": "fresh " + uuid.uuid4().hex[:6]}).json()["id"]
+    try:
+        c.post(f"/v2/workflows/{fresh}/files", params={"overwrite": True},
+               files=[("files", ("u.csv", CSV, "text/csv"))], data={"manifest": "{}"})
+        raw = c.get(f"/v2/workflows/{fresh}/files/u.csv/stats").json()
+        rawcols = {x["column"]: x for x in raw["columns"]}
+        check("every column is still untyped", all(x["kind"] == "string" for x in raw["columns"]),
+              [x["kind"] for x in raw["columns"]])
+        check("trx is totalled anyway", rawcols["trx"]["control_total"] == 4200,
+              rawcols["trx"]["control_total"])
+        check("npi is still not", rawcols["npi"]["control_total"] is None,
+              rawcols["npi"]["control_total"])
+        # The summary table shows a whole row per column, so an untyped numeric
+        # column reports its distribution too rather than a row of NA beside a
+        # populated control total.
+        check("and the rest of the row is filled in, not just the total",
+              all(rawcols["trx"][k] is not None
+                  for k in ("mean", "median", "std_dev", "p75", "p95",
+                            "active_pct", "min", "max")),
+              {k: rawcols["trx"][k] for k in ("mean", "median", "min", "max")})
+        check("it is flagged numeric so the role reads Metric, not Dimension",
+              rawcols["trx"]["numeric"] is True, rawcols["trx"]["numeric"])
+        check("the filter still treats it as untyped, so no control changes",
+              rawcols["trx"]["kind"] == "string", rawcols["trx"]["kind"])
+        check("an identifier stays empty across the whole row",
+              all(rawcols["npi"][k] is None
+                  for k in ("mean", "median", "std_dev", "p75", "p95",
+                            "active_pct", "min", "max")),
+              rawcols["npi"])
+    finally:
+        c.delete(f"/v2/workflows/{fresh}/files/u.csv")
+        c.delete(f"/v1/workflows/{fresh}")
+
+    print("\n2d. the distribution the ingestion summary table reads")
+    # trx is 100,200,300,(blank),500,600,700,800,100,900 - nine values over ten
+    # rows. The blank is excluded from the statistics but counted in the rows,
+    # which is what separates active_pct from null_pct.
+    trx = cols["trx"]
+    check("mean is over the nine present values, not ten rows",
+          trx["mean"] == round(4200 / 9, 2), trx["mean"])
+    check("median", trx["median"] == 500.0, trx["median"])
+    # Sample deviation (ddof=1): variance 92,500 over eight degrees of freedom.
+    check("std dev is the sample deviation, not the population one",
+          trx["std_dev"] == 304.14, trx["std_dev"])
+    check("75th percentile", trx["p75"] == 700.0, trx["p75"])
+    check("95th percentile", trx["p95"] == 860.0, trx["p95"])
+    # Every present value is non-zero, so 9 of 10 rows are active.
+    check("active_pct counts NON-ZERO rows, not non-null",
+          trx["active_pct"] == 90.0, trx["active_pct"])
+    check("trx is reported as numeric", trx["numeric"] is True, trx["numeric"])
+
+    check("a text column has no distribution",
+          all(cols["region"][k] is None
+              for k in ("mean", "median", "std_dev", "p75", "p95", "active_pct")),
+          cols["region"])
+    check("and is not numeric", cols["region"]["numeric"] is False, cols["region"]["numeric"])
+    check("a date column has no distribution either",
+          cols["month"]["mean"] is None and cols["month"]["numeric"] is False, cols["month"])
+    check("an identifier is excluded from the distribution too, not just the total",
+          cols["npi"]["mean"] is None and cols["npi"]["numeric"] is False, cols["npi"])
+
+    print("\n2e. a zero-heavy column reads as sparse, not as healthy")
+    sparse_csv = ("geo,spend\n" + "".join(f"G{i},0\n" for i in range(8))
+                  + "G8,250\nG9,250\n").encode()
+    sp = c.post("/v1/workflows", json={"workflow_name": "sparse " + uuid.uuid4().hex[:6]}).json()["id"]
+    try:
+        c.post(f"/v2/workflows/{sp}/files", params={"overwrite": True},
+               files=[("files", ("z.csv", sparse_csv, "text/csv"))], data={"manifest": "{}"})
+        z = {x["column"]: x for x in c.get(f"/v2/workflows/{sp}/files/z.csv/stats").json()["columns"]}
+        check("nothing is null", z["spend"]["null_pct"] == 0.0, z["spend"]["null_pct"])
+        # The distinction that matters: non-null would say 100% healthy here.
+        check("but only 20% of rows are active", z["spend"]["active_pct"] == 20.0,
+              z["spend"]["active_pct"])
+        check("the total still reconciles", z["spend"]["control_total"] == 500,
+              z["spend"]["control_total"])
+    finally:
+        c.delete(f"/v2/workflows/{sp}/files/z.csv")
+        c.delete(f"/v1/workflows/{sp}")
+
+    print("\n3. type-ahead over distinct values")
+    r=c.get(f"/v2/workflows/{wf}/files/s.csv/values",params={"column":"region"})
+    check("values 200", r.status_code==200, r.text[:200])
+    v=r.json()
+    check("blank values excluded", all(x["value"].strip() for x in v["values"]), v["values"])
+    check("East counted 4 times", next(x["count"] for x in v["values"] if x["value"]=="East")==4, v["values"])
+    check("ordered by frequency", v["values"][0]["value"]=="East", v["values"][0])
+    r=c.get(f"/v2/workflows/{wf}/files/s.csv/values",params={"column":"region","q":"est"})
+    v=r.json()
+    check("search 'est' matches West only (case-insensitive substring)",
+          [x["value"] for x in v["values"]]==["West"], v["values"])
+    check("match_count reflects the query", v["match_count"]==1, v["match_count"])
+    r=c.get(f"/v2/workflows/{wf}/files/s.csv/values",params={"column":"region","limit":2})
+    v=r.json()
+    check("limit honoured and truncation flagged", len(v["values"])==2 and v["truncated"], v)
+
+    print("\n4. errors")
+    r=c.get(f"/v2/workflows/{wf}/files/s.csv/values",params={"column":"ghost"})
+    check("unknown column -> 422 naming it", r.status_code==422
+          and r.json()["errors"][0]["code"]=="column_not_found", r.text[:200])
+finally:
+    c.delete(f"/v2/workflows/{wf}/files/s.csv"); c.delete(f"/v1/workflows/{wf}")
+    print("\n"+"="*56+f"\nPASSED {len(PASS)} / {len(PASS)+len(FAIL)}")
+    for f in FAIL: print("   FAILED: "+f)
