@@ -60,8 +60,8 @@ const pipelineCards = [
       'Select channels, dependent variables, and date ranges to configure your MMM model.',
   },
   {
-    id: 'model-output',
-    title: 'Model Output',
+    id: 'response-curves',
+    title: 'Response Curves',
     icon: data_lifecycle,
     description:
       'Run OLS regression with impactable % attribution, ROI, and Long Term ROI calculations.',

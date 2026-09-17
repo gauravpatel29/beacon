@@ -21,7 +21,7 @@ function App() {
         <Route path="/eda" element={<DataReview />} />
         <Route path="/data-transformation" element={<DataTransformation />} />
         <Route path="/model-configuration" element={<ModelConfiguration />} />
-        <Route path="/model-output" element={<ModelOutput />} />
+        <Route path="/response-curves" element={<ModelOutput />} />
         <Route path="/optimization" element={<Optimization />} />
       </Route>
     </Routes>

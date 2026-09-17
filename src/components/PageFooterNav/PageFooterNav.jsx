@@ -46,9 +46,9 @@ export const PIPELINE_STEPS = [
     description: 'select channels, dependent variables, and date ranges to configure your MMM model.',
   },
   {
-    id: 'model-output',
-    label: 'Model Output',
-    path: '/model-output',
+    id: 'response-curves',
+    label: 'Response Curves',
+    path: '/response-curves',
     completionTitle: 'Model Run Complete',
     description: 'run OLS regression with impactable % attribution, ROI, and Long Term ROI calculations.',
   },

@@ -697,7 +697,7 @@ function ModelOutput() {
     <div className="model-output-page">
       <div className="page-header">
         <div>
-          <p className="page-header-title">Module 7: Model Output &amp; Response Curves</p>
+          <p className="page-header-title">Module 7: Response Curves</p>
           <p className="page-header-subtitle">
             Compare model runs, finalize active model, inspect 4-tier impact breakdown, enter spend for ROI,
             generate response curves, and benchmark against industry peers.
@@ -1065,7 +1065,7 @@ function ModelOutput() {
         </>
       )}
 
-      <PageFooterNav currentStepId="model-output" />
+      <PageFooterNav currentStepId="response-curves" />
     </div>
   );
 }

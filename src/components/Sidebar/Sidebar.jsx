@@ -19,7 +19,7 @@ const navItems = [
   { id: 'eda', icon: dots, label: 'EDA', path: '/eda' },
   { id: 'data-transformation', icon: graph, label: 'Data Transformation', path: '/data-transformation' },
   { id: 'model-configuration ', icon:bar_graph, label: 'Model Configuration', path: '/model-configuration' },
-  { id: 'model-output', icon:data_lifecycle, label: 'Model Output', path: '/model-output' },
+  { id: 'response-curves', icon:data_lifecycle, label: 'Response Curves', path: '/response-curves' },
   { id: 'optimization', icon: aim, label: 'Optimization', path: '/optimization' },
 ];
 
