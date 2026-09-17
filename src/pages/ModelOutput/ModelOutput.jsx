@@ -642,16 +642,16 @@ function ModelOutput() {
     return {
       benchmark_group: `${therapyType} • ${maturityStage} • ${marketingDynamic} (estimated)`,
       overall_comparison: [
-        { metric: 'Promotional Lift Share (%)', yours: `${(100 - baselineShare).toFixed(1)}%`, benchmark: '34.5%', status: '🟡 Near Benchmark' },
-        { metric: 'Baseline Organic Share (%)', yours: `${baselineShare.toFixed(1)}%`, benchmark: '45.0%', status: '🟡 Near Benchmark' },
-        { metric: 'Average Portfolio ROI', yours: avgPortfolioRoi !== null ? `${avgPortfolioRoi.toFixed(2)}x` : '', benchmark: '2.10x', status: '🟡 Near Benchmark' },
+        { metric: 'Promotional Lift Share (%)', benchmark: '34.5%', status: '🟡 Near Benchmark' },
+        { metric: 'Baseline Organic Share (%)', benchmark: '45.0%', status: '🟡 Near Benchmark' },
+        { metric: 'Average Portfolio ROI', benchmark: '2.10x', status: '🟡 Near Benchmark' },
       ],
       channel_benchmarks: deepDive.filter((d) => d.roi !== null).map((d) => {
         const benchVal = Number((d.roi * 0.85 + 0.3).toFixed(2));
         const delta = d.roi - benchVal;
         return {
           channel: d.variable,
-          yours: `${d.roi.toFixed(2)}x`,
+          // yours: `${d.roi.toFixed(2)}x`,
           benchmark: `${benchVal.toFixed(2)}x`,
           status: delta >= 0.2 ? '🟢 Above Benchmark' : delta >= -0.2 ? '🟡 Near Benchmark' : '🔴 Below Benchmark',
         };
@@ -1000,14 +1000,14 @@ function ModelOutput() {
                             <div className="cohort-banner">Benchmark Cohort: {benchmarkResult.benchmark_group}{benchmarkIsFallback && ' (estimated live service unavailable)'}</div>
                             <p className="mo-section-title" style={{ fontSize: '0.75rem' }}>Overall Metric Comparisons</p>
                             <table className="benchmark-table">
-                              <thead><tr><th>Metric</th><th>Yours</th><th>Benchmark</th><th>Status</th></tr></thead>
+                              <thead><tr><th>Metric</th><th>Benchmark</th><th>Status</th></tr></thead>
                               <tbody>
                                 {(benchmarkResult.overall_comparison || []).map((row, i) => {
                                   const status = parseStatus(row.status);
                                   return (
                                     <tr key={i}>
                                       <td>{row.metric}</td>
-                                      <td>{resolveYours(row.metric, row.yours)}</td>
+                                      {/* <td>{resolveYours(row.metric, row.yours)}</td> */}
                                       <td>{row.benchmark}</td>
                                       <td className={`status-cell ${status.tone}`}>{status.text}</td>
                                     </tr>
@@ -1018,14 +1018,14 @@ function ModelOutput() {
 
                             <p className="mo-section-title" style={{ fontSize: '0.75rem' }}>Channel-Level ROI vs. Industry Peer Benchmarks</p>
                             <table className="benchmark-table">
-                              <thead><tr><th>Channel</th><th>Yours</th><th>Benchmark</th><th>Status</th></tr></thead>
+                              <thead><tr><th>Channel</th><th>Benchmark</th><th>Status</th></tr></thead>
                               <tbody>
                                 {(benchmarkResult.channel_benchmarks || []).map((row, i) => {
                                   const status = parseStatus(row.status);
                                   return (
                                     <tr key={i}>
                                       <td>{row.channel}</td>
-                                      <td>{row.yours}</td>
+                                      {/* <td>{row.yours}</td> */}
                                       <td>{row.benchmark}</td>
                                       <td className={`status-cell ${status.tone}`}>{status.text}</td>
                                     </tr>
