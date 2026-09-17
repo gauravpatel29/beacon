@@ -18,12 +18,6 @@ router = APIRouter()
 
 
 def _parse_csv(csv_data: str) -> pd.DataFrame:
-    """UTF-8 first, then latin-1.
-
-    Encoding a string as latin-1 raises on any character outside that range, so
-    a file carrying a non-Latin-1 name or value failed outright rather than
-    falling back.
-    """
     try:
         return pd.read_csv(io.StringIO(csv_data), low_memory=False)
     except Exception:
@@ -66,7 +60,6 @@ async def eda_histogram_route(payload: dict):
         max_val = float(vals.max())
         val_range = max_val - min_val
 
-        # User-specified custom bin width
         if bin_width_param is not None and float(bin_width_param) > 0:
             bw = float(bin_width_param)
             bin_edges = np.arange(min_val, max_val + bw, bw)
@@ -183,7 +176,14 @@ async def detect_outliers_route(payload: dict):
         threshold = float(payload.get("threshold", 3.0))
         lp = float(payload.get("lower_percentile", 1.0))
         up = float(payload.get("upper_percentile", 99.0))
-        return detect_outliers_engine(df, col, method, threshold, lp, up)
+        return detect_outliers_engine(
+            df=df,
+            column=col,
+            method=method,
+            threshold=threshold,
+            lower_percentile=lp,
+            upper_percentile=up,
+        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -197,7 +197,14 @@ async def remove_outliers_route(payload: dict):
         threshold = float(payload.get("threshold", 3.0))
         lp = float(payload.get("lower_percentile", 1.0))
         up = float(payload.get("upper_percentile", 99.0))
-        return remove_outliers_engine(df, col, method, threshold, lp, up)
+        return remove_outliers_engine(
+            df=df,
+            column=col,
+            method=method,
+            threshold=threshold,
+            lower_percentile=lp,
+            upper_percentile=up,
+        )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

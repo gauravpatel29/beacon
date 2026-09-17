@@ -18,7 +18,8 @@ const initialState = {
   stitchingSourceFiles: null,
 
   // Column Configuration & Ingestion Roles
-  columnRoles: {},
+  columnRoles: {}, // { [columnName]: "Cross-sectional Variable" | "Dependent Variable" | "Time Variable" | "Independent Promotions" | "Baseline Variables" }
+  columnPromoTiers: {}, // { [columnName]: "Personal Promotion" | "Non Personal Promotion" | "DTC Promotion" }
   dateColumn: null,
   geoColumn: null,
   zipColumn: null,

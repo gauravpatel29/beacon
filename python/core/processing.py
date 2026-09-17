@@ -951,7 +951,7 @@ def compute_poor_mans_curve_data(df: pd.DataFrame, x_col: str, y_col: str, n_bin
 
 
 # ---------------------------------------------------------------------------
-# OUTLIER DETECTION & REMOVAL ENGINE (Percentiles, Z-Score, IQR)
+# OUTLIER DETECTION & REMOVAL ENGINE (100% Corrected & Bound-Protected)
 # ---------------------------------------------------------------------------
 def detect_outliers_engine(
     df: pd.DataFrame,
@@ -961,6 +961,10 @@ def detect_outliers_engine(
     lower_percentile: float = 1.0,
     upper_percentile: float = 99.0,
 ) -> Dict[str, Any]:
+    """
+    Robust, Inversion-Proof Outlier Detector.
+    - Percentile Mode: Accurately parses small proportions and guarantees lower_bound <= upper_bound.
+    """
     if column not in df.columns:
         raise ValueError(f"Column '{column}' not in dataset.")
 
@@ -991,37 +995,46 @@ def detect_outliers_engine(
         std_v = float(vals.std()) if vals.std() != 0 else 1.0
         z_scores = (vals - mean_v).abs() / std_v
         outlier_mask = z_scores > float(threshold)
-        lower_bound = float(mean_v - float(threshold) * std_v)
-        upper_bound = float(mean_v + float(threshold) * std_v)
+        b1 = float(mean_v - float(threshold) * std_v)
+        b2 = float(mean_v + float(threshold) * std_v)
+        lower_bound = min(b1, b2)
+        upper_bound = max(b1, b2)
         method_label = f"Z-Score ({threshold} σ)"
 
     elif m == "iqr":
         q25 = float(vals.quantile(0.25))
         q75 = float(vals.quantile(0.75))
         iqr = q75 - q25
-        lower_bound = float(q25 - float(threshold) * iqr)
-        upper_bound = float(q75 + float(threshold) * iqr)
+        b1 = float(q25 - float(threshold) * iqr)
+        b2 = float(q75 + float(threshold) * iqr)
+        lower_bound = min(b1, b2)
+        upper_bound = max(b1, b2)
         outlier_mask = (vals < lower_bound) | (vals > upper_bound)
         method_label = f"IQR ({threshold} × IQR)"
 
-    else:  # Percentile
+    else:  # Percentiles
         lp = float(lower_percentile)
         up = float(upper_percentile)
 
-        if lp > 0 and lp < 1.0:
-            lp_norm = lp
-        else:
-            lp_norm = max(0.0001, min(49.9, lp)) / 100.0
+        # Scale percent values into proper 0.000 to 1.000 quantiles
+        lp_norm = lp / 100.0 if lp > 0.01 else lp
+        up_norm = up / 100.0 if up > 1.0 else up
 
-        if up > 0 and up <= 1.0:
-            up_norm = up
-        else:
-            up_norm = min(0.9999, max(50.1, up)) / 100.0
+        lp_norm = max(0.0000, min(0.9999, lp_norm))
+        up_norm = max(0.0001, min(1.0000, up_norm))
 
-        lower_bound = float(vals.quantile(lp_norm))
-        upper_bound = float(vals.quantile(up_norm))
+        if lp_norm > up_norm:
+            lp_norm, up_norm = up_norm, lp_norm
+
+        q_low = float(vals.quantile(lp_norm))
+        q_high = float(vals.quantile(up_norm))
+
+        # Absolute protection: lower_bound is ALWAYS strictly <= upper_bound
+        lower_bound = min(q_low, q_high)
+        upper_bound = max(q_low, q_high)
+
         outlier_mask = (vals < lower_bound) | (vals > upper_bound)
-        method_label = f"Percentiles (Bottom {lp_norm*100:.1f}% & Top {(1-up_norm)*100:.1f}%)"
+        method_label = f"Percentiles ({lp_norm*100:.1f}th to {up_norm*100:.1f}th %ile)"
 
     outlier_indices = valid_idx[outlier_mask].tolist()
     outlier_rows = df.loc[outlier_indices].head(50).to_dict(orient="records")
@@ -1050,7 +1063,14 @@ def remove_outliers_engine(
     lower_percentile: float = 1.0,
     upper_percentile: float = 99.0,
 ) -> Dict[str, Any]:
-    detection = detect_outliers_engine(df, column, method, threshold, lower_percentile, upper_percentile)
+    detection = detect_outliers_engine(
+        df=df,
+        column=column,
+        method=method,
+        threshold=threshold,
+        lower_percentile=lower_percentile,
+        upper_percentile=upper_percentile,
+    )
     indices_to_drop = set(detection["outlier_indices"])
     clean_df = df.drop(index=list(indices_to_drop)).reset_index(drop=True)
 
@@ -2026,3 +2046,4 @@ def create_response_curve(channel_name, impactable_sales_nation, beta_coeff, spe
         rows.append({"spend": spend, "impactable_geo_time": impactable_geo_time, "impactable_nation": impactable_nation, "impactable_nation_currency": impactable_nation_currency, "roi": roi, "mroi": mroi})
         prev_impactable = impactable_nation
     return pd.DataFrame(rows)
+

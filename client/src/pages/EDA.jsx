@@ -3,11 +3,11 @@ import toast from "react-hot-toast";
 import { useNavigate } from "react-router-dom";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  BarChart, Bar, ScatterChart, Scatter
+  ScatterChart, Scatter
 } from "recharts";
 import {
-  edaStats, edaSparsity, edaPoorMansCurve, edaDetectOutliers, edaRemoveOutliers,
-  edaHistogram, edaScatter, correlationMatrix, computeVIF,
+  edaStats, edaSparsity, edaPoorMansCurve,
+  edaScatter, correlationMatrix, computeVIF,
   getHighCorrPairs, previewRemoval, applyRemoval, findClusters, applyCombination,
   v2ListArds, v2GetCsv, problemMessage
 } from "../services/api";
@@ -142,14 +142,6 @@ export default function EDA() {
     return state.granularCsvData || state.filteredCsvData || state.mergedCsvData;
   }, [selectedArdId, loadedCsvMap, state]);
 
-  const [backupCsv, setBackupCsv] = useState(null);
-
-  useEffect(() => {
-    if (activeCsv && !backupCsv) {
-      setBackupCsv(activeCsv);
-    }
-  }, [activeCsv, selectedArdId]);
-
   const [columns, setColumns] = useState([]);
   const [dateCol, setDateCol] = useState(state.dateColumn || "");
   const [geoCol, setGeoCol] = useState(state.geoColumn || "");
@@ -253,110 +245,7 @@ export default function EDA() {
     return list;
   }, [statsResult, sparsityMap, sortField, sortAsc, searchVar]);
 
-  // ─── TAB 2: DISTRIBUTIONS & OUTLIERS ──────────────────────────────────────
-  const [distCol, setDistCol] = useState("");
-  const [histData, setHistData] = useState(null);
-  const [customBinWidth, setCustomBinWidth] = useState("");
-  
-  const [outlierMethod, setOutlierMethod] = useState("percentile");
-  const [lowerPercentile, setLowerPercentile] = useState("1.0");
-  const [upperPercentile, setUpperPercentile] = useState("99.0");
-  const [zScoreThreshold, setZScoreThreshold] = useState("3.0");
-  const [outlierResult, setOutlierResult] = useState(null);
-  const [outlierModalOpen, setOutlierModalOpen] = useState(false);
-  const [distLoading, setDistLoading] = useState(false);
-
-  useEffect(() => {
-    if (!distCol && statsResult?.numeric_cols?.length) {
-      setDistCol(statsResult.numeric_cols[0]);
-    }
-  }, [statsResult]);
-
-  const loadDistAndOutliers = (binWidthOverride = null) => {
-    if (!activeCsv || !distCol) return;
-    setDistLoading(true);
-
-    const bw = binWidthOverride !== null ? binWidthOverride : (parseFloat(customBinWidth) || undefined);
-    const lp = parseFloat(lowerPercentile) || 1.0;
-    const up = parseFloat(upperPercentile) || 99.0;
-    const zThresh = parseFloat(zScoreThreshold) || 3.0;
-
-    Promise.all([
-      edaHistogram({ csv_data: activeCsv, column: distCol, bin_width: bw }),
-      edaDetectOutliers({
-        csv_data: activeCsv,
-        column: distCol,
-        method: outlierMethod,
-        lower_percentile: lp,
-        upper_percentile: up,
-        threshold: zThresh,
-      }),
-    ])
-      .then(([hRes, oRes]) => {
-        setHistData(hRes);
-        if (hRes && hRes.bin_width && !customBinWidth) {
-          setCustomBinWidth(String(hRes.bin_width));
-        }
-        setOutlierResult(oRes);
-      })
-      .catch(() => {
-        toast.error("Could not load distribution diagnostics");
-      })
-      .finally(() => setDistLoading(false));
-  };
-
-  useEffect(() => {
-    if (activeMainTab === "distributions" && activeCsv && distCol) {
-      loadDistAndOutliers();
-    }
-  }, [activeMainTab, activeCsv, distCol, outlierMethod]);
-
-  const handleApplyCustomBucketWidth = () => {
-    const parsed = parseFloat(customBinWidth);
-    if (!parsed || parsed <= 0) return toast.error("Enter a valid positive bucket width.");
-    loadDistAndOutliers(parsed);
-    toast.success(`Bucket width updated to ${parsed}`);
-  };
-
-  const handleConfirmRemoveOutliers = async () => {
-    setOutlierModalOpen(false);
-    setDistLoading(true);
-    try {
-      const lp = parseFloat(lowerPercentile) || 1.0;
-      const up = parseFloat(upperPercentile) || 99.0;
-      const zThresh = parseFloat(zScoreThreshold) || 3.0;
-
-      const res = await edaRemoveOutliers({
-        csv_data: activeCsv,
-        column: distCol,
-        method: outlierMethod,
-        lower_percentile: lp,
-        upper_percentile: up,
-        threshold: zThresh,
-      });
-
-      setLoadedCsvMap((prev) => ({ ...prev, [selectedArdId]: res.clean_csv }));
-      setField("granularCsvData", res.clean_csv);
-      setField("filteredCsvData", res.clean_csv);
-      toast.success(`Excluded ${res.dropped_rows} outlier row(s)! ${res.remaining_rows.toLocaleString()} rows remaining.`);
-      handleRunEDA(res.clean_csv);
-    } catch (err) {
-      toast.error("Failed to remove outliers");
-    } finally {
-      setDistLoading(false);
-    }
-  };
-
-  const handleRestoreOriginalDataset = () => {
-    if (!backupCsv) return toast.error("No original backup found.");
-    setLoadedCsvMap((prev) => ({ ...prev, [selectedArdId]: backupCsv }));
-    setField("granularCsvData", backupCsv);
-    setField("filteredCsvData", backupCsv);
-    toast.success("Restored original dataset (all exclusions undone)");
-    handleRunEDA(backupCsv);
-  };
-
-  // ─── TAB 3: POOR MAN'S CURVE ──────────────────────────────────────────────
+  // ─── TAB 2: POOR MAN'S RESPONSE CURVE ─────────────────────────────────────
   const [relX, setRelX] = useState("");
   const [relY, setRelY] = useState(kpiCol || "");
   const [poorManCurve, setPoorManCurve] = useState(null);
@@ -382,7 +271,7 @@ export default function EDA() {
     }
   }, [activeMainTab, activeCsv, relX, relY]);
 
-  // ─── TAB 4: CORRELATION, MULTICOLLINEARITY & BIVARIATE EXPLORER ────────────
+  // ─── TAB 3: CORRELATION, MULTICOLLINEARITY & BIVARIATE EXPLORER ────────────
   const [corrSubTab, setCorrSubTab] = useState("analysis");
   const [corrSelectedCols, setCorrSelectedCols] = useState([]);
   const [corrKpiTarget, setCorrKpiTarget] = useState(kpiCol || "");
@@ -392,7 +281,6 @@ export default function EDA() {
   const [vifLoading, setVifLoading] = useState(false);
   const [corrThreshold, setCorrThreshold] = useState(0.7);
 
-  // Relocated Bivariate Relationship Explorer state
   const [bivX, setBivX] = useState("");
   const [bivY, setBivY] = useState("");
   const [bivData, setBivData] = useState(null);
@@ -606,8 +494,8 @@ export default function EDA() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Module 4: Exploratory Data Analysis & Diagnostics"
-        subtitle="Inspect variable sparsity, control totals, preview response shapes, detect outliers, and analyze correlation"
+        title="Module 4: Exploratory Data Analysis &amp; Diagnostics"
+        subtitle="Inspect variable sparsity, control totals, preview response shapes, and evaluate bivariate relationships &amp; correlation"
         icon="🔍"
       />
 
@@ -627,7 +515,6 @@ export default function EDA() {
               onChange={(e) => {
                 setSelectedArdId(e.target.value);
                 setStatsResult(null);
-                setBackupCsv(null);
               }}
               className="w-full text-xs font-bold border-2 border-brand-500 rounded-xl px-3.5 py-2.5 bg-white text-slate-800 focus:outline-none"
             >
@@ -654,13 +541,12 @@ export default function EDA() {
         </div>
       </Card>
 
-      {/* 4 Unified Tabs */}
+      {/* 3 Unified Tabs (Outlier Detection moved to Transformation) */}
       <div className="bg-slate-200/70 p-1.5 rounded-2xl flex items-center gap-1 shadow-inner border border-slate-200 overflow-x-auto scrollbar-thin">
         {[
-          { id: "summary", label: "📊 1. Summary Stats & Sparsity" },
-          { id: "distributions", label: "📉 2. Distributions & Outliers" },
-          { id: "relationships", label: "🔗 3. Poor Man's Response Curve" },
-          { id: "correlation", label: "⚖️ 4. Correlation, Multicollinearity & Explorer" },
+          { id: "summary", label: "📊 1. Summary Stats &amp; Sparsity" },
+          { id: "relationships", label: "🔗 2. Poor Man's Response Curve" },
+          { id: "correlation", label: "⚖️ 3. Correlation, Multicollinearity &amp; Explorer" },
         ].map((tab) => (
           <button
             key={tab.id}
@@ -681,7 +567,7 @@ export default function EDA() {
 
       {/* TAB 1: SUMMARY STATS & SPARSITY */}
       {activeMainTab === "summary" && statsResult && (
-        <Card title="Variable Health, Sparsity & Control Totals">
+        <Card title="Variable Health, Sparsity &amp; Control Totals">
           <div className="flex justify-between items-center mb-4 flex-wrap gap-2">
             <input
               type="text"
@@ -695,7 +581,7 @@ export default function EDA() {
 
           <div className="overflow-auto rounded-xl border border-slate-200 max-h-[500px]">
             <table className="w-full text-xs text-left bg-white">
-              <thead className="bg-slate-50 border-b border-slate-200 text-slate-700 sticky top-0 z-10">
+              <thead className="bg-slate-50 border-b border-slate-200 text-slate-700 font-bold sticky top-0 z-10">
                 <tr>
                   {[
                     ["variable", "Variable"],
@@ -760,180 +646,9 @@ export default function EDA() {
         </Card>
       )}
 
-      {/* TAB 2: DISTRIBUTIONS & OUTLIERS */}
-      {activeMainTab === "distributions" && (
-        <div className="space-y-6">
-          <Card title="Variable Distribution & Histogram Customization">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
-              <div>
-                <Select label="Select Variable:" value={distCol} onChange={setDistCol} options={statsResult?.numeric_cols || columns} />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Bucket Width (Bin Size):
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="number"
-                    step="any"
-                    min="0.001"
-                    placeholder="e.g. 5, 10, 50"
-                    value={customBinWidth}
-                    onChange={(e) => setCustomBinWidth(e.target.value)}
-                    className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-brand-500"
-                  />
-                  <Btn onClick={handleApplyCustomBucketWidth} className="text-xs py-2 whitespace-nowrap">
-                    Apply Width
-                  </Btn>
-                </div>
-              </div>
-            </div>
-
-            {distLoading && <Spinner label="Loading distribution histogram..." />}
-
-            {histData && !distLoading && (
-              <div className="space-y-4">
-                <div className="flex gap-4 items-center text-xs bg-slate-50 p-3 rounded-xl border border-slate-200 flex-wrap">
-                  <span className="font-bold text-slate-700">Mean: {histData.mean?.toFixed(2)}</span>
-                  <span className="font-bold text-slate-700">Median: {histData.median?.toFixed(2)}</span>
-                  <span className="text-slate-500">Span: {histData.min?.toFixed(1)} to {histData.max?.toFixed(1)}</span>
-                  <span className="font-mono text-brand-700 font-semibold bg-brand-50 px-2 py-0.5 rounded">
-                    Active Bucket Width: {histData.bin_width} ({histData.counts.length} bins)
-                  </span>
-                </div>
-
-                <ResponsiveContainer width="100%" height={280}>
-                  <BarChart data={histData.counts.map((c, i) => ({ bin: histData.bin_labels[i], count: c }))}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                    <XAxis dataKey="bin" tick={{ fontSize: 9 }} interval={histData.counts.length > 20 ? 1 : 0} />
-                    <YAxis tick={{ fontSize: 11 }} />
-                    <Tooltip />
-                    <Bar dataKey="count" fill="#001E96" radius={[4, 4, 0, 0]} name="Frequency" />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            )}
-          </Card>
-
-          {/* Outlier Diagnostics Section */}
-          <Card title={`Outlier Diagnostics for ${distCol}`}>
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-4">
-              <Select
-                label="Detection Strategy:"
-                value={outlierMethod}
-                onChange={setOutlierMethod}
-                options={[
-                  { value: "percentile", label: "Percentile Cutoffs (Bottom/Top Tails)" },
-                  { value: "zscore", label: "Z-Score (Standard Deviations)" },
-                ]}
-              />
-
-              {outlierMethod === "percentile" ? (
-                <>
-                  <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1">
-                      Bottom Tail Cutoff % (Flags lower values):
-                    </label>
-                    <input
-                      type="number"
-                      step="0.5"
-                      min="0.1"
-                      max="20"
-                      value={lowerPercentile}
-                      onChange={(e) => setLowerPercentile(e.target.value)}
-                      placeholder="e.g. 1.0 (lowest 1%)"
-                      className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1">
-                      Top Tail Cutoff % (Flags higher values):
-                    </label>
-                    <input
-                      type="number"
-                      step="0.5"
-                      min="80"
-                      max="99.9"
-                      value={upperPercentile}
-                      onChange={(e) => setUpperPercentile(e.target.value)}
-                      placeholder="e.g. 99.0 (highest 1%)"
-                      className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white"
-                    />
-                  </div>
-                </>
-              ) : (
-                <div className="sm:col-span-2">
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Z-Score Threshold (σ):
-                  </label>
-                  <input
-                    type="number"
-                    step="0.5"
-                    min="1.0"
-                    max="10.0"
-                    value={zScoreThreshold}
-                    onChange={(e) => setZScoreThreshold(e.target.value)}
-                    className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white"
-                  />
-                </div>
-              )}
-
-              <div className="flex items-end">
-                <Btn onClick={() => loadDistAndOutliers()} disabled={distLoading} className="w-full justify-center">
-                  ↻ Re-Scan Outliers
-                </Btn>
-              </div>
-            </div>
-
-            {outlierResult && !distLoading && (
-              <div className="space-y-4 pt-2">
-                <div className="grid grid-cols-4 gap-3">
-                  <div className="bg-slate-50 p-3 rounded-xl text-center">
-                    <div className="text-lg font-bold text-slate-800">{outlierResult.outlier_count.toLocaleString()}</div>
-                    <div className="text-[10px] text-slate-400 font-bold uppercase">Outlier Points</div>
-                  </div>
-                  <div className="bg-slate-50 p-3 rounded-xl text-center">
-                    <div className="text-lg font-bold text-slate-800">{outlierResult.outlier_pct}%</div>
-                    <div className="text-[10px] text-slate-400 font-bold uppercase">Dataset Proportion</div>
-                  </div>
-                  <div className="bg-slate-50 p-3 rounded-xl text-center">
-                    <div className="text-lg font-bold text-slate-800">{outlierResult.lower_bound}</div>
-                    <div className="text-[10px] text-slate-400 font-bold uppercase">Lower Cutoff</div>
-                  </div>
-                  <div className="bg-slate-50 p-3 rounded-xl text-center">
-                    <div className="text-lg font-bold text-slate-800">{outlierResult.upper_bound}</div>
-                    <div className="text-[10px] text-slate-400 font-bold uppercase">Upper Cutoff</div>
-                  </div>
-                </div>
-
-                {outlierResult.outlier_count > 0 ? (
-                  <>
-                    <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Flagged Outlier Records:</h4>
-                    <DataTable data={outlierResult.preview_flagged_rows} />
-                    <div className="flex items-center gap-3 pt-2">
-                      <Btn variant="danger" onClick={() => setOutlierModalOpen(true)}>
-                        Exclude {outlierResult.outlier_count} Outliers from Dataset
-                      </Btn>
-                      <Btn variant="outline" onClick={handleRestoreOriginalDataset}>
-                        ↺ Restore Original Dataset
-                      </Btn>
-                    </div>
-                  </>
-                ) : (
-                  <div className="flex items-center justify-between bg-emerald-50 border border-emerald-200 p-3 rounded-xl">
-                    <span className="text-xs font-bold text-emerald-800">✅ No extreme outliers detected in {distCol}.</span>
-                  </div>
-                )}
-              </div>
-            )}
-          </Card>
-        </div>
-      )}
-
-      {/* TAB 3: POOR MAN'S CURVE */}
+      {/* TAB 2: POOR MAN'S CURVE */}
       {activeMainTab === "relationships" && (
-        <Card title="Bivariate Relationships & Poor Man's Saturation Curve">
+        <Card title="Bivariate Relationships &amp; Poor Man's Saturation Curve">
           <p className="text-xs text-slate-500 mb-4">
             Reveals whether a marketing tactic exhibits diminishing returns (logarithmic saturation) or linear growth.
           </p>
@@ -972,7 +687,7 @@ export default function EDA() {
         </Card>
       )}
 
-      {/* TAB 4: CORRELATION, MULTICOLLINEARITY & BIVARIATE EXPLORER */}
+      {/* TAB 3: CORRELATION, MULTICOLLINEARITY & BIVARIATE EXPLORER */}
       {activeMainTab === "correlation" && (
         <div className="space-y-6">
           <div className="flex gap-2 border-b border-slate-200">
@@ -1021,7 +736,7 @@ export default function EDA() {
               </Card>
 
               {/* Correlation Heatmap */}
-              <Card title="Pairwise Correlation & Multicollinearity Matrix">
+              <Card title="Pairwise Correlation &amp; Multicollinearity Matrix">
                 <div className="flex items-center justify-between gap-4 mb-4 flex-wrap">
                   <div>
                     <label className="text-xs font-bold text-slate-700 block mb-1">Highlight Threshold (|r| ≥ {corrThreshold}):</label>
@@ -1055,7 +770,7 @@ export default function EDA() {
                 )}
               </Card>
 
-              {/* Relocated Bivariate Relationship Explorer */}
+              {/* Bivariate Relationship Explorer */}
               <Card title="Custom Relationship Explorer (X vs Y Comparison)">
                 <p className="text-xs text-slate-500 mb-4">
                   Compare any two metrics directly with a least-squares linear fit ($y = m \cdot x + c$), slope, intercept, and Pearson correlation coefficient ($r$). Click any cell in the heatmap above to load that pair here instantly.
@@ -1215,28 +930,12 @@ export default function EDA() {
 
               {comboResultData && (
                 <div className="mt-6 pt-4 border-t border-slate-200 space-y-2">
-                  <span className="text-xs font-bold text-emerald-600 block">✅ Sum Columns Created & Dataset Updated</span>
+                  <span className="text-xs font-bold text-emerald-600 block">✅ Sum Columns Created &amp; Dataset Updated</span>
                   <DataTable data={comboResultData.preview} />
                 </div>
               )}
             </Card>
           )}
-        </div>
-      )}
-
-      {/* Outlier Confirmation Modal */}
-      {outlierModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4">
-            <h3 className="text-lg font-bold text-slate-800">Confirm Outlier Exclusion</h3>
-            <p className="text-xs text-slate-600">
-              Excluding <strong>{outlierResult?.outlier_count} rows</strong> with extreme values in <code>{distCol}</code> using {outlierResult?.method}.
-            </p>
-            <div className="flex justify-end gap-2 pt-2">
-              <Btn variant="secondary" onClick={() => setOutlierModalOpen(false)}>Cancel</Btn>
-              <Btn variant="danger" onClick={handleConfirmRemoveOutliers}>Confirm & Exclude Rows</Btn>
-            </div>
-          </div>
         </div>
       )}
 
@@ -1247,7 +946,7 @@ export default function EDA() {
             <h3 className="text-lg font-bold text-slate-800">Confirm Variable Removal</h3>
             <div className="flex justify-end gap-2 pt-2">
               <Btn variant="secondary" onClick={() => { setRemovalModalOpen(false); setSingleDropTarget(null); }}>Cancel</Btn>
-              <Btn variant="danger" onClick={handleConfirmExecuteRemoval}>Confirm & Drop</Btn>
+              <Btn variant="danger" onClick={handleConfirmExecuteRemoval}>Confirm &amp; Drop</Btn>
             </div>
           </div>
         </div>
@@ -1263,7 +962,7 @@ export default function EDA() {
             </p>
             <div className="flex justify-end gap-2 pt-2">
               <Btn variant="secondary" onClick={() => setComboModalOpen(false)}>Cancel</Btn>
-              <Btn onClick={handleConfirmApplyCombination}>Confirm & Apply Sum</Btn>
+              <Btn onClick={handleConfirmApplyCombination}>Confirm &amp; Apply Sum</Btn>
             </div>
           </div>
         </div>
@@ -1272,7 +971,7 @@ export default function EDA() {
       <div className="bg-slate-900 text-white rounded-2xl p-5 flex items-center justify-between flex-wrap gap-4 shadow-xl">
         <div>
           <span className="text-emerald-400 font-bold text-sm block">✅ Dataset Diagnostics Complete</span>
-          <p className="text-xs text-slate-400">Ready to proceed to Adstock & Saturation parameter transformations.</p>
+          <p className="text-xs text-slate-400">Ready to proceed to Outlier Diagnostics &amp; Transformation.</p>
         </div>
         <Btn onClick={handleProceedToTransformation}>
           Proceed to Data Transformation →
