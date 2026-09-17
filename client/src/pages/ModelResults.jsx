@@ -1,20 +1,23 @@
 import React, { useState, useEffect, useMemo } from "react";
 import toast from "react-hot-toast";
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, Legend,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
   LineChart, Line
 } from "recharts";
 import { useAppState } from "../context/AppContext";
 import { PageHeader, Card, Alert, Metric, DataTable, Btn, Select, Spinner } from "../components/UI";
 import { generateResponseCurves, fetchBenchmarkComparison } from "../services/api";
 
-// Categorize raw/transformed channels into 4 High-Level Executive Tiers
-function classifyHighLevelTier(variableName) {
-  const l = (variableName || "").toLowerCase();
+// Categorize raw/transformed channels using user-defined Ingestion promotional tiers
+function getChannelTier(variableName, promoTiers = {}) {
+  const raw = (variableName || "").replace("_transformed", "").trim();
+  const l = raw.toLowerCase();
+
   if (l.includes("const") || l.includes("baseline") || l.includes("intercept") || l.includes("carryover")) {
     return "Baseline";
   }
 
+  // Sourced directly from user's selection in Ingestion
   if (promoTiers[raw]) {
     const t = promoTiers[raw];
     if (t === "Personal Promotion") return "Personal Promotion";
@@ -22,6 +25,7 @@ function classifyHighLevelTier(variableName) {
     if (t === "DTC Promotion") return "DTC Promotion";
   }
 
+  // Fallback heuristic if not explicitly set
   if (l.includes("call") || l.includes("det") || l.includes("sample") || l.includes("speaker") || l.includes("f2f") || l.includes("rep")) {
     return "Personal Promotion";
   }
@@ -37,6 +41,7 @@ function classifyHighLevelTier(variableName) {
 export default function ModelResults() {
   const { state, setField } = useAppState();
   const outputs = state.regressionOutputs || [];
+  const promoTiers = state.columnPromoTiers || {};
 
   // Selected & Finalized Model State
   const [selectedIdx, setSelectedIdx] = useState(() => state.selectedModelIdx ?? (outputs.length > 0 ? 0 : null));
@@ -87,7 +92,6 @@ export default function ModelResults() {
     setFinalizedModelId(newFinalizedId);
     setField("finalizedModelId", newFinalizedId);
     
-    // Update model history record with finalized badge
     const updatedOutputs = outputs.map((m) => ({
       ...m,
       isFinalized: m.id === newFinalizedId,
@@ -104,7 +108,7 @@ export default function ModelResults() {
     setField("channelSpendMap", updated);
   };
 
-  // Channel-level Performance Deep Dive data with dynamic ROI
+  // Channel-level Performance Deep Dive data with dynamic ROI and user-selected Tiers
   const channelPerformanceData = useMemo(() => {
     if (!selectedModel || !selectedModel.coefficients) return [];
     return selectedModel.coefficients
@@ -119,7 +123,7 @@ export default function ModelResults() {
 
         return {
           channel: rawName,
-          tier: classifyHighLevelTier(rawName),
+          tier: getChannelTier(rawName, promoTiers),
           impactablePct,
           impactableSales,
           spend,
@@ -129,9 +133,9 @@ export default function ModelResults() {
         };
       })
       .sort((a, b) => b.impactableSales - a.impactableSales);
-  }, [selectedModel, channelSpendMap]);
+  }, [selectedModel, channelSpendMap, promoTiers]);
 
-  // Executive Summary 4-Tier Breakdown Data
+  // Executive Summary 4-Tier Breakdown Data (Driven directly by Ingestion selection)
   const executiveImpactBreakdown = useMemo(() => {
     if (!selectedModel || !selectedModel.coefficients) return [];
     
@@ -148,7 +152,7 @@ export default function ModelResults() {
       const v = r.Variable;
       const pct = parseFloat(String(r["Impactable (%)"] || r["Impactable %"] || 0).replace("%", "")) || 0;
       const sales = Number(r["Impactable Sales"]) || 0;
-      const tier = classifyHighLevelTier(v);
+      const tier = getChannelTier(v, promoTiers);
 
       if (tier === "Baseline") {
         baselineImpact += pct;
@@ -171,9 +175,9 @@ export default function ModelResults() {
       { category: "NPP Promotion", sharePct: Number(nppImpact.toFixed(1)), sales: nppSales, fill: "#F59E0B" },
       { category: "DTC / Media", sharePct: Number(dtcImpact.toFixed(1)), sales: dtcSales, fill: "#8B5CF6" },
     ];
-  }, [selectedModel]);
+  }, [selectedModel, promoTiers]);
 
-  // Generate / Fetch Response Curves for Finalized Model & Build mergedRc for Module 8
+  // Generate Response Curves & Build mergedRc
   useEffect(() => {
     if (!isFinalized || !selectedModel || !channelPerformanceData.length) return;
     setRcLoading(true);
@@ -213,9 +217,9 @@ export default function ModelResults() {
       })
       .catch(() => {})
       .finally(() => setRcLoading(false));
-  }, [isFinalized, selectedModel, channelPerformanceData]);
+  }, [isFinalized, selectedModel, channelPerformanceData, setField]);
 
-  // Active Response Curve Calculations (Saturation %, Optimal Spend, Current mROI)
+  // Active Response Curve Calculations
   const activeCurvePoints = useMemo(() => {
     if (!activeRcChannel || !responseCurvesData[activeRcChannel]) return [];
     return responseCurvesData[activeRcChannel];
@@ -225,7 +229,6 @@ export default function ModelResults() {
     if (!activeCurvePoints.length) return null;
     const currentSpend = channelSpendMap[activeRcChannel] || activeCurvePoints[Math.floor(activeCurvePoints.length / 3)]?.spend || 50000;
     
-    // Find closest point to current spend
     let closestPoint = activeCurvePoints[0];
     let minDiff = Infinity;
     activeCurvePoints.forEach((pt) => {
@@ -239,8 +242,6 @@ export default function ModelResults() {
     const maxImpact = activeCurvePoints[activeCurvePoints.length - 1]?.impactable_nation || 1;
     const currentImpact = closestPoint?.impactable_nation || 0;
     const saturationPct = Math.min(100, Math.round((currentImpact / maxImpact) * 100));
-
-    // Optimal spend point: where saturation reaches ~80% target efficiency
     const optimalPoint = activeCurvePoints.find((p) => (p.impactable_nation / maxImpact) >= 0.80) || activeCurvePoints[Math.floor(activeCurvePoints.length * 0.75)];
 
     return {
@@ -252,7 +253,7 @@ export default function ModelResults() {
     };
   }, [activeCurvePoints, activeRcChannel, channelSpendMap]);
 
-  // Query Benchmark Store (Exact Matrix Implementation)
+  // Query Benchmark Store
   useEffect(() => {
     setBenchLoading(true);
     fetchBenchmarkComparison({
@@ -475,7 +476,7 @@ export default function ModelResults() {
             <thead className="bg-slate-50 border-b border-slate-200 text-slate-700 font-bold">
               <tr>
                 <th className="px-4 py-3">Channel / Tactic</th>
-                <th className="px-3 py-3">Tier Role</th>
+                <th className="px-3 py-3">Tier Role (From Ingestion)</th>
                 <th className="px-3 py-3">Impact (Sales Volume)</th>
                 <th className="px-3 py-3">Impact Share (%)</th>
                 <th className="px-3 py-3">Spend ($)</th>
@@ -488,7 +489,12 @@ export default function ModelResults() {
                 <tr key={r.channel} className="hover:bg-slate-50">
                   <td className="px-4 py-3 font-bold text-slate-800">{r.channel}</td>
                   <td className="px-3 py-3">
-                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700">
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                      r.tier === "Personal Promotion" ? "bg-emerald-100 text-emerald-800" :
+                      r.tier === "NPP Promotion" ? "bg-amber-100 text-amber-800" :
+                      r.tier === "DTC Promotion" ? "bg-purple-100 text-purple-800" :
+                      "bg-blue-100 text-blue-800"
+                    }`}>
                       {r.tier}
                     </span>
                   </td>

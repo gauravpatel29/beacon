@@ -39,6 +39,12 @@ export const COLUMN_ROLES = [
   { id: "Baseline Variables", label: "Baseline Variables (Population/Macro/Trend)", color: "bg-amber-100 text-amber-800" },
 ];
 
+export const PROMO_SUB_TIERS = [
+  { id: "Personal Promotion", label: "Personal Promotion (Rep Calls, Detailing, Samples, Events)", badge: "bg-emerald-100 text-emerald-800 border-emerald-300" },
+  { id: "Non Personal Promotion", label: "Non Personal Promotion (RTE, Emails, Portal, HCP Web)", badge: "bg-amber-100 text-amber-800 border-amber-300" },
+  { id: "DTC Promotion", label: "DTC Promotion (TV, Digital Ads, Search, Social, Print)", badge: "bg-purple-100 text-purple-800 border-purple-300" },
+];
+
 const DTYPE_OPTIONS = [
   { value: "string", label: "Text / String" },
   { value: "integer", label: "Integer" },
@@ -74,6 +80,7 @@ const TABS = [
 const emptyDraft = () => ({
   category: "",
   columnRoles: {},
+  columnPromoTiers: {},
   keep: {},
   renames: {},
   dtypes: {},
@@ -115,7 +122,7 @@ function afterRenames(columns, draft) {
 
 function guessColumnRole(colName) {
   const l = colName.toLowerCase();
-  if (l.includes("sale") || l.includes("trx") || l.includes("nrx") || l.includes("revenue") || l.includes("kpi")) {
+  if (l.includes("sale") || l.includes("trx") || l.includes("nrx") || l.includes("crx") || l.includes("nbrx") || l.includes("revenue") || l.includes("kpi")) {
     return "Dependent Variable";
   }
   if (l.includes("date") || l.includes("week") || l.includes("month") || l.includes("period") || l.includes("year") || l.includes("time")) {
@@ -128,6 +135,17 @@ function guessColumnRole(colName) {
     return "Baseline Variables";
   }
   return "Independent Promotions";
+}
+
+function guessPromoTier(colName) {
+  const l = colName.toLowerCase();
+  if (l.includes("rte") || l.includes("email") || l.includes("portal") || l.includes("web") || l.includes("npp")) {
+    return "Non Personal Promotion";
+  }
+  if (l.includes("tv") || l.includes("dtc") || l.includes("digital") || l.includes("search") || l.includes("social") || l.includes("media") || l.includes("radio") || l.includes("print")) {
+    return "DTC Promotion";
+  }
+  return "Personal Promotion";
 }
 
 function draftToSpec(draft, columns) {
@@ -167,6 +185,7 @@ function draftToSpec(draft, columns) {
     config_metadata: {
       category: draft.category || "",
       column_roles: draft.columnRoles || {},
+      column_promo_tiers: draft.columnPromoTiers || {},
     },
     live_updates: { column_drops, date_formats, dtype_changes, column_renames },
     filters,
@@ -223,6 +242,7 @@ export default function DataIngestion() {
         filename: d.filename, row_count: d.row_count, columns: d.columns,
         category: d.spec?.config_metadata?.category || "",
         column_roles: d.spec?.config_metadata?.column_roles || {},
+        column_promo_tiers: d.spec?.config_metadata?.column_promo_tiers || {},
       })));
 
       setDrafts((prev) => {
@@ -234,10 +254,12 @@ export default function DataIngestion() {
           const drops = new Set(lu.column_drops || []);
           const keep = {};
           const colRoles = spec.config_metadata?.column_roles || {};
+          const colPromoTiers = spec.config_metadata?.column_promo_tiers || {};
           for (const c of item.columns || []) {
             keep[c] = !drops.has(c);
-            if (!colRoles[c]) {
-              colRoles[c] = guessColumnRole(c);
+            if (!colRoles[c]) colRoles[c] = guessColumnRole(c);
+            if (colRoles[c] === "Independent Promotions" && !colPromoTiers[c]) {
+              colPromoTiers[c] = guessPromoTier(c);
             }
           }
           const g = spec.granularity || null;
@@ -245,6 +267,7 @@ export default function DataIngestion() {
             ...emptyDraft(),
             category: spec.config_metadata?.category || guessCategory(item.filename),
             columnRoles: colRoles,
+            columnPromoTiers: colPromoTiers,
             keep,
             renames: Object.fromEntries((lu.column_renames || []).map((r) => [r.from, r.to])),
             dtypes: Object.fromEntries((lu.dtype_changes || []).map((d) => [d.column, d.to])),
@@ -292,11 +315,15 @@ export default function DataIngestion() {
           const dateFormats = { ...d.dateFormats };
           const keep = { ...d.keep };
           const columnRoles = { ...d.columnRoles };
+          const columnPromoTiers = { ...d.columnPromoTiers };
           let npiCol = d.npiCol, dateCol = d.dateCol;
           for (const col of res.profile) {
             const n = col.column;
             if (keep[n] === undefined) keep[n] = true;
             if (!columnRoles[n]) columnRoles[n] = guessColumnRole(n);
+            if (columnRoles[n] === "Independent Promotions" && !columnPromoTiers[n]) {
+              columnPromoTiers[n] = guessPromoTier(n);
+            }
             if (!dtypes[n]) dtypes[n] = col.suggested_dtype;
             if (col.date_candidates?.length && !dateFormats[n] && !col.ambiguous_date) {
               dateFormats[n] = { from: col.suggested_date_from, to: "%d/%m/%Y" };
@@ -304,7 +331,7 @@ export default function DataIngestion() {
             if (!dateCol && col.date_candidates?.length) dateCol = n;
             if (!npiCol && (col.id_like || /npi|id$/i.test(n))) npiCol = n;
           }
-          return { ...prev, [activeFile]: { ...d, dtypes, dateFormats, keep, columnRoles, npiCol, dateCol } };
+          return { ...prev, [activeFile]: { ...d, dtypes, dateFormats, keep, columnRoles, columnPromoTiers, npiCol, dateCol } };
         });
       })
       .catch((err) => { if (!cancelled) toast.error(problemMessage(err, "Could not read column types")); });
@@ -350,7 +377,8 @@ export default function DataIngestion() {
                    preview: res.preview, applied: res.applied, committed: true });
       
       const combinedRoles = { ...(state.columnRoles || {}), ...(draft.columnRoles || {}) };
-      setField("columnRoles", combinedRoles);
+      const combinedTiers = { ...(state.columnPromoTiers || {}), ...(draft.columnPromoTiers || {}) };
+      setFields({ columnRoles: combinedRoles, columnPromoTiers: combinedTiers });
 
       await refresh();
       toast.success(successMsg || `Applied — ${res.row_count.toLocaleString()} rows`);
@@ -384,8 +412,10 @@ export default function DataIngestion() {
     try {
       const csv = await v2GetCsv(workflowId, salesFile.filename);
       const allRoles = {};
+      const allTiers = {};
       Object.values(drafts).forEach((df) => {
         Object.assign(allRoles, df.columnRoles || {});
+        Object.assign(allTiers, df.columnPromoTiers || {});
       });
 
       setFields({
@@ -393,6 +423,7 @@ export default function DataIngestion() {
         granularCsvData: csv,
         filteredCsvData: csv,
         columnRoles: allRoles,
+        columnPromoTiers: allTiers,
       });
 
       await saveWorkflowSnapshot("Exploratory Data Analysis", "/eda", {
@@ -423,7 +454,7 @@ export default function DataIngestion() {
       <Header onReset={() => { resetWorkflow(); navigate("/"); }} />
 
       <div className="grid grid-cols-12 gap-6 items-start">
-        {/* Left Side: Upload & List */}
+        {/* Left: File List & Upload */}
         <div className="col-span-12 lg:col-span-4 xl:col-span-3 bg-white rounded-2xl border border-slate-100 shadow-sm p-6">
           <div
             {...getRootProps()}
@@ -494,7 +525,7 @@ export default function DataIngestion() {
           )}
         </div>
 
-        {/* Right Side: Configuration Tabs */}
+        {/* Right: Configuration Tabs */}
         <div className="col-span-12 lg:col-span-8 xl:col-span-9 space-y-5">
           {!current ? (
             <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-8">
@@ -533,7 +564,7 @@ export default function DataIngestion() {
                   rows={previews[current.filename] || []}
                   draft={draft}
                   patch={patch}
-                  onApply={() => apply("Category and column roles saved")}
+                  onApply={() => apply("Categories & Promotional Roles saved")}
                   busy={busy}
                 />
               )}
@@ -616,7 +647,7 @@ function Header({ onReset }) {
         <div>
           <h1 className="text-3xl font-bold text-slate-900">Data Ingestion &amp; Mapping</h1>
           <p className="text-slate-500 text-sm mt-1">
-            Upload source files, assign file roles, map column-level categories, and standardize schema
+            Upload source files, assign file roles, map column-level categories, and configure promotional tiers
           </p>
         </div>
       </div>
@@ -643,10 +674,25 @@ function CategoryTab({ file, columns, rows, draft, patch, onApply, busy }) {
   const cat = FILE_CATEGORIES.find((c) => c.id === draft.category);
 
   const updateColRole = (colName, roleId) => {
+    const updatedRoles = { ...(draft.columnRoles || {}), [colName]: roleId };
+    const updatedTiers = { ...(draft.columnPromoTiers || {}) };
+    
+    // If user changed to Independent Promotions and no sub-tier exists, initialize it
+    if (roleId === "Independent Promotions" && !updatedTiers[colName]) {
+      updatedTiers[colName] = guessPromoTier(colName);
+    }
+
     patch({
-      columnRoles: {
-        ...(draft.columnRoles || {}),
-        [colName]: roleId,
+      columnRoles: updatedRoles,
+      columnPromoTiers: updatedTiers,
+    });
+  };
+
+  const updatePromoTier = (colName, tierId) => {
+    patch({
+      columnPromoTiers: {
+        ...(draft.columnPromoTiers || {}),
+        [colName]: tierId,
       },
     });
   };
@@ -683,16 +729,17 @@ function CategoryTab({ file, columns, rows, draft, patch, onApply, busy }) {
             2. Column-Level Categories ({columns.length} Columns)
           </label>
           <p className="text-xs text-slate-500 mt-0.5">
-            Assign each column in this file to one of the 5 modeling categories.
+            Assign each column to a modeling category. For <strong>Independent Promotions</strong>, specify whether it represents Personal, Non-Personal (NPP), or DTC Promotion.
           </p>
         </div>
 
-        <div className="overflow-x-auto rounded-xl border border-slate-200 max-h-80 bg-white">
+        <div className="overflow-x-auto rounded-xl border border-slate-200 max-h-96 bg-white">
           <table className="w-full text-xs text-left">
             <thead className="bg-slate-100 text-slate-700 font-bold sticky top-0 z-10">
               <tr>
                 <th className="px-4 py-3">Column Name</th>
-                <th className="px-4 py-3">Assigned Category Role</th>
+                <th className="px-4 py-3">Primary Category Role</th>
+                <th className="px-4 py-3">Promotional Sub-Tier (For Promo Columns)</th>
                 <th className="px-4 py-3">Sample Values</th>
               </tr>
             </thead>
@@ -700,6 +747,9 @@ function CategoryTab({ file, columns, rows, draft, patch, onApply, busy }) {
               {columns.map((col) => {
                 const currentRole = draft.columnRoles?.[col] || guessColumnRole(col);
                 const roleObj = COLUMN_ROLES.find((r) => r.id === currentRole);
+                const isPromo = currentRole === "Independent Promotions";
+                const currentTier = draft.columnPromoTiers?.[col] || guessPromoTier(col);
+                const tierObj = PROMO_SUB_TIERS.find((t) => t.id === currentTier);
                 const sampleVals = rows.slice(0, 3).map((r) => r[col]).filter(Boolean).join(" · ");
 
                 return (
@@ -707,6 +757,8 @@ function CategoryTab({ file, columns, rows, draft, patch, onApply, busy }) {
                     <td className="px-4 py-2.5 font-bold text-slate-800">
                       {col}
                     </td>
+
+                    {/* Primary Role Selector */}
                     <td className="px-4 py-2.5">
                       <select
                         value={currentRole}
@@ -722,6 +774,30 @@ function CategoryTab({ file, columns, rows, draft, patch, onApply, busy }) {
                         ))}
                       </select>
                     </td>
+
+                    {/* Secondary Sub-Tier Selector (Appears for Independent Promotions) */}
+                    <td className="px-4 py-2.5">
+                      {isPromo ? (
+                        <div className="space-y-1">
+                          <select
+                            value={currentTier}
+                            onChange={(e) => updatePromoTier(col, e.target.value)}
+                            className={`text-xs font-black border-2 rounded-lg px-2.5 py-1.5 focus:outline-none ${
+                              tierObj?.badge || "bg-emerald-50 text-emerald-900 border-emerald-300"
+                            }`}
+                          >
+                            {PROMO_SUB_TIERS.map((tier) => (
+                              <option key={tier.id} value={tier.id}>
+                                {tier.label}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      ) : (
+                        <span className="text-slate-300 italic text-[11px]">—</span>
+                      )}
+                    </td>
+
                     <td className="px-4 py-2.5 text-slate-400 font-mono text-[11px] truncate max-w-xs">
                       {sampleVals || "—"}
                     </td>
