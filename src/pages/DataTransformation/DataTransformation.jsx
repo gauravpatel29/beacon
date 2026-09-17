@@ -7,6 +7,7 @@ import {
 import {
   ensureWorkflow, listFiles, problemMessage, transformationApply,
   transformationCorrelation, transformationPreviewSingle, v2GetCsv, v2ListArds,
+  edaHistogram, edaDetectOutliers,
 } from '../../services/api.js';
 import { recordStage } from '../../services/workflowState.js';
 import { useScreenState } from '../../services/useScreenState.js';
@@ -88,7 +89,24 @@ function DataTransformation() {
   const [isLoadingData, setIsLoadingData] = useState(false);
   const [dataError, setDataError] = useState(null);
 
-  // Step 1
+  // Step 1 (new): Outlier Diagnostics & Pre-Treatment. Ported from Data
+  // Review's "Distributions & Outliers" tab — same server endpoints
+  // (edaHistogram / edaDetectOutliers), condensed to one variable driving
+  // both the histogram and the outlier scan, matching this screen's layout.
+  const [outlierVariable, setOutlierVariable] = useState('');
+  const [outlierMethod, setOutlierMethod] = useState('percentile');
+  const [outlierLowerPct, setOutlierLowerPct] = useState(0.5);
+  const [outlierUpperPct, setOutlierUpperPct] = useState(99.5);
+  const [outlierThreshold, setOutlierThreshold] = useState(3.0);
+  const [binWidthInput, setBinWidthInput] = useState('');
+  const [binWidth, setBinWidth] = useState(null); // null = let the server choose
+  const [binWidthError, setBinWidthError] = useState(null);
+  const [histRaw, setHistRaw] = useState(null);
+  const [outlierRaw, setOutlierRaw] = useState(null);
+  const [isScanningOutliers, setIsScanningOutliers] = useState(false);
+  const [outlierScanError, setOutlierScanError] = useState(null);
+
+  // Step 2 (was Step 1)
   const [dateKeys, setDateKeys] = useState([]);
   const [geoKeys, setGeoKeys] = useState([]);
   const [dependentVars, setDependentVars] = useState([]);
@@ -125,6 +143,11 @@ function DataTransformation() {
   const [correlation, setCorrelation] = useState(null);
   const [corrError, setCorrError] = useState(null);
   const [isScoringCorr, setIsScoringCorr] = useState(false);
+  // The same correlation, scored on the raw (pre-transformation) columns, so
+  // Step 4 can show the before/after structure side by side.
+  const [preCorrelation, setPreCorrelation] = useState(null);
+  const [preCorrError, setPreCorrError] = useState(null);
+  const [isScoringPreCorr, setIsScoringPreCorr] = useState(false);
   const [preview, setPreview] = useState(null);
   const [previewError, setPreviewError] = useState(null);
   const [isPreviewing, setIsPreviewing] = useState(false);
@@ -432,11 +455,11 @@ function DataTransformation() {
 
   const handleSaveApply = async () => {
     if (!dateKeys.length || !geoKeys.length || !dependentVars.length) {
-      setApplyError('Set Date, Geo, and Dependent Variable columns in Step 1 first.');
+      setApplyError('Set Date, Geo, and Dependent Variable columns in Step 2 first.');
       return;
     }
     if (selectedList.length === 0) {
-      setApplyError('Select at least one variable to transform in Step 2.');
+      setApplyError('Select at least one variable to transform in Step 3.');
       return;
     }
     setApplyError(null);
@@ -569,6 +592,41 @@ function DataTransformation() {
     // backend as unreachable.
   }, [transformResult]);
 
+  // The same channels, scored before any transformation was applied, so Step
+  // 4 can show whether adstock/saturation *changed* the correlation structure
+  // rather than only what it looks like afterwards. Uses the raw column each
+  // transformed column came from, so the two matrices line up row-for-row.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const rawColumnsToScore = (transformResult?.transformedCols || [])
+        .map((c) => c.raw).slice(0, 8);
+      if (!activeCsv || !rawColumnsToScore.length) {
+        if (!cancelled) setPreCorrelation(null);
+        return;
+      }
+      setIsScoringPreCorr(true);
+      try {
+        const data = await transformationCorrelation({
+          csv_data: activeCsv,
+          columns: rawColumnsToScore,
+          threshold: 0,
+        });
+        if (!cancelled) { setPreCorrelation(data); setPreCorrError(null); }
+      } catch (err) {
+        if (!cancelled) {
+          setPreCorrelation(null);
+          setPreCorrError(problemMessage(err, 'Could not score pre-transformation correlation.'));
+        }
+      } finally {
+        if (!cancelled) setIsScoringPreCorr(false);
+      }
+    })();
+    return () => { cancelled = true; };
+    // Same reasoning as the post-transformation effect above: keyed on
+    // transformResult (which only changes on Apply), never on corrThreshold.
+  }, [transformResult, activeCsv]);
+
   // The server returns the matrix column-major ({ colA: { colB: r } }); the
   // table renders rows, so it is pivoted once here.
   const correlationMatrix = useMemo(() => {
@@ -579,6 +637,16 @@ function DataTransformation() {
       values: cols.map((c2) => Number(correlation.matrix?.[c2]?.[c1] ?? 0)),
     }));
   }, [correlation]);
+
+  // Same pivot, for the raw-column ("before") matrix.
+  const preCorrelationMatrix = useMemo(() => {
+    if (!preCorrelation?.columns?.length) return [];
+    const cols = preCorrelation.columns;
+    return cols.map((c1) => ({
+      col: c1,
+      values: cols.map((c2) => Number(preCorrelation.matrix?.[c2]?.[c1] ?? 0)),
+    }));
+  }, [preCorrelation]);
 
   // Filtered here, from the matrix already in hand, using the same rule the
   // engine applies: upper triangle only, |r| at or above the threshold,
@@ -680,6 +748,104 @@ function DataTransformation() {
     URL.revokeObjectURL(url);
   };
 
+  // ── Step 1 (new): Outlier Diagnostics & Pre-Treatment ────────────────────
+  // Every numeric column in the ARD, not scoped to promotions/baseline like
+  // eligibleColumns above — the KPI itself (e.g. trx_pso) needs outlier
+  // inspection just as much as any channel.
+  const numericColumnsAll = useMemo(
+    () => columns.filter((c) => isNumericColumn(rows, c)),
+    [columns, rows]
+  );
+
+  useEffect(() => {
+    if (!outlierVariable && numericColumnsAll.length) setOutlierVariable(numericColumnsAll[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [numericColumnsAll]);
+
+  // Same two server endpoints Data Review's "Distributions & Outliers" tab
+  // uses, fired together since this screen drives both from one variable.
+  const runOutlierScan = () => {
+    if (!activeCsv || !outlierVariable) return;
+    setIsScanningOutliers(true);
+    setOutlierScanError(null);
+    Promise.all([
+      edaHistogram({
+        csv_data: activeCsv,
+        column: outlierVariable,
+        ...(binWidth ? { bin_width: binWidth } : {}),
+      }),
+      edaDetectOutliers({
+        csv_data: activeCsv,
+        column: outlierVariable,
+        method: outlierMethod,
+        threshold: Number(outlierThreshold) || 3.0,
+        lower_percentile: Number(outlierLowerPct),
+        upper_percentile: Number(outlierUpperPct),
+      }),
+    ])
+      .then(([hist, out]) => {
+        setHistRaw(hist);
+        // Seed the width box with whatever the server actually used, so the
+        // first edit is a nudge from the real value rather than a guess.
+        if (!binWidth && hist?.bin_width) setBinWidthInput(String(hist.bin_width));
+        setOutlierRaw(out);
+      })
+      .catch((err) => setOutlierScanError(problemMessage(err, 'Outlier scan failed.')))
+      .finally(() => setIsScanningOutliers(false));
+  };
+
+  // Auto-runs once a variable/ARD is available, and again whenever the bin
+  // width changes (Apply Width). Everything else — method, cutoffs,
+  // threshold — is picked up on the next "Re-Scan Outliers" click, so typing
+  // a new cutoff doesn't fire a request per keystroke.
+  useEffect(() => {
+    runOutlierScan();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCsv, outlierVariable, binWidth]);
+
+  // A width is in the units of the column it was chosen for — reset it when
+  // switching variables rather than carrying it over, same as Data Review.
+  const lastOutlierVariable = useRef('');
+  useEffect(() => {
+    const previous = lastOutlierVariable.current;
+    lastOutlierVariable.current = outlierVariable;
+    if (!previous || previous === outlierVariable) return;
+    setBinWidth(null);
+    setBinWidthInput('');
+    setBinWidthError(null);
+  }, [outlierVariable]);
+
+  const applyOutlierBinWidth = () => {
+    const raw = binWidthInput.trim();
+    if (!raw) { setBinWidth(null); setBinWidthError(null); return; }
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setBinWidthError('Enter a bucket width greater than zero.');
+      return;
+    }
+    setBinWidthError(null);
+    setBinWidth(parsed);
+  };
+
+  const histogramData = useMemo(() => {
+    if (!histRaw || !(histRaw.counts || []).length) return null;
+    return {
+      bins: histRaw.counts,
+      labels: histRaw.bin_labels,
+      width: Number(histRaw.bin_width) || 0,
+    };
+  }, [histRaw]);
+
+  const outlierResult = useMemo(() => {
+    if (!outlierRaw) return null;
+    return {
+      lower: Number(outlierRaw.lower_bound) || 0,
+      upper: Number(outlierRaw.upper_bound) || 0,
+      flaggedIndices: outlierRaw.outlier_indices || [],
+      pct: Number(outlierRaw.outlier_pct) || 0,
+    };
+  }, [outlierRaw]);
+
   return (
     <div className="transform-page">
       <div className="page-header">
@@ -720,10 +886,118 @@ function DataTransformation() {
 
           {!isLoadingData && !dataError && rows.length > 0 && (
             <>
-              {/* ---- Step 1: Column categorization ---- */}
+              {/* ---- Step 1 (new): Outlier Diagnostics & Pre-Treatment ---- */}
+              <div className="transform-card">
+                <p className="transform-section-title">Step 1: Outlier Diagnostics &amp; Pre-Treatment</p>
+                <p className="transform-section-desc">
+                  Inspect extreme values and outliers before applying feature engineering transforms.
+                  Outlier exclusion updates the working dataset immediately.
+                </p>
+
+                <div className="outlier-controls-row-t">
+                  <div className="outlier-field-t">
+                    <label>Select Variable to Inspect:</label>
+                    <select value={outlierVariable} onChange={(e) => setOutlierVariable(e.target.value)}>
+                      {numericColumnsAll.map((c) => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  </div>
+                  <div className="outlier-field-t">
+                    <label>Detection Strategy:</label>
+                    <select value={outlierMethod} onChange={(e) => setOutlierMethod(e.target.value)}>
+                      <option value="percentile">Percentile Cutoffs (Bottom &amp; Top Tails)</option>
+                      <option value="zscore">Z-Score (Standard Deviations)</option>
+                    </select>
+                  </div>
+                  {outlierMethod === 'percentile' ? (
+                    <>
+                      <div className="outlier-field-t">
+                        <label>Bottom Tail Cutoff % (Flags lower values):</label>
+                        <input
+                          type="number" step="0.5" min="0" max="100" value={outlierLowerPct}
+                          onChange={(e) => setOutlierLowerPct(Number(e.target.value))}
+                        />
+                      </div>
+                      <div className="outlier-field-t">
+                        <label>Top Tail Cutoff % (Flags higher values):</label>
+                        <input
+                          type="number" step="0.5" min="0" max="100" value={outlierUpperPct}
+                          onChange={(e) => setOutlierUpperPct(Number(e.target.value))}
+                        />
+                      </div>
+                    </>
+                  ) : (
+                    <div className="outlier-field-t">
+                      <label>Threshold Value (N &times; &sigma;):</label>
+                      <input
+                        type="number" step="0.1" value={outlierThreshold}
+                        onChange={(e) => setOutlierThreshold(Number(e.target.value) || 3.0)}
+                      />
+                    </div>
+                  )}
+                </div>
+
+                <div className="outlier-scan-row-t">
+                  <button type="button" className="recalc-btn-t" onClick={runOutlierScan} disabled={isScanningOutliers}>
+                    &#8635; {isScanningOutliers ? 'Scanning...' : 'Re-Scan Outliers'}
+                  </button>
+                  <input
+                    type="number" step="any" min="0" placeholder="Automatic"
+                    value={binWidthInput}
+                    onChange={(e) => { setBinWidthInput(e.target.value); setBinWidthError(null); }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') applyOutlierBinWidth(); }}
+                  />
+                  <button type="button" className="bin-width-apply-t" onClick={applyOutlierBinWidth}>
+                    Apply Width
+                  </button>
+                </div>
+                {binWidthError && <p className="bin-width-error-t">{binWidthError}</p>}
+                {outlierScanError && <div className="transform-error-banner">{outlierScanError}</div>}
+
+                {outlierResult && (
+                  <div className="stat-card-row-transform cols-4">
+                    <div className="tstat-card grey"><p className="tstat-value">{outlierResult.flaggedIndices.length.toLocaleString()}</p><p className="tstat-label">Outlier Points</p></div>
+                    <div className="tstat-card grey"><p className="tstat-value">{outlierResult.pct.toFixed(1)}%</p><p className="tstat-label">Dataset Proportion</p></div>
+                    <div className="tstat-card grey"><p className="tstat-value">{outlierResult.lower.toFixed(0)}</p><p className="tstat-label">Lower Cutoff</p></div>
+                    <div className="tstat-card grey"><p className="tstat-value">{outlierResult.upper.toFixed(0)}</p><p className="tstat-label">Upper Cutoff</p></div>
+                  </div>
+                )}
+
+                {histogramData && (
+                  <div className="dist-chart-box">
+                    <p className="dist-chart-title">Raw Distribution Histogram ({outlierVariable})</p>
+                    <MiniBarChart
+                      bins={histogramData.bins}
+                      binLabels={histogramData.labels}
+                      color="#1d2a6b"
+                      xLabel={outlierVariable}
+                      yLabel="Records"
+                    />
+                  </div>
+                )}
+
+                {outlierResult && outlierResult.flaggedIndices.length > 0 && (
+                  <>
+                    <p className="transform-card-heading" style={{ marginTop: 'var(--spacing-md)' }}>
+                      Flagged Outlier Records:
+                    </p>
+                    <div className="transformed-preview-scroll">
+                      <table className="transformed-preview-table">
+                        <thead><tr>{columns.map((c) => <th key={c}>{c}</th>)}</tr></thead>
+                        <tbody>
+                          {outlierResult.flaggedIndices.slice(0, 100).map((idx) => (
+                            <tr key={idx}>{columns.map((c) => <td key={c}>{rows[idx]?.[c]}</td>)}</tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* ---- Step 2: Column categorization ---- */}
               <div className="transform-card">
                 <p className="transform-section-title">
-                  Step 1: Column Categorization (from Ingestion)
+                  Step 2: Column Categorization (from Ingestion)
                 </p>
                 <p className="transform-section-desc">
                   Variables are categorized according to their Ingestion roles. You can adjust
@@ -775,8 +1049,7 @@ function DataTransformation() {
                   <div className="formulation-card">
                     <p className="category-card-title">Model Formulation &amp; KPI Lock</p>
                     <p className="category-card-hint">
-                      Decide whether the Dependent Variable is transformed (Log-Log) or kept in
-                      linear units (Linear-Log).
+                      Decide whether the Dependent Variable is transformed
                     </p>
                     <label className="formulation-option">
                       <input
@@ -784,7 +1057,7 @@ function DataTransformation() {
                         checked={modelSpec === 'linear_log'}
                         onChange={() => setModelSpec('linear_log')}
                       />
-                      Linear-Log (Keep Sales KPI Linear / Un-transformed)
+                      Lock Dependent Varibale(Sales KPI)
                     </label>
                     <label className="formulation-option">
                       <input
@@ -792,15 +1065,15 @@ function DataTransformation() {
                         checked={modelSpec === 'log_log'}
                         onChange={() => setModelSpec('log_log')}
                       />
-                      Log-Log (Transform Sales KPI with Log Curve)
+                      Unlock Dependent Varibale(Sales KPI)
                     </label>
-                    <label className="formulation-option is-check">
+                    {/* <label className="formulation-option is-check">
                       <input
                         type="checkbox" checked={carryover}
                         onChange={(e) => setCarryover(e.target.checked)}
                       />
                       Generate Carryover (Lag 1 of Sales KPI)
-                    </label>
+                    </label> */}
 
                     {/* What the radio above actually did, said in the terms
                         the rest of the screen uses. */}
@@ -818,7 +1091,7 @@ function DataTransformation() {
                 </div>
               </div>
 
-              {/* ---- Step 2: Transformation Configuration Table ----
+              {/* ---- Step 3: Transformation Configuration Table ----
                   There is no separate variable-selection step. What gets
                   configured here is what Step 1 put in the Promotions and
                   Baseline cards, plus the KPI when the formulation is Log-Log
@@ -827,11 +1100,11 @@ function DataTransformation() {
                   decision. */}
               {selectedList.length > 0 && (
                 <div className="transform-card">
-                  <p className="transform-section-title">Step 2: Transformation Configuration Table</p>
+                  <p className="transform-section-title">Step 3: Transformation Configuration Table</p>
                   <p className="transform-section-desc">
                     Configure Normalization, Adstock Decay, Adstock Horizon (decay span), Lag (pure
                     shift) and Saturation curves per channel. Use the i on any row for benchmarks.
-                    {' '}Channels come from the categories in Step 1
+                    {' '}Channels come from the categories in Step 2
                     {modelSpec === 'log_log' && dependentVars.length > 0
                       ? `, including ${dependentVars.join(', ')} under Log-Log.`
                       : '.'}
@@ -957,7 +1230,7 @@ function DataTransformation() {
                                   value={cfg.normalization || 'none'}
                                   onChange={(e) => updateConfig(name, { normalization: e.target.value })}
                                   title={!popKeys.length && (cfg.normalization === 'population')
-                                    ? 'Choose a Population column in Step 1 for this to have an effect.'
+                                    ? 'Choose a Population column in Step 2 for this to have an effect.'
                                     : undefined}
                                 >
                                   {NORMALIZATION_OPTIONS.map((o) => (
@@ -1071,36 +1344,68 @@ function DataTransformation() {
               {transformResult && (
                 <>
                   <div className="transform-card">
-                    <p className="transform-section-title">1. Post-Transformation Multicollinearity Matrix</p>
+                    <p className="transform-section-title">Step 4: Pre vs. Post Transformation Correlation Comparison</p>
                     <p className="transform-section-desc">
-                      Verify correlation across transformed channels to ensure adstock smoothing and saturation transforms have not introduced severe collinearity before modeling.
+                      Compare correlation structure before and after feature engineering to ensure adstock smoothing and non-linear saturation transforms have not introduced collinearity.
                     </p>
                     <div className="threshold-slider-row-t">
                       <label>Highlight Threshold (|r| ≥ {corrThreshold.toFixed(2)}):</label>
                       <input type="range" min="0" max="1" step="0.05" value={corrThreshold} onChange={(e) => setCorrThreshold(Number(e.target.value))} />
                       <span className="ready-badge">{selectedList.length} Features Ready for Regression</span>
                     </div>
-                    {isScoringCorr && (
-                      <p className="transform-section-desc" role="status">Scoring correlation…</p>
-                    )}
-                    {corrError && (
-                      <p className="transform-section-desc" role="alert">{corrError}</p>
-                    )}
-                    <div className="config-table-wrapper">
-                      <table className="corr-table-t">
-                        <thead><tr><th>Variable</th>{correlationMatrix.map((r) => <th key={r.col}>{r.col.replace('_transformed', '')}</th>)}</tr></thead>
-                        <tbody>
-                          {correlationMatrix.map((row, i) => (
-                            <tr key={row.col}>
-                              <th>{row.col.replace('_transformed', '')}</th>
-                              {row.values.map((v, j) => (
-                                <td key={j} className={i === j ? 'corr-self-t' : Math.abs(v) >= corrThreshold ? 'corr-hi-t' : ''}>{v.toFixed(2)}</td>
+
+                    <div className="corr-compare-row">
+                      <div className="corr-compare-col">
+                        <p className="corr-compare-title">1. Pre-Transformation Matrix (Raw Features)</p>
+                        {isScoringPreCorr && (
+                          <p className="transform-section-desc" role="status">Scoring correlation…</p>
+                        )}
+                        {preCorrError && (
+                          <p className="transform-section-desc" role="alert">{preCorrError}</p>
+                        )}
+                        <div className="config-table-wrapper">
+                          <table className="corr-table-t">
+                            <thead><tr><th>Variable</th>{preCorrelationMatrix.map((r) => <th key={r.col}>{r.col}</th>)}</tr></thead>
+                            <tbody>
+                              {preCorrelationMatrix.map((row, i) => (
+                                <tr key={row.col}>
+                                  <th>{row.col}</th>
+                                  {row.values.map((v, j) => (
+                                    <td key={j} className={i === j ? 'corr-self-t' : Math.abs(v) >= corrThreshold ? 'corr-hi-t' : ''}>{v.toFixed(2)}</td>
+                                  ))}
+                                </tr>
                               ))}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      <div className="corr-compare-col">
+                        <p className="corr-compare-title after-title">2. Post-Transformation Matrix (Transformed Features)</p>
+                        {isScoringCorr && (
+                          <p className="transform-section-desc" role="status">Scoring correlation…</p>
+                        )}
+                        {corrError && (
+                          <p className="transform-section-desc" role="alert">{corrError}</p>
+                        )}
+                        <div className="config-table-wrapper">
+                          <table className="corr-table-t">
+                            <thead><tr><th>Variable</th>{correlationMatrix.map((r) => <th key={r.col}>{r.col.replace('_transformed', '')}</th>)}</tr></thead>
+                            <tbody>
+                              {correlationMatrix.map((row, i) => (
+                                <tr key={row.col}>
+                                  <th>{row.col.replace('_transformed', '')}</th>
+                                  {row.values.map((v, j) => (
+                                    <td key={j} className={i === j ? 'corr-self-t' : Math.abs(v) >= corrThreshold ? 'corr-hi-t' : ''}>{v.toFixed(2)}</td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
                     </div>
+
                     {highCorrPairs.length > 0 && (
                       <table className="high-corr-pairs-table">
                         <thead><tr><th>Transformed Tactic 1</th><th>Transformed Tactic 2</th><th>Correlation (r)</th></tr></thead>
