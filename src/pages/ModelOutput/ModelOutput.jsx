@@ -1018,14 +1018,14 @@ function ModelOutput() {
 
                             <p className="mo-section-title" style={{ fontSize: '0.75rem' }}>Channel-Level ROI vs. Industry Peer Benchmarks</p>
                             <table className="benchmark-table">
-                              <thead><tr><th>Channel</th><th>Benchmark</th><th>Status</th></tr></thead>
+                              <thead><tr><th>Channel</th><th>Yours</th><th>Benchmark</th><th>Status</th></tr></thead>
                               <tbody>
                                 {(benchmarkResult.channel_benchmarks || []).map((row, i) => {
                                   const status = parseStatus(row.status);
                                   return (
                                     <tr key={i}>
                                       <td>{row.channel}</td>
-                                      {/* <td>{row.yours}</td> */}
+                                      <td>{row.yours}</td>
                                       <td>{row.benchmark}</td>
                                       <td className={`status-cell ${status.tone}`}>{status.text}</td>
                                     </tr>
