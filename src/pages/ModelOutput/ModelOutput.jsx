@@ -8,6 +8,9 @@ import {
   runRidge,
 } from '../../services/api.js';
 import { generateResponseCurves, fetchBenchmarks, fetchResultsSummary, updateWorkflowState } from '../../services/modelOutputApi.js';
+import { ResponsiveContainer, CartesianGrid, XAxis, YAxis, Tooltip, Legend, LineChart, Line, BarChart, Bar } from 'recharts';
+import { ChartTooltip } from '../../components/charts/ChartTooltip.jsx';
+import { AXIS_TICK, CHART_COLORS, GRID, LINE_TYPE, X_LABEL, Y_LABEL } from '../../components/charts/chartTheme.js';
 import PageFooterNav from '../../components/PageFooterNav/PageFooterNav.jsx';
 import './ModelOutput.css';
 
@@ -155,7 +158,7 @@ function ModelOutput() {
           for (const [k, v] of entries) {
             const p = path ? `${path}.${k}` : k;
             if (typeof v === 'string' && v.length > 200 && v.includes(',') && v.includes('\n')) {
-              console.log(`Possible CSV found at state_data.${p} length ${v.length}, first 200 chars:`, v.slice(0, 200));
+              console.log(`Possible CSV found at state_data.${p} — length ${v.length}, first 200 chars:`, v.slice(0, 200));
             } else if (v && typeof v === 'object') {
               // Now recurses into arrays too — the previous version's
               // `!Array.isArray(v)` guard meant anything stored inside an
@@ -199,7 +202,7 @@ function ModelOutput() {
         (data.iterations || []).forEach((it) => { byId[it.id] = it; });
         setResultsSummaryById(byId);
       } catch (err) {
-        setSummaryError(problemMessage(err, 'Could not load formatted diagnostics showing stored values.'));
+        setSummaryError(problemMessage(err, 'Could not load formatted diagnostics — showing stored values.'));
       }
     })();
   }, [modelHistory]);
@@ -294,7 +297,7 @@ function ModelOutput() {
     const deduped = [...byVariable.values()];
     if (deduped.length !== mapped.length) {
       console.warn(
-        `[channelRows] Collapsed ${mapped.length} coefficient rows down to ${deduped.length} unique channels ` +
+        `[channelRows] Collapsed ${mapped.length} coefficient rows down to ${deduped.length} unique channels — ` +
         `some channels were selected as BOTH their raw and _transformed variant in Model Configuration. ` +
         'Kept the _transformed row, dropped the raw duplicate for each.'
       );
@@ -414,7 +417,7 @@ function ModelOutput() {
     console.log('highLevelImpact (Section 3 tiers):', highLevelImpact);
     if (!channelRows.length) {
       console.warn(
-        'channelRows is empty Sections 3/4/5 will render nothing. ' +
+        'channelRows is empty — Sections 3/4/5 will render nothing. ' +
         'This model has no usable coefficients array under any checked key. ' +
         'See coefficientDiagnostic for the exact field list.'
       );
@@ -450,7 +453,7 @@ function ModelOutput() {
         entityColumnGuess = headerCols.find((c) => /npi|hcp_id|^id$|entity/i.test(c)) || null;
         console.log('ARD header columns:', headerCols);
       } else {
-        console.warn('No ard filename on this model, or no workflowId yet cannot fetch a CSV at all.');
+        console.warn('No ard filename on this model, or no workflowId yet — cannot fetch a CSV at all.');
       }
 
       // Confirmed from the last run: hcp_level_ard.csv's own header has NONE
@@ -507,7 +510,7 @@ function ModelOutput() {
       console.log('Response:', result);
       console.log('Response has coefficients?', Array.isArray(result?.coefficients), result?.coefficients?.length ?? 0, 'rows');
     } catch (err) {
-      console.error('Request failed the error/detail below should say exactly which field is missing or wrong:', err);
+      console.error('Request failed — the error/detail below should say exactly which field is missing or wrong:', err);
       console.log('problemMessage(err):', problemMessage(err, 'no message'));
     } finally {
       console.groupEnd();
@@ -623,7 +626,7 @@ function ModelOutput() {
       overall_comparison: [
         { metric: 'Promotional Lift Share (%)', yours: `${(100 - baselineShare).toFixed(1)}%`, benchmark: '34.5%', status: '🟡 Near Benchmark' },
         { metric: 'Baseline Organic Share (%)', yours: `${baselineShare.toFixed(1)}%`, benchmark: '45.0%', status: '🟡 Near Benchmark' },
-        { metric: 'Average Portfolio ROI', yours: avgPortfolioRoi !== null ? `${avgPortfolioRoi.toFixed(2)}x` : '', benchmark: '2.10x', status: '🟡 Near Benchmark' },
+        { metric: 'Average Portfolio ROI', yours: avgPortfolioRoi !== null ? `${avgPortfolioRoi.toFixed(2)}x` : '—', benchmark: '2.10x', status: '🟡 Near Benchmark' },
       ],
       channel_benchmarks: deepDive.filter((d) => d.roi !== null).map((d) => {
         const benchVal = Number((d.roi * 0.85 + 0.3).toFixed(2));
@@ -652,7 +655,7 @@ function ModelOutput() {
       setBenchmarkResult(data);
       setBenchmarkIsFallback(false);
     } catch (err) {
-      setBenchmarkError(problemMessage(err, 'Live benchmark service unavailable showing an estimated comparison instead.'));
+      setBenchmarkError(problemMessage(err, 'Live benchmark service unavailable — showing an estimated comparison instead.'));
       setBenchmarkResult(buildFallbackBenchmark());
       setBenchmarkIsFallback(true);
     } finally {
@@ -666,8 +669,8 @@ function ModelOutput() {
   // other placeholder metric falls back to "—" rather than guessing.
   const resolveYours = (metric, yours) => {
     if (yours !== 'Calculated from Model') return yours;
-    if (/average portfolio roi/i.test(metric)) return avgPortfolioRoi !== null ? `${avgPortfolioRoi.toFixed(2)}x` : '';
-    return '';
+    if (/average portfolio roi/i.test(metric)) return avgPortfolioRoi !== null ? `${avgPortfolioRoi.toFixed(2)}x` : '—';
+    return '—';
   };
 
   const [showStatSummary, setShowStatSummary] = useState(false);
@@ -691,7 +694,7 @@ function ModelOutput() {
           {workflowError && <div className="mo-error">{workflowError}</div>}
 
           {modelHistory.length === 0 ? (
-            <p className="mo-empty">No models have been run yet go to Model Configuration to run one first.</p>
+            <p className="mo-empty">No models have been run yet — go to Model Configuration to run one first.</p>
           ) : (
             <>
               {/* ---- 1. Model Registry ---- */}
@@ -710,13 +713,13 @@ function ModelOutput() {
                         const isRowViewing = m.id === viewingId;
                         return (
                           <tr key={m.id} className={isRowViewing ? 'is-viewing' : ''} onClick={() => setViewingId(m.id)}>
-                            <td><strong>{m.name}</strong>{m.id === finalizedId && <span className="finalized-tag">Finalized</span>}</td>
+                            <td><strong>{m.name}</strong>{m.id === finalizedId && <span className="finalized-tag">★ Finalized</span>}</td>
                             <td><span className="grain-badge">{m.level?.toUpperCase()}</span></td>
                             <td>{m.type?.toUpperCase()}</td>
-                            <td>{m.dependentVar || m.targetKpi || 'NA'}</td>
-                            <td>{stats.r2?.toFixed(4) ?? 'NA'}</td>
-                            <td>{stats.adjR2?.toFixed(4) ?? 'NA'}</td>
-                            <td>{stats.rmse?.toFixed(2) ?? 'NA'}</td>
+                            <td>{m.dependentVar || m.targetKpi || '—'}</td>
+                            <td>{stats.r2?.toFixed(4) ?? '—'}</td>
+                            <td>{stats.adjR2?.toFixed(4) ?? '—'}</td>
+                            <td>{stats.rmse?.toFixed(2) ?? '—'}</td>
                             <td>{m.startDate} → {m.endDate}</td>
                             <td><span className="status-complete">✓ Complete</span></td>
                             <td>
@@ -742,10 +745,10 @@ function ModelOutput() {
                   <div>
                     <span className="reviewing-label">Currently Reviewing:</span>
                     <span className="reviewing-name">{viewingModel.name}</span>
-                    {isViewingFinalized && <span className="reviewing-finalized-badge">Finalized Model</span>}
+                    {isViewingFinalized && <span className="reviewing-finalized-badge">✓ Finalized Model</span>}
                     <p className="reviewing-meta">
                       Level: <strong>{viewingModel.level?.toUpperCase()}</strong> · Type: <strong>{viewingModel.type?.toUpperCase()}</strong> ·
-                      R²: <strong>{getDisplayStats(viewingModel).r2?.toFixed(4) ?? 'NA'}</strong> · RMSE: <strong>{getDisplayStats(viewingModel).rmse?.toFixed(2) ?? 'NA'}</strong>
+                      R²: <strong>{getDisplayStats(viewingModel).r2?.toFixed(4) ?? '—'}</strong> · RMSE: <strong>{getDisplayStats(viewingModel).rmse?.toFixed(2) ?? '—'}</strong>
                     </p>
                     {finalizeError && <p className="mo-error" style={{ marginTop: '0.5rem', marginBottom: 0 }}>{finalizeError}</p>}
                   </div>
@@ -754,7 +757,7 @@ function ModelOutput() {
                     onClick={() => handleFinalize(viewingModel.id)}
                     disabled={isFinalizing}
                   >
-                    {isFinalizing ? 'Saving...' : isViewingFinalized ? 'Re-Confirm Finalized' : 'Finalize Model'}
+                    {isFinalizing ? 'Saving...' : isViewingFinalized ? '★ Re-Confirm Finalized' : 'Finalize Model'}
                   </button>
                 </div>
               )}
@@ -787,19 +790,30 @@ function ModelOutput() {
                             <div key={bucket} className="exec-stat-card">
                               <p className="exec-stat-label">{EXEC_LABELS[bucket]}</p>
                               <p className="exec-stat-value">{pct.toFixed(1)}%</p>
-                              <p className="exec-stat-units">{sales > 0 ? `${Math.round(Math.abs(sales)).toLocaleString()} Units` : 'NA'}</p>
+                              <p className="exec-stat-units">{sales > 0 ? `${Math.round(Math.abs(sales)).toLocaleString()} Units` : '—'}</p>
                             </div>
                           );
                         })}
                         <div className="exec-chart-box">
                           <p className="exec-chart-title">Share of Total Volume (% Distribution)</p>
-                          <div className="exec-share-bar">
-                            {['baseline', 'personal', 'npp', 'dtc'].map((bucket) => {
-                              const pct = Math.max(0, highLevelImpact.pctBuckets[bucket] || 0);
-                              if (pct < 0.5) return null;
-                              return <div key={bucket} style={{ width: `${pct}%`, backgroundColor: BUCKET_COLORS[bucket] }} />;
-                            })}
-                          </div>
+                          <ResponsiveContainer width="100%" height={90}>
+                            <BarChart
+                              data={[{
+                                name: 'Portfolio Share',
+                                ...Object.fromEntries(['baseline', 'personal', 'npp', 'dtc'].map((b) => [EXEC_LABELS[b], Math.max(0, highLevelImpact.pctBuckets[b] || 0)])),
+                              }]}
+                              layout="vertical"
+                              margin={{ top: 4, right: 8, bottom: 4, left: 8 }}
+                            >
+                              <CartesianGrid stroke={GRID} horizontal={false} />
+                              <XAxis type="number" domain={[0, 100]} tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }} tickFormatter={(v) => `${v}%`} />
+                              <YAxis type="category" dataKey="name" hide />
+                              <Tooltip content={<ChartTooltip />} cursor={{ fill: 'rgba(0,0,0,0.03)' }} />
+                              {['baseline', 'personal', 'npp', 'dtc'].map((b) => (
+                                <Bar key={b} dataKey={EXEC_LABELS[b]} name={EXEC_LABELS[b]} stackId="a" fill={BUCKET_COLORS[b]} />
+                              ))}
+                            </BarChart>
+                          </ResponsiveContainer>
                           <div className="exec-share-legend">
                             {['baseline', 'personal', 'npp', 'dtc'].map((bucket) => (
                               <div key={bucket} className="exec-share-legend-item">
@@ -861,6 +875,7 @@ function ModelOutput() {
                     <p className="mo-section-desc">Explore how increasing or decreasing spend affects incremental sales volume and marginal returns. Diminishing returns demonstrate saturation limits per tactic.</p>
                     {!isViewingFinalized ? (
                       <div className="locked-state">
+                        <span className="locked-icon">🔒</span>
                         <p className="locked-title">Finalize this model to unlock response curves</p>
                         <p className="locked-desc">Response curves require real computation and are only generated for a finalized model.</p>
                       </div>
@@ -902,20 +917,40 @@ function ModelOutput() {
                             <div className="rc-chart-row">
                               <div className="rc-chart-box">
                                 <p className="rc-chart-title">Spend vs. Sales Response Curve ({responseChannel.toUpperCase()})</p>
-                                <SingleCurveSVG points={currentCurve} xKey="spend" yKey="impactable_nation" color="#1d4ed8" xFormat={formatSpendTick} yFormat={formatCompactNumber} />
+                                <ResponsiveContainer width="100%" height={260}>
+                                  <LineChart data={currentCurve} margin={{ top: 10, right: 20, bottom: 22, left: 8 }}>
+                                    <CartesianGrid stroke={GRID} vertical={false} />
+                                    <XAxis dataKey="spend" tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
+                                           tickFormatter={formatSpendTick} minTickGap={24}
+                                           label={{ value: 'Spend', ...X_LABEL }} />
+                                    <YAxis tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
+                                           tickFormatter={formatCompactNumber}
+                                           label={{ value: 'Impactable Sales', ...Y_LABEL }} />
+                                    <Tooltip content={<ChartTooltip title={(label) => formatSpendTick(Number(label))} />} cursor={{ stroke: '#c7d2e5', strokeWidth: 1 }} />
+                                    <Line type={LINE_TYPE} dataKey="impactable_nation" name="Impactable Sales" stroke={CHART_COLORS[0]} strokeWidth={2} dot={false} activeDot={{ r: 4, strokeWidth: 1.5, stroke: '#fff' }} />
+                                  </LineChart>
+                                </ResponsiveContainer>
                               </div>
                               <div className="rc-chart-box">
                                 <p className="rc-chart-title">Average ROI vs. Marginal ROI (mROI) Curve</p>
-                                <MultiCurveSVG
-                                  points={currentCurve}
-                                  xKey="spend"
-                                  series={[
-                                    { key: 'roi', label: 'Average ROI', color: '#1d4ed8' },
-                                    { key: 'mroi', label: 'Marginal ROI', color: '#10b981' },
-                                  ]}
-                                  xFormat={formatSpendTick}
-                                  yFormat={(v) => v.toFixed(2)}
-                                />
+                                <ResponsiveContainer width="100%" height={260}>
+                                  <LineChart data={currentCurve} margin={{ top: 10, right: 20, bottom: 22, left: 8 }}>
+                                    <CartesianGrid stroke={GRID} vertical={false} />
+                                    <XAxis dataKey="spend" tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
+                                           tickFormatter={formatSpendTick} minTickGap={24}
+                                           label={{ value: 'Spend', ...X_LABEL }} />
+                                    <YAxis tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
+                                           tickFormatter={(v) => v.toFixed(2)}
+                                           label={{ value: 'ROI', ...Y_LABEL }} />
+                                    <Tooltip content={<ChartTooltip title={(label) => formatSpendTick(Number(label))} />} cursor={{ stroke: '#c7d2e5', strokeWidth: 1 }} />
+                                    <Line type={LINE_TYPE} dataKey="roi" name="Average ROI" stroke={CHART_COLORS[0]} strokeWidth={2} dot={false} activeDot={{ r: 4, strokeWidth: 1.5, stroke: '#fff' }} />
+                                    <Line type={LINE_TYPE} dataKey="mroi" name="Marginal ROI" stroke={CHART_COLORS[1]} strokeWidth={2} dot={false} activeDot={{ r: 4, strokeWidth: 1.5, stroke: '#fff' }} />
+                                  </LineChart>
+                                </ResponsiveContainer>
+                                <div className="rc-chart-legend">
+                                  <div className="rc-chart-legend-item"><span className="rc-chart-legend-swatch" style={{ backgroundColor: CHART_COLORS[0] }} />Average ROI</div>
+                                  <div className="rc-chart-legend-item"><span className="rc-chart-legend-swatch" style={{ backgroundColor: CHART_COLORS[1] }} />Marginal ROI</div>
+                                </div>
                               </div>
                             </div>
                           </>
@@ -1029,97 +1064,6 @@ function ModelOutput() {
       )}
 
       <PageFooterNav currentStepId="model-output" />
-    </div>
-  );
-}
-
-function SingleCurveSVG({ points, xKey, yKey, color, xFormat, yFormat }) {
-  const width = 420, height = 260, padding = 44;
-  const xs = points.map((p) => p[xKey]), ys = points.map((p) => p[yKey]);
-  const maxX = Math.max(...xs), maxY = Math.max(...ys, 0.01);
-  const minY = Math.min(...ys, 0);
-  const xScale = (v) => padding + (v / (maxX || 1)) * (width - padding - 12);
-  const yScale = (v) => height - padding - ((v - minY) / ((maxY - minY) || 1)) * (height - padding - 12);
-  const fmtX = xFormat || ((v) => v);
-  const fmtY = yFormat || ((v) => v);
-  const yTicks = [0, 0.25, 0.5, 0.75, 1];
-  const xTicks = [0, 0.2, 0.4, 0.6, 0.8, 1];
-  return (
-    <svg viewBox={`0 0 ${width} ${height}`} style={{ width: '100%', height: 'auto' }}>
-      {yTicks.map((t) => {
-        const yVal = minY + t * (maxY - minY);
-        const y = yScale(yVal);
-        return (
-          <g key={`y-${t}`}>
-            <line x1={padding} x2={width - 8} y1={y} y2={y} stroke="#eef1f6" strokeWidth="1" />
-            <text x={padding - 6} y={y + 3} textAnchor="end" fontSize="9" fill="#8a94a6">{fmtY(yVal)}</text>
-          </g>
-        );
-      })}
-      {xTicks.map((t) => {
-        const xVal = t * maxX;
-        const x = xScale(xVal);
-        return (
-          <text key={`x-${t}`} x={x} y={height - padding + 14} textAnchor="middle" fontSize="9" fill="#8a94a6">{fmtX(xVal)}</text>
-        );
-      })}
-      <polyline points={points.map((p) => `${xScale(p[xKey])},${yScale(p[yKey])}`).join(' ')} fill="none" stroke={color} strokeWidth="2.5" />
-    </svg>
-  );
-}
-
-// Combined multi-series line chart (used for Average ROI vs. Marginal ROI),
-// with a legend beneath the chart matching the reference UI.
-function MultiCurveSVG({ points, xKey, series, xFormat, yFormat }) {
-  const width = 420, height = 260, padding = 44;
-  const xs = points.map((p) => p[xKey]);
-  const allY = series.flatMap((s) => points.map((p) => p[s.key]));
-  const maxX = Math.max(...xs);
-  const maxY = Math.max(...allY, 0.01);
-  const minY = Math.min(...allY, 0);
-  const xScale = (v) => padding + (v / (maxX || 1)) * (width - padding - 12);
-  const yScale = (v) => height - padding - ((v - minY) / ((maxY - minY) || 1)) * (height - padding - 24);
-  const fmtX = xFormat || ((v) => v);
-  const fmtY = yFormat || ((v) => v);
-  const yTicks = [0, 0.25, 0.5, 0.75, 1];
-  const xTicks = [0, 0.2, 0.4, 0.6, 0.8, 1];
-  return (
-    <div>
-      <svg viewBox={`0 0 ${width} ${height}`} style={{ width: '100%', height: 'auto' }}>
-        {yTicks.map((t) => {
-          const yVal = minY + t * (maxY - minY);
-          const y = yScale(yVal);
-          return (
-            <g key={`y-${t}`}>
-              <line x1={padding} x2={width - 8} y1={y} y2={y} stroke="#eef1f6" strokeWidth="1" />
-              <text x={padding - 6} y={y + 3} textAnchor="end" fontSize="9" fill="#8a94a6">{fmtY(yVal)}</text>
-            </g>
-          );
-        })}
-        {xTicks.map((t) => {
-          const xVal = t * maxX;
-          const x = xScale(xVal);
-          return (
-            <text key={`x-${t}`} x={x} y={height - padding + 14} textAnchor="middle" fontSize="9" fill="#8a94a6">{fmtX(xVal)}</text>
-          );
-        })}
-        {series.map((s) => (
-          <polyline
-            key={s.key}
-            points={points.map((p) => `${xScale(p[xKey])},${yScale(p[s.key])}`).join(' ')}
-            fill="none"
-            stroke={s.color}
-            strokeWidth="2.5"
-          />
-        ))}
-      </svg>
-      <div className="rc-chart-legend">
-        {series.map((s) => (
-          <div key={s.key} className="rc-chart-legend-item">
-            <span className="rc-chart-legend-swatch" style={{ backgroundColor: s.color }} />{s.label}
-          </div>
-        ))}
-      </div>
     </div>
   );
 }

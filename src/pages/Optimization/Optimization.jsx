@@ -7,6 +7,9 @@ import {
   generateResponseCurves,
 } from '../../services/api.js';
 import { runOptimization } from '../../services/optimization.js';
+import { ResponsiveContainer, CartesianGrid, XAxis, YAxis, Tooltip, BarChart, Bar } from 'recharts';
+import { ChartTooltip } from '../../components/charts/ChartTooltip.jsx';
+import { AXIS_TICK, CHART_COLORS, GRID } from '../../components/charts/chartTheme.js';
 import PageFooterNav from '../../components/PageFooterNav/PageFooterNav.jsx';
 import './Optimization.css';
 
@@ -438,19 +441,19 @@ function Optimization() {
 
                 {optResult.feasible === false && (
                   <div className="opt-error">
-                    ❌ Target Unreachable Within Current Bounds — {optResult.message || `the highest achievable sales volume is ${optResult.max_possible_sales?.toLocaleString() || 'lower than your target'}. Increase Max Spend constraints on high-ROI channels to reach this target.`}
+                    Target Unreachable Within Current Bounds — {optResult.message || `the highest achievable sales volume is ${optResult.max_possible_sales?.toLocaleString() || 'lower than your target'}. Increase Max Spend constraints on high-ROI channels to reach this target.`}
                   </div>
                 )}
                 {optResult.feasible !== false && optResult.converged === false && (
                   <div className="opt-note">
-                    ⚠️ Every channel hit its Max constraint before the full {scenarioType === 'fixed_budget' ? 'budget could be allocated' : 'target could be reached'} —
+                    Every channel hit its Max constraint before the full {scenarioType === 'fixed_budget' ? 'budget could be allocated' : 'target could be reached'} —
                     {' '}${totalOptimizedSpend.toLocaleString()} was allocated instead of the requested {scenarioType === 'fixed_budget' ? `$${Number(targetValue).toLocaleString()}` : `${Number(targetValue).toLocaleString()} units`}.
                     Raise Max constraints on high-ROI channels to use the rest.
                   </div>
                 )}
 
                 <div className="opt-stat-row">
-                  <div className="opt-stat-card"><p className="opt-stat-value">{optResult.feasible === false ? '⚠️ Infeasible' : optResult.converged === false ? '⚠️ At Boundary' : 'Optimal'}</p><p className="opt-stat-label">Scenario Status</p></div>
+                  <div className="opt-stat-card"><p className="opt-stat-value">{optResult.feasible === false ? '⚠️ Infeasible' : optResult.converged === false ? 'At Boundary' : 'Optimal'}</p><p className="opt-stat-label">Scenario Status</p></div>
                   <div className="opt-stat-card"><p className="opt-stat-value">${totalOptimizedSpend.toLocaleString()}</p><p className="opt-stat-label">{scenarioType === 'fixed_budget' ? 'Total Allocated Budget' : 'Required Investment'}</p></div>
                   <div className="opt-stat-card"><p className="opt-stat-value">{Math.round(totalOptimizedSales).toLocaleString()}</p><p className="opt-stat-label">Projected Sales (Units)</p></div>
                   <div className="opt-stat-card">
@@ -460,7 +463,18 @@ function Optimization() {
                 </div>
 
                 <div className="compare-chart-wrapper">
-                  <CompareBarChart rows={comparisonData} />
+                  <ResponsiveContainer width="100%" height={340}>
+                    <BarChart data={comparisonData} margin={{ top: 10, right: 20, bottom: 70, left: 8 }}>
+                      <CartesianGrid stroke={GRID} vertical={false} />
+                      <XAxis dataKey="channel" tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
+                             angle={-40} textAnchor="end" interval={0} height={70} />
+                      <YAxis tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
+                             tickFormatter={(v) => (Math.abs(v) >= 1000 ? `$${Math.round(v / 1000)}k` : `$${v}`)} />
+                      <Tooltip content={<ChartTooltip />} cursor={{ fill: 'rgba(0,0,0,0.03)' }} />
+                      <Bar dataKey="currentSpend" name="Current Plan Spend ($)" fill="#001E96" />
+                      <Bar dataKey="optimizedSpend" name="Optimized Spend ($)" fill="#1ABC9C" />
+                    </BarChart>
+                  </ResponsiveContainer>
                   <div className="compare-legend">
                     <div className="compare-legend-item"><span className="compare-legend-swatch" style={{ backgroundColor: '#001E96' }} />Current Plan Spend</div>
                     <div className="compare-legend-item"><span className="compare-legend-swatch" style={{ backgroundColor: '#1ABC9C' }} />Optimized Spend</div>
@@ -502,9 +516,9 @@ function Optimization() {
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem', marginTop: 'var(--spacing-md)' }}>
                   <span className="opt-section-desc" style={{ marginBottom: 0 }}>Save this plan to your workflow's Scenario History for executive presentations and budget sign-off.</span>
                   <div style={{ display: 'flex', gap: '0.6rem' }}>
-                    <button className="constraint-preset-btn" onClick={handleExportCsv}>📥 Export Plan CSV</button>
+                    <button className="constraint-preset-btn" onClick={handleExportCsv}>Export Plan CSV</button>
                     <button className="run-optimizer-btn" onClick={handleSaveScenario} disabled={isSavingScenario}>
-                      {isSavingScenario ? 'Saving...' : '💾 Save Scenario'}
+                      {isSavingScenario ? 'Saving...' : 'Save Scenario'}
                     </button>
                   </div>
                 </div>
@@ -553,41 +567,6 @@ function Optimization() {
 
       <PageFooterNav currentStepId="optimization" />
     </div>
-  );
-}
-
-function CompareBarChart({ rows }) {
-  if (!rows.length) return <p className="opt-empty">No allocation data to chart.</p>;
-  const width = 900, height = 300, padding = 56;
-  const maxVal = Math.max(...rows.flatMap((r) => [r.currentSpend, r.optimizedSpend]), 1);
-  const groupWidth = (width - padding * 2) / rows.length;
-  const barWidth = groupWidth * 0.32;
-  const yScale = (v) => height - padding - (v / maxVal) * (height - padding * 2);
-  const formatSpendTick = (v) => (v === 0 ? '$0k' : `$${Math.round(v / 1000)}k`);
-
-  return (
-    <svg viewBox={`0 0 ${width} ${height}`} style={{ width: '100%', height: 'auto' }}>
-      {[0, 0.25, 0.5, 0.75, 1].map((t) => {
-        const y = padding + t * (height - padding * 2);
-        const value = maxVal * (1 - t);
-        return (
-          <g key={t}>
-            <line x1={padding} x2={width - padding} y1={y} y2={y} stroke="#eef1f6" strokeWidth="1" />
-            <text x={padding - 8} y={y + 3} fontSize="9" fill="#8a94a6" textAnchor="end">{formatSpendTick(value)}</text>
-          </g>
-        );
-      })}
-      {rows.map((r, i) => {
-        const groupX = padding + i * groupWidth + groupWidth / 2;
-        return (
-          <g key={r.channel}>
-            <rect x={groupX - barWidth - 2} y={yScale(r.currentSpend)} width={barWidth} height={height - padding - yScale(r.currentSpend)} fill="#001E96" />
-            <rect x={groupX + 2} y={yScale(r.optimizedSpend)} width={barWidth} height={height - padding - yScale(r.optimizedSpend)} fill="#1ABC9C" />
-            <text x={groupX} y={height - padding + 16} fontSize="9" fill="#8a94a3" textAnchor="middle">{r.channel}</text>
-          </g>
-        );
-      })}
-    </svg>
   );
 }
 
