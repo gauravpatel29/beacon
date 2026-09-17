@@ -21,6 +21,7 @@ import {
   AXIS_TICK, CHART_COLORS, fmt, GRID, LINE_TYPE, X_LABEL, Y_LABEL,
 } from '../../components/charts/chartTheme.js';
 import './DataReview.css';
+import PageFooterNav from '../../components/PageFooterNav/PageFooterNav.jsx';
 
 const TABS = [
   { id: 'summary', label: 'Summary Stats & Sparsity' },
@@ -1560,6 +1561,7 @@ function DataReview() {
           )}
         </>
       )}
+      <PageFooterNav currentStepId="eda" />
     </div>
   );
 }

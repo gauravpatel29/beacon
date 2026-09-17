@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { v2ListFiles, v2BuildArd, deleteFile, problemMessage, ensureWorkflow } from '../../services/api.js';
 import { forgetFile, loadScreenState, recordStage, saveScreenState } from '../../services/workflowState.js';
 import './Datastitching.css';
+import PageFooterNav from '../../components/PageFooterNav/PageFooterNav.jsx';
 
 // No ARD until the user adds one. The screen used to open with an HCP and a
 // DMA tab already present, claiming two ARDs nobody had asked for and which
@@ -878,6 +879,9 @@ function Datastitching() {
           onClose={() => setModal(null)}
         />
       )}
+
+    <PageFooterNav currentStepId="data-stitching" />
+
     </div>
   );
 }

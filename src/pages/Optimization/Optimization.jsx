@@ -565,7 +565,6 @@ function Optimization() {
         </>
       )}
 
-      <PageFooterNav currentStepId="optimization" />
     </div>
   );
 }
