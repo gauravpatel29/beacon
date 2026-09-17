@@ -5,94 +5,171 @@ from typing import Dict, Any, List
 
 router = APIRouter()
 
-# ─── Reference Industry Benchmarks Knowledge Base ────────────────────────────
-BENCHMARK_DATABASE = {
-    "Chronic": {
-        "Launch (<1 Year)": {
-            "High Competition": {"promo_share": 42.0, "baseline_share": 38.0, "portfolio_roi": 1.90, "base_multiplier": 0.80},
-            "Medium Competition": {"promo_share": 38.0, "baseline_share": 42.0, "portfolio_roi": 2.20, "base_multiplier": 0.90},
-            "Low / Niche Competition": {"promo_share": 32.0, "baseline_share": 48.0, "portfolio_roi": 2.60, "base_multiplier": 1.10},
+# ─── Exact Industry Benchmark Reference Matrix ──────────────────────────────
+# Segmented by Maturity Stage (0–2Y, 2–5Y, 5–8Y, 8Y+) × Competition (Low, Medium, High)
+NEW_BENCHMARK_MATRIX = {
+    "0–2Y": {
+        "Low": {
+            "baseline_impact": "30–45%",
+            "salesforce_impact": "25–35%",
+            "hcp_pp_impact": "5–9%",
+            "access_impact": "10–18%",
+            "hcp_npp_impact": "4–9%",
+            "consumer_npp_impact": "6–12%",
+            "salesforce_roi": "1.0–2.5x",
+            "hcp_pp_roi": "0.8–1.6x",
+            "access_roi": "0.9–1.5x",
+            "hcp_npp_roi": "1.5–3.0x",
+            "consumer_npp_roi": "1.5–3.5x",
         },
-        "Growth (1–3 Years)": {
-            "High Competition": {"promo_share": 36.0, "baseline_share": 44.0, "portfolio_roi": 2.40, "base_multiplier": 0.95},
-            "Medium Competition": {"promo_share": 31.0, "baseline_share": 49.0, "portfolio_roi": 2.80, "base_multiplier": 1.05},
-            "Low / Niche Competition": {"promo_share": 25.0, "baseline_share": 55.0, "portfolio_roi": 3.20, "base_multiplier": 1.25},
+        "Medium": {
+            "baseline_impact": "25–40%",
+            "salesforce_impact": "22–32%",
+            "hcp_pp_impact": "4–8%",
+            "access_impact": "9–17%",
+            "hcp_npp_impact": "3–8%",
+            "consumer_npp_impact": "5–11%",
+            "salesforce_roi": "0.7–2.2x",
+            "hcp_pp_roi": "0.6–1.4x",
+            "access_roi": "0.8–1.4x",
+            "hcp_npp_roi": "1.2–2.7x",
+            "consumer_npp_roi": "1.2–3.0x",
         },
-        "Mature (3–7 Years)": {
-            "High Competition": {"promo_share": 26.0, "baseline_share": 54.0, "portfolio_roi": 2.10, "base_multiplier": 0.85},
-            "Medium Competition": {"promo_share": 20.0, "baseline_share": 60.0, "portfolio_roi": 2.40, "base_multiplier": 0.95},
-            "Low / Niche Competition": {"promo_share": 15.0, "baseline_share": 65.0, "portfolio_roi": 2.90, "base_multiplier": 1.15},
-        },
-        "Late Lifecycle (7+ Years)": {
-            "High Competition": {"promo_share": 15.0, "baseline_share": 65.0, "portfolio_roi": 1.40, "base_multiplier": 0.70},
-            "Medium Competition": {"promo_share": 12.0, "baseline_share": 68.0, "portfolio_roi": 1.70, "base_multiplier": 0.80},
-            "Low / Niche Competition": {"promo_share": 10.0, "baseline_share": 70.0, "portfolio_roi": 2.00, "base_multiplier": 0.95},
-        },
-    },
-    "Acute": {
-        "Launch (<1 Year)": {
-            "High Competition": {"promo_share": 48.0, "baseline_share": 32.0, "portfolio_roi": 2.10, "base_multiplier": 0.85},
-            "Medium Competition": {"promo_share": 44.0, "baseline_share": 36.0, "portfolio_roi": 2.50, "base_multiplier": 0.95},
-            "Low / Niche Competition": {"promo_share": 38.0, "baseline_share": 42.0, "portfolio_roi": 3.00, "base_multiplier": 1.15},
-        },
-        "Growth (1–3 Years)": {
-            "High Competition": {"promo_share": 39.0, "baseline_share": 41.0, "portfolio_roi": 2.70, "base_multiplier": 1.00},
-            "Medium Competition": {"promo_share": 34.0, "baseline_share": 46.0, "portfolio_roi": 3.10, "base_multiplier": 1.10},
-            "Low / Niche Competition": {"promo_share": 28.0, "baseline_share": 52.0, "portfolio_roi": 3.60, "base_multiplier": 1.30},
-        },
-        "Mature (3–7 Years)": {
-            "High Competition": {"promo_share": 28.0, "baseline_share": 52.0, "portfolio_roi": 2.30, "base_multiplier": 0.90},
-            "Medium Competition": {"promo_share": 22.0, "baseline_share": 58.0, "portfolio_roi": 2.70, "base_multiplier": 1.00},
-            "Low / Niche Competition": {"promo_share": 16.0, "baseline_share": 64.0, "portfolio_roi": 3.20, "base_multiplier": 1.20},
-        },
-        "Late Lifecycle (7+ Years)": {
-            "High Competition": {"promo_share": 16.0, "baseline_share": 64.0, "portfolio_roi": 1.50, "base_multiplier": 0.75},
-            "Medium Competition": {"promo_share": 13.0, "baseline_share": 67.0, "portfolio_roi": 1.80, "base_multiplier": 0.85},
-            "Low / Niche Competition": {"promo_share": 10.0, "baseline_share": 70.0, "portfolio_roi": 2.20, "base_multiplier": 1.00},
+        "High": {
+            "baseline_impact": "20–35%",
+            "salesforce_impact": "20–30%",
+            "hcp_pp_impact": "3–7%",
+            "access_impact": "8–16%",
+            "hcp_npp_impact": "3–7%",
+            "consumer_npp_impact": "4–10%",
+            "salesforce_roi": "0.5–2.0x",
+            "hcp_pp_roi": "0.4–1.2x",
+            "access_roi": "0.7–1.3x",
+            "hcp_npp_roi": "1.0–2.4x",
+            "consumer_npp_roi": "1.0–2.7x",
         },
     },
-    "Rare / Specialty": {
-        "Launch (<1 Year)": {
-            "High Competition": {"promo_share": 35.0, "baseline_share": 45.0, "portfolio_roi": 2.80, "base_multiplier": 1.05},
-            "Medium Competition": {"promo_share": 30.0, "baseline_share": 50.0, "portfolio_roi": 3.40, "base_multiplier": 1.20},
-            "Low / Niche Competition": {"promo_share": 24.0, "baseline_share": 56.0, "portfolio_roi": 4.10, "base_multiplier": 1.45},
+    "2–5Y": {
+        "Low": {
+            "baseline_impact": "45–60%",
+            "salesforce_impact": "25–33%",
+            "hcp_pp_impact": "5–9%",
+            "access_impact": "14–21%",
+            "hcp_npp_impact": "6–11%",
+            "consumer_npp_impact": "7–13%",
+            "salesforce_roi": "3.0–4.3x",
+            "hcp_pp_roi": "1.8–2.7x",
+            "access_roi": "1.1–1.7x",
+            "hcp_npp_roi": "4.0–5.8x",
+            "consumer_npp_roi": "5.0–7.0x",
         },
-        "Growth (1–3 Years)": {
-            "High Competition": {"promo_share": 28.0, "baseline_share": 52.0, "portfolio_roi": 3.50, "base_multiplier": 1.20},
-            "Medium Competition": {"promo_share": 23.0, "baseline_share": 57.0, "portfolio_roi": 4.20, "base_multiplier": 1.40},
-            "Low / Niche Competition": {"promo_share": 18.0, "baseline_share": 62.0, "portfolio_roi": 5.00, "base_multiplier": 1.65},
+        "Medium": {
+            "baseline_impact": "40–55%",
+            "salesforce_impact": "22–30%",
+            "hcp_pp_impact": "4–8%",
+            "access_impact": "12–19%",
+            "hcp_npp_impact": "5–10%",
+            "consumer_npp_impact": "6–12%",
+            "salesforce_roi": "2.5–3.8x",
+            "hcp_pp_roi": "1.5–2.4x",
+            "access_roi": "1.0–1.5x",
+            "hcp_npp_roi": "3.2–5.0x",
+            "consumer_npp_roi": "4.0–6.5x",
         },
-        "Mature (3–7 Years)": {
-            "High Competition": {"promo_share": 20.0, "baseline_share": 60.0, "portfolio_roi": 2.90, "base_multiplier": 1.05},
-            "Medium Competition": {"promo_share": 16.0, "baseline_share": 64.0, "portfolio_roi": 3.60, "base_multiplier": 1.25},
-            "Low / Niche Competition": {"promo_share": 12.0, "baseline_share": 68.0, "portfolio_roi": 4.30, "base_multiplier": 1.45},
-        },
-        "Late Lifecycle (7+ Years)": {
-            "High Competition": {"promo_share": 12.0, "baseline_share": 68.0, "portfolio_roi": 2.00, "base_multiplier": 0.85},
-            "Medium Competition": {"promo_share": 10.0, "baseline_share": 70.0, "portfolio_roi": 2.50, "base_multiplier": 0.95},
-            "Low / Niche Competition": {"promo_share": 8.0, "baseline_share": 72.0, "portfolio_roi": 3.00, "base_multiplier": 1.10},
+        "High": {
+            "baseline_impact": "35–50%",
+            "salesforce_impact": "20–27%",
+            "hcp_pp_impact": "4–7%",
+            "access_impact": "10–17%",
+            "hcp_npp_impact": "4–9%",
+            "consumer_npp_impact": "5–10%",
+            "salesforce_roi": "2.0–3.3x",
+            "hcp_pp_roi": "1.2–2.1x",
+            "access_roi": "0.9–1.4x",
+            "hcp_npp_roi": "2.8–4.5x",
+            "consumer_npp_roi": "3.5–5.8x",
         },
     },
-    "Oncology / Recurring": {
-        "Launch (<1 Year)": {
-            "High Competition": {"promo_share": 40.0, "baseline_share": 40.0, "portfolio_roi": 2.50, "base_multiplier": 0.95},
-            "Medium Competition": {"promo_share": 34.0, "baseline_share": 46.0, "portfolio_roi": 3.10, "base_multiplier": 1.10},
-            "Low / Niche Competition": {"promo_share": 27.0, "baseline_share": 53.0, "portfolio_roi": 3.80, "base_multiplier": 1.35},
+    "5–8Y": {
+        "Low": {
+            "baseline_impact": "60–75%",
+            "salesforce_impact": "25–32%",
+            "hcp_pp_impact": "6–10%",
+            "access_impact": "16–23%",
+            "hcp_npp_impact": "8–13%",
+            "consumer_npp_impact": "9–15%",
+            "salesforce_roi": "3.5–4.8x",
+            "hcp_pp_roi": "2.0–3.0x",
+            "access_roi": "1.2–1.8x",
+            "hcp_npp_roi": "4.5–6.5x",
+            "consumer_npp_roi": "5.5–7.8x",
         },
-        "Growth (1–3 Years)": {
-            "High Competition": {"promo_share": 32.0, "baseline_share": 48.0, "portfolio_roi": 3.20, "base_multiplier": 1.15},
-            "Medium Competition": {"promo_share": 26.0, "baseline_share": 54.0, "portfolio_roi": 3.80, "base_multiplier": 1.30},
-            "Low / Niche Competition": {"promo_share": 20.0, "baseline_share": 60.0, "portfolio_roi": 4.60, "base_multiplier": 1.55},
+        "Medium": {
+            "baseline_impact": "55–70%",
+            "salesforce_impact": "22–29%",
+            "hcp_pp_impact": "5–9%",
+            "access_impact": "14–21%",
+            "hcp_npp_impact": "7–12%",
+            "consumer_npp_impact": "8–14%",
+            "salesforce_roi": "3.0–4.3x",
+            "hcp_pp_roi": "1.8–2.7x",
+            "access_roi": "1.0–1.6x",
+            "hcp_npp_roi": "4.0–5.8x",
+            "consumer_npp_roi": "5.0–7.2x",
         },
-        "Mature (3–7 Years)": {
-            "High Competition": {"promo_share": 22.0, "baseline_share": 58.0, "portfolio_roi": 2.60, "base_multiplier": 0.95},
-            "Medium Competition": {"promo_share": 18.0, "baseline_share": 62.0, "portfolio_roi": 3.20, "base_multiplier": 1.15},
-            "Low / Niche Competition": {"promo_share": 13.0, "baseline_share": 67.0, "portfolio_roi": 3.90, "base_multiplier": 1.35},
+        "High": {
+            "baseline_impact": "50–65%",
+            "salesforce_impact": "19–26%",
+            "hcp_pp_impact": "4–8%",
+            "access_impact": "12–19%",
+            "hcp_npp_impact": "6–10%",
+            "consumer_npp_impact": "7–12%",
+            "salesforce_roi": "2.5–3.8x",
+            "hcp_pp_roi": "1.5–2.4x",
+            "access_roi": "0.9–1.5x",
+            "hcp_npp_roi": "3.3–5.0x",
+            "consumer_npp_roi": "4.0–6.2x",
         },
-        "Late Lifecycle (7+ Years)": {
-            "High Competition": {"promo_share": 14.0, "baseline_share": 66.0, "portfolio_roi": 1.80, "base_multiplier": 0.80},
-            "Medium Competition": {"promo_share": 11.0, "baseline_share": 69.0, "portfolio_roi": 2.20, "base_multiplier": 0.90},
-            "Low / Niche Competition": {"promo_share": 9.0, "baseline_share": 71.0, "portfolio_roi": 2.70, "base_multiplier": 1.05},
+    },
+    "8Y+": {
+        "Low": {
+            "baseline_impact": "75–90%",
+            "salesforce_impact": "22–29%",
+            "hcp_pp_impact": "5–8%",
+            "access_impact": "14–20%",
+            "hcp_npp_impact": "6–11%",
+            "consumer_npp_impact": "7–12%",
+            "salesforce_roi": "3.2–4.5x",
+            "hcp_pp_roi": "1.8–2.6x",
+            "access_roi": "1.0–1.6x",
+            "hcp_npp_roi": "4.0–5.8x",
+            "consumer_npp_roi": "5.0–7.0x",
+        },
+        "Medium": {
+            "baseline_impact": "70–85%",
+            "salesforce_impact": "19–26%",
+            "hcp_pp_impact": "4–7%",
+            "access_impact": "12–18%",
+            "hcp_npp_impact": "5–9%",
+            "consumer_npp_impact": "6–11%",
+            "salesforce_roi": "2.8–4.0x",
+            "hcp_pp_roi": "1.5–2.3x",
+            "access_roi": "0.9–1.5x",
+            "hcp_npp_roi": "3.5–5.2x",
+            "consumer_npp_roi": "4.5–6.5x",
+        },
+        "High": {
+            "baseline_impact": "60–80%",
+            "salesforce_impact": "17–24%",
+            "hcp_pp_impact": "3–7%",
+            "access_impact": "10–17%",
+            "hcp_npp_impact": "4–8%",
+            "consumer_npp_impact": "5–10%",
+            "salesforce_roi": "2.3–3.5x",
+            "hcp_pp_roi": "1.2–2.0x",
+            "access_roi": "0.8–1.3x",
+            "hcp_npp_roi": "3.0–4.5x",
+            "consumer_npp_roi": "3.8–5.8x",
         },
     },
 }
@@ -110,71 +187,77 @@ async def results_summary(payload: dict):
 @router.post("/benchmarks")
 async def benchmark_comparison(payload: dict):
     try:
-        therapy = payload.get("therapy_type", "Chronic")
-        maturity = payload.get("maturity_stage", "Growth (1–3 Years)")
-        competition = payload.get("competition_level", "High Competition")
+        maturity = payload.get("maturity_stage", "2–5Y")
+        competition = payload.get("competition_level", "Medium")
         channels = payload.get("channels", [])
 
-        # Query benchmark matrix
-        therapy_data = BENCHMARK_DATABASE.get(therapy, BENCHMARK_DATABASE["Chronic"])
-        maturity_data = therapy_data.get(maturity, therapy_data["Growth (1–3 Years)"])
-        benchmark_spec = maturity_data.get(competition, maturity_data["High Competition"])
+        # Query exact benchmark table
+        maturity_key = maturity if maturity in NEW_BENCHMARK_MATRIX else "2–5Y"
+        mat_dict = NEW_BENCHMARK_MATRIX[maturity_key]
+        comp_key = competition if competition in mat_dict else "Medium"
+        bench_row = mat_dict[comp_key]
 
-        bench_promo_pct = benchmark_spec["promo_share"]
-        bench_base_pct = benchmark_spec["baseline_share"]
-        bench_roi = benchmark_spec["portfolio_roi"]
-        multiplier = benchmark_spec["base_multiplier"]
+        # 1. Overall Impact % Benchmark Breakdown
+        impact_benchmarks = [
+            {"category": "Baseline Impact %", "benchmark": bench_row["baseline_impact"]},
+            {"category": "Salesforce Impact %", "benchmark": bench_row["salesforce_impact"]},
+            {"category": "HCP PP (Personal Promo) Impact %", "benchmark": bench_row["hcp_pp_impact"]},
+            {"category": "Access Impact %", "benchmark": bench_row["access_impact"]},
+            {"category": "HCP NPP (Non-Personal Promo) Impact %", "benchmark": bench_row["hcp_npp_impact"]},
+            {"category": "Consumer NPP / DTC Impact %", "benchmark": bench_row["consumer_npp_impact"]},
+        ]
 
-        # Channel specific benchmarks
+        # 2. Channel-Level ROI Comparison
         channel_benchmarks = []
         for ch in channels:
             ch_name = ch.get("channel", "")
             user_roi = float(ch.get("roi", 2.0))
-            
-            # Archetype baseline heuristic
             l = ch_name.lower()
-            if "call" in l or "rep" in l:
-                base_ref = 2.40
-            elif "samp" in l:
-                base_ref = 1.60
-            elif "rte" in l or "email" in l:
-                base_ref = 3.20
-            elif "speaker" in l:
-                base_ref = 2.80
-            elif "tv" in l or "dtc" in l:
-                base_ref = 1.80
-            elif "dig" in l or "search" in l:
-                base_ref = 2.50
+
+            if "call" in l or "rep" in l or "detail" in l:
+                bench_roi_str = bench_row["salesforce_roi"]
+                category_label = "Salesforce (Rep Detailing)"
+            elif "samp" in l or "speaker" in l or "f2f" in l or "event" in l:
+                bench_roi_str = bench_row["hcp_pp_roi"]
+                category_label = "HCP Personal Promo (PP)"
+            elif "access" in l or "copay" in l or "voucher" in l:
+                bench_roi_str = bench_row["access_roi"]
+                category_label = "Access / Co-Pay"
+            elif "rte" in l or "email" in l or "portal" in l or "web" in l or "npp" in l:
+                bench_roi_str = bench_row["hcp_npp_roi"]
+                category_label = "HCP Non-Personal Promo (NPP)"
             else:
-                base_ref = 2.10
+                bench_roi_str = bench_row["consumer_npp_roi"]
+                category_label = "Consumer NPP / DTC"
 
-            bench_ch_roi = round(base_ref * multiplier, 2)
-            delta = user_roi - bench_ch_roi
+            # Parse benchmark bounds for status assessment
+            try:
+                parts = bench_roi_str.replace("x", "").split("–")
+                min_roi = float(parts[0])
+                max_roi = float(parts[1]) if len(parts) > 1 else min_roi
+            except Exception:
+                min_roi, max_roi = 1.0, 3.0
 
-            if delta >= 0.2:
-                status = "🟢 Above Benchmark"
-            elif delta >= -0.2:
+            if user_roi >= min_roi:
+                status = "🟢 Within/Above Benchmark"
+            elif user_roi >= (min_roi * 0.75):
                 status = "🟡 Near Benchmark"
             else:
                 status = "🔴 Below Benchmark"
 
             channel_benchmarks.append({
                 "channel": ch_name,
+                "category": category_label,
                 "yours": f"{user_roi:.2f}x",
-                "benchmark": f"{bench_ch_roi:.2f}x",
+                "benchmark": bench_roi_str,
                 "status": status,
             })
 
-        overall_comparison = [
-            {"metric": "Promotional Lift Share (%)", "yours": "Calculated from Model", "benchmark": f"{bench_promo_pct:.1f}%", "status": "Benchmarked"},
-            {"metric": "Baseline Organic Share (%)", "yours": "Calculated from Model", "benchmark": f"{bench_base_pct:.1f}%", "status": "Benchmarked"},
-            {"metric": "Average Portfolio ROI", "yours": "Calculated from Model", "benchmark": f"{bench_roi:.2f}x", "status": "Benchmarked"},
-        ]
-
         return {
-            "benchmark_group": f"{therapy} • {maturity} • {competition}",
-            "overall_comparison": overall_comparison,
+            "benchmark_group": f"Maturity: {maturity_key} • Competition: {comp_key}",
+            "impact_benchmarks": impact_benchmarks,
             "channel_benchmarks": channel_benchmarks,
+            "raw_benchmark_row": bench_row,
         }
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Benchmark query failed: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Benchmark calculation failed: {str(e)}")

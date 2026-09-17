@@ -14,6 +14,14 @@ function classifyHighLevelTier(variableName) {
   if (l.includes("const") || l.includes("baseline") || l.includes("intercept") || l.includes("carryover")) {
     return "Baseline";
   }
+
+  if (promoTiers[raw]) {
+    const t = promoTiers[raw];
+    if (t === "Personal Promotion") return "Personal Promotion";
+    if (t === "Non Personal Promotion" || t === "NPP Promotion") return "NPP Promotion";
+    if (t === "DTC Promotion") return "DTC Promotion";
+  }
+
   if (l.includes("call") || l.includes("det") || l.includes("sample") || l.includes("speaker") || l.includes("f2f") || l.includes("rep")) {
     return "Personal Promotion";
   }
@@ -45,10 +53,9 @@ export default function ModelResults() {
   const [responseCurvesData, setResponseCurvesData] = useState(() => state.responseCurves || {});
   const [activeRcChannel, setActiveRcChannel] = useState("");
 
-  // Benchmark Filters State
-  const [therapyType, setTherapyType] = useState("Chronic");
-  const [maturityStage, setMaturityStage] = useState("Growth (1–3 Years)");
-  const [competitionLevel, setCompetitionLevel] = useState("High Competition");
+  // Benchmark Filters State (Exact Matrix Dimensions)
+  const [maturityStage, setMaturityStage] = useState("2–5Y");
+  const [competitionLevel, setCompetitionLevel] = useState("Medium");
   const [benchmarkResult, setBenchmarkResult] = useState(null);
   const [benchLoading, setBenchLoading] = useState(false);
 
@@ -190,7 +197,6 @@ export default function ModelResults() {
         setResponseCurvesData(curves);
         setField("responseCurves", curves);
 
-        // Build mergedRc dictionary for Module 8 Optimizer Engine
         const builtMergedRc = {};
         Object.entries(curves).forEach(([ch, rows]) => {
           builtMergedRc[`${ch}_spend`] = rows.map((r) => r.spend);
@@ -246,11 +252,10 @@ export default function ModelResults() {
     };
   }, [activeCurvePoints, activeRcChannel, channelSpendMap]);
 
-  // Query Benchmark Store when filter combination changes
+  // Query Benchmark Store (Exact Matrix Implementation)
   useEffect(() => {
     setBenchLoading(true);
     fetchBenchmarkComparison({
-      therapy_type: therapyType,
       maturity_stage: maturityStage,
       competition_level: competitionLevel,
       channels: channelPerformanceData.map((c) => ({ channel: c.channel, roi: c.roi })),
@@ -258,28 +263,9 @@ export default function ModelResults() {
       .then((res) => {
         setBenchmarkResult(res);
       })
-      .catch(() => {
-        setBenchmarkResult({
-          benchmark_group: `${therapyType} • ${maturityStage} • ${competitionLevel}`,
-          overall_comparison: [
-            { metric: "Promotional Lift (%)", yours: `${(100 - (executiveImpactBreakdown.find((x) => x.category.includes("Baseline"))?.sharePct || 40)).toFixed(1)}%`, benchmark: "34.5%", status: "🟢 Above Benchmark" },
-            { metric: "Baseline Organic Share (%)", yours: `${(executiveImpactBreakdown.find((x) => x.category.includes("Baseline"))?.sharePct || 40).toFixed(1)}%`, benchmark: "45.0%", status: "🟡 Near Benchmark" },
-            { metric: "Average Portfolio ROI", yours: `${(channelPerformanceData.reduce((s, c) => s + c.roi, 0) / (channelPerformanceData.length || 1)).toFixed(2)}x`, benchmark: "2.10x", status: "🟢 Above Benchmark" },
-          ],
-          channel_benchmarks: channelPerformanceData.map((c) => {
-            const benchVal = Number((c.roi * 0.85 + 0.3).toFixed(2));
-            const delta = c.roi - benchVal;
-            return {
-              channel: c.channel,
-              yours: `${c.roi.toFixed(2)}x`,
-              benchmark: `${benchVal.toFixed(2)}x`,
-              status: delta >= 0.2 ? "🟢 Above Benchmark" : delta >= -0.2 ? "🟡 Near Benchmark" : "🔴 Below Benchmark",
-            };
-          }),
-        });
-      })
+      .catch(() => {})
       .finally(() => setBenchLoading(false));
-  }, [therapyType, maturityStage, competitionLevel, channelPerformanceData, executiveImpactBreakdown]);
+  }, [maturityStage, competitionLevel, channelPerformanceData]);
 
   if (!outputs.length) {
     return (
@@ -621,34 +607,28 @@ export default function ModelResults() {
         )}
       </Card>
 
-      {/* ─── 7. Benchmark Comparison Panel ─────────────────────────────────── */}
-      <Card title="7. Industry Benchmark Comparisons">
+      {/* ─── 7. Benchmark Comparison Panel (New Matrix Format) ─────────────── */}
+      <Card title="7. Industry Benchmark Comparisons (Maturity Stage × Competition Level)">
         <p className="text-xs text-slate-500 mb-4">
-          Compare your model's promotional lift and tactic ROIs against historical pharma &amp; commercial benchmarks segmented by therapy type, lifecycle maturity, and competitive dynamics.
+          Compare your model results against the standard pharma commercial benchmark matrix segmented by lifecycle stage and competition level.
         </p>
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
-          <Select
-            label="Therapy Type"
-            value={therapyType}
-            onChange={setTherapyType}
-            options={["Acute", "Chronic", "Rare / Specialty", "Oncology / Recurring"]}
-          />
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6 max-w-xl">
           <Select
             label="Maturity Stage"
             value={maturityStage}
             onChange={setMaturityStage}
-            options={["Launch (<1 Year)", "Growth (1–3 Years)", "Mature (3–7 Years)", "Late Lifecycle (7+ Years)"]}
+            options={["0–2Y", "2–5Y", "5–8Y", "8Y+"]}
           />
           <Select
-            label="Marketing Dynamic"
+            label="Competition Level"
             value={competitionLevel}
             onChange={setCompetitionLevel}
-            options={["High Competition", "Medium Competition", "Low / Niche Competition"]}
+            options={["Low", "Medium", "High"]}
           />
         </div>
 
-        {benchLoading && <Spinner label="Loading industry benchmarks..." />}
+        {benchLoading && <Spinner label="Querying benchmark matrix..." />}
 
         {benchmarkResult && !benchLoading && (
           <div className="space-y-6">
@@ -656,18 +636,18 @@ export default function ModelResults() {
               Benchmark Cohort: {benchmarkResult.benchmark_group}
             </div>
 
-            {/* Overall Comparison */}
+            {/* Impact % Breakdown Comparison */}
             <div>
               <span className="text-xs font-bold text-slate-700 block mb-2 uppercase tracking-wider">
-                Overall Metric Comparisons:
+                1. Promotional Impact % Share Benchmarks:
               </span>
-              <DataTable data={benchmarkResult.overall_comparison} />
+              <DataTable data={benchmarkResult.impact_benchmarks} />
             </div>
 
-            {/* Channel Comparison Table */}
+            {/* Channel-Level ROI Comparison Table */}
             <div>
               <span className="text-xs font-bold text-slate-700 block mb-2 uppercase tracking-wider">
-                Channel-Level ROI vs. Industry Peer Benchmarks:
+                2. Channel-Level ROI vs. Industry Peer Benchmarks:
               </span>
               <DataTable data={benchmarkResult.channel_benchmarks} />
             </div>
@@ -686,7 +666,7 @@ export default function ModelResults() {
 
         <details className="bg-slate-50 rounded-xl p-4 border border-slate-200 cursor-pointer">
           <summary className="text-xs font-bold text-slate-700 uppercase tracking-wider">
-            View Full Statistical OLS / Ridge Summary Output
+            View Full Statistical Summary Output
           </summary>
           <pre className="text-xs text-slate-600 bg-white rounded-lg p-4 mt-3 overflow-auto whitespace-pre-wrap font-mono leading-relaxed max-h-80 border border-slate-200">
             {selectedModel?.summary || "No statistical text summary available for this model iteration."}

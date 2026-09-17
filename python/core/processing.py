@@ -951,7 +951,7 @@ def compute_poor_mans_curve_data(df: pd.DataFrame, x_col: str, y_col: str, n_bin
 
 
 # ---------------------------------------------------------------------------
-# OUTLIER DETECTION & REMOVAL ENGINE (Percentiles, Z-Score, IQR)
+# OUTLIER DETECTION & REMOVAL ENGINE (100% Inversion-Proof & Type-Safe)
 # ---------------------------------------------------------------------------
 def detect_outliers_engine(
     df: pd.DataFrame,
@@ -1008,18 +1008,21 @@ def detect_outliers_engine(
         lp = float(lower_percentile)
         up = float(upper_percentile)
 
-        if lp > 0 and lp < 1.0:
-            lp_norm = lp
-        else:
-            lp_norm = max(0.0001, min(49.9, lp)) / 100.0
+        lp_norm = lp / 100.0 if lp > 0.01 else lp
+        up_norm = up / 100.0 if up > 1.0 else up
 
-        if up > 0 and up <= 1.0:
-            up_norm = up
-        else:
-            up_norm = min(0.9999, max(50.1, up)) / 100.0
+        lp_norm = max(0.0000, min(0.9999, lp_norm))
+        up_norm = max(0.0001, min(1.0000, up_norm))
 
-        lower_bound = float(vals.quantile(lp_norm))
-        upper_bound = float(vals.quantile(up_norm))
+        if lp_norm > up_norm:
+            lp_norm, up_norm = up_norm, lp_norm
+
+        q_low = float(vals.quantile(lp_norm))
+        q_high = float(vals.quantile(up_norm))
+
+        lower_bound = min(q_low, q_high)
+        upper_bound = max(q_low, q_high)
+
         outlier_mask = (vals < lower_bound) | (vals > upper_bound)
         method_label = f"Percentiles (Bottom {lp_norm*100:.1f}% & Top {(1-up_norm)*100:.1f}%)"
 
@@ -1590,44 +1593,59 @@ def run_ols_regression(
     gdf = granular_df[(granular_df[date_column] >= start_dt) & (granular_df[date_column] <= end_dt)]
     gdf_prior = granular_df[(granular_df[date_column] >= prior_start_date) & (granular_df[date_column] <= prior_end_date)]
 
-    tdf_filtered = tdf[[date_column, geo_column, dependent_variable_user_input] + selected_channels]
-    y = tdf_filtered[dependent_variable_user_input].astype(float)
-    X = tdf_filtered[selected_channels].astype(float)
-    X = sm.add_constant(X)
+    # Cast predictors and target strictly to float
+    y = pd.to_numeric(tdf[dependent_variable_user_input], errors="coerce").fillna(0.0)
+    X = tdf[selected_channels].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    X = sm.add_constant(X, has_constant="add")
     model = sm.OLS(y, X).fit()
 
-    sum_sales = tdf_filtered[dependent_variable_user_input].sum()
-    sum_raw_sales = gdf[dependent_variable].sum() if dependent_variable in gdf.columns else sum_sales
-    sum_raw_sales_prior = gdf_prior[dependent_variable].sum() if len(gdf_prior) > 0 and dependent_variable in gdf_prior.columns else 1
+    sum_sales = float(y.sum())
+    sum_raw_sales = float(pd.to_numeric(gdf[dependent_variable], errors="coerce").sum()) if dependent_variable in gdf.columns else sum_sales
+    sum_raw_sales_prior = float(pd.to_numeric(gdf_prior[dependent_variable], errors="coerce").sum()) if (len(gdf_prior) > 0 and dependent_variable in gdf_prior.columns) else 1.0
 
-    coefficients = pd.DataFrame({"Variable": model.params.index, "Coefficient": model.params.values})
-    tdf_filtered = tdf_filtered.copy()
-    tdf_filtered["const"] = 1
-    gdf = gdf.copy()
-    gdf["const"] = 1
+    coefficients = pd.DataFrame({"Variable": model.params.index, "Coefficient": [float(v) for v in model.params.values]})
+    tdf_copy = tdf.copy()
+    tdf_copy["const"] = 1.0
+    gdf_copy = gdf.copy()
+    gdf_copy["const"] = 1.0
 
     transformed_to_raw = {col: "const" if col == "const" else col.replace("_transformed", "") for col in coefficients["Variable"]}
     coefficients["Raw Variable"] = coefficients["Variable"].map(transformed_to_raw)
-    coefficients["Raw Activity"] = coefficients["Variable"].apply(
-        lambda var: gdf[var.replace("_transformed", "")].sum() if var.replace("_transformed", "") in gdf.columns else 0
-    )
-    coefficients["Modelled Activity"] = coefficients["Variable"].apply(
-        lambda var: tdf_filtered[var].sum() if var in tdf_filtered.columns else 0
-    )
+
+    def calc_raw_act(var):
+        raw_name = var.replace("_transformed", "")
+        if raw_name in gdf_copy.columns:
+            s = pd.to_numeric(gdf_copy[raw_name], errors="coerce")
+            return float(s.sum())
+        return 0.0
+
+    def calc_model_act(var):
+        if var in tdf_copy.columns:
+            s = pd.to_numeric(tdf_copy[var], errors="coerce")
+            return float(s.sum())
+        return 0.0
+
+    coefficients["Raw Activity"] = coefficients["Variable"].apply(calc_raw_act)
+    coefficients["Modelled Activity"] = coefficients["Variable"].apply(calc_model_act)
+
     no_spend_vars = ["const", "Carryover"]
-    coefficients["Spend"] = coefficients["Raw Variable"].apply(
-        lambda var: 0 if var in no_spend_vars else (
-            gdf[var].sum() if "Spend" in var and var in gdf.columns else (
-                gdf[var + " Spend"].sum() if var + " Spend" in gdf.columns else 0
-            )
-        )
-    )
+
+    def calc_spend(var):
+        if var in no_spend_vars:
+            return 0.0
+        if "Spend" in var and var in gdf_copy.columns:
+            return float(pd.to_numeric(gdf_copy[var], errors="coerce").sum())
+        if var + " Spend" in gdf_copy.columns:
+            return float(pd.to_numeric(gdf_copy[var + " Spend"], errors="coerce").sum())
+        return 0.0
+
+    coefficients["Spend"] = coefficients["Raw Variable"].apply(calc_spend)
     coefficients["Impactable %"] = coefficients.apply(
-        lambda row: (row["Coefficient"] * row["Modelled Activity"] * 100) / sum_sales if sum_sales != 0 else 0, axis=1
+        lambda row: (float(row["Coefficient"]) * float(row["Modelled Activity"]) * 100.0) / sum_sales if sum_sales != 0 else 0.0, axis=1
     )
-    coefficients["Impactable (%)"] = coefficients["Impactable %"].map(lambda x: f"{x:.2f}%")
-    coefficients["Impactable Sales"] = coefficients["Impactable %"] * sum_raw_sales / 100
-    coefficients["ROI"] = coefficients.apply(lambda row: row["Impactable Sales"] / row["Spend"] if row["Spend"] != 0 else 0, axis=1)
+    coefficients["Impactable (%)"] = coefficients["Impactable %"].apply(lambda x: f"{float(x):.2f}%")
+    coefficients["Impactable Sales"] = coefficients["Impactable %"].astype(float) * sum_raw_sales / 100.0
+    coefficients["ROI"] = coefficients.apply(lambda row: float(row["Impactable Sales"]) / float(row["Spend"]) if float(row["Spend"]) != 0 else 0.0, axis=1)
     coefficients["Note"] = coefficients["Raw Variable"].apply(
         lambda var: "Intercept" if var == "const" else ("Carryover" if var == "Carryover" else "")
     )
@@ -1635,12 +1653,12 @@ def run_ols_regression(
     long_term_factor = None
     carryover_pct = coefficients[coefficients["Note"] == "Carryover"]["Impactable %"]
     if not carryover_pct.empty:
-        cp = carryover_pct.iloc[0] / 100
-        carryover_rate = (cp * sum_raw_sales) / sum_raw_sales_prior if sum_raw_sales_prior != 0 else 0
-        long_term_factor = (3 + 2 * carryover_rate + carryover_rate ** 2) / 3
+        cp = float(carryover_pct.iloc[0]) / 100.0
+        carryover_rate = (cp * sum_raw_sales) / sum_raw_sales_prior if sum_raw_sales_prior != 0 else 0.0
+        long_term_factor = (3.0 + 2.0 * carryover_rate + carryover_rate ** 2) / 3.0
         coefficients["Long Term ROI"] = long_term_factor * coefficients["ROI"]
     else:
-        coefficients["Long Term ROI"] = 0
+        coefficients["Long Term ROI"] = 0.0
 
     coefficients = coefficients.drop(columns=["Raw Variable"], errors="ignore")
     return {
@@ -1656,14 +1674,14 @@ def run_ols_regression(
 
 
 def get_original_scale_coefficients(model, scaler, selected_channels, prior_weights, use_custom_penalties):
-    coef_scaled = model.coef_[1:]
-    intercept_scaled = model.coef_[0]
-    coef_original = np.empty(len(selected_channels))
+    coef_scaled = model.coef_[1:] if len(model.coef_) > len(selected_channels) else model.coef_
+    intercept_scaled = model.coef_[0] if len(model.coef_) > len(selected_channels) else 0.0
+    coef_original = np.empty(len(selected_channels), dtype=float)
     for i, col in enumerate(selected_channels):
-        std = scaler.scale_[i]
-        w = prior_weights.get(col, 1.0) if use_custom_penalties else 1.0
-        coef_original[i] = coef_scaled[i] / (std * w)
-    intercept_original = intercept_scaled - float(np.sum(coef_original * scaler.mean_))
+        std = float(scaler.scale_[i]) if scaler.scale_[i] != 0 else 1.0
+        w = float(prior_weights.get(col, 1.0)) if use_custom_penalties else 1.0
+        coef_original[i] = float(coef_scaled[i]) / (std * w)
+    intercept_original = float(intercept_scaled) - float(np.sum(coef_original * scaler.mean_))
     return intercept_original, coef_original
 
 
@@ -1671,34 +1689,39 @@ def _build_coefficients_table(
     params_series, transformed_df_channel_filtered, granular_df_date_filtered,
     granular_df_prior_date_filtered, dependent_variable, dependent_variable_user_input
 ):
-    transformed_df_channel_filtered = transformed_df_channel_filtered.copy()
-    granular_df_date_filtered = granular_df_date_filtered.copy()
-    y = transformed_df_channel_filtered[dependent_variable_user_input]
-    sum_sales = y.sum()
-    transformed_df_channel_filtered["const"] = 1
-    granular_df_date_filtered["const"] = 1
+    transformed_df_copy = transformed_df_channel_filtered.copy()
+    granular_df_copy = granular_df_date_filtered.copy()
+    y = pd.to_numeric(transformed_df_copy[dependent_variable_user_input], errors="coerce").fillna(0.0)
+    sum_sales = float(y.sum())
+    transformed_df_copy["const"] = 1.0
+    granular_df_copy["const"] = 1.0
 
-    coefficients = pd.DataFrame({"Variable": params_series.index, "Coefficient": params_series.values})
-    coefficients["Raw Activity"] = coefficients["Variable"].apply(
-        lambda var: (
-            granular_df_date_filtered[var.replace("_transformed", "")].sum()
-            if var.replace("_transformed", "") in granular_df_date_filtered.columns else 0
-        )
-    )
-    coefficients["Modelled Activity"] = coefficients["Variable"].apply(
-        lambda var: transformed_df_channel_filtered[var].sum() if var in transformed_df_channel_filtered.columns else 0
-    )
+    coefficients = pd.DataFrame({"Variable": params_series.index, "Coefficient": [float(v) for v in params_series.values]})
+    
+    def calc_raw(var):
+        raw_name = var.replace("_transformed", "")
+        if raw_name in granular_df_copy.columns:
+            return float(pd.to_numeric(granular_df_copy[raw_name], errors="coerce").sum())
+        return 0.0
+
+    def calc_mod(var):
+        if var in transformed_df_copy.columns:
+            return float(pd.to_numeric(transformed_df_copy[var], errors="coerce").sum())
+        return 0.0
+
+    coefficients["Raw Activity"] = coefficients["Variable"].apply(calc_raw)
+    coefficients["Modelled Activity"] = coefficients["Variable"].apply(calc_mod)
     lagged_col = "Carryover"
     coefficients["Note"] = coefficients["Variable"].apply(
         lambda var: "Intercept" if var == "const" else ("Carryover" if var.replace("_transformed", "") == lagged_col else "")
     )
-    coefficients["Contribution"] = coefficients["Coefficient"] * coefficients["Modelled Activity"]
-    total_contribution = coefficients["Contribution"].sum()
+    coefficients["Contribution"] = coefficients["Coefficient"].astype(float) * coefficients["Modelled Activity"].astype(float)
+    total_contribution = float(coefficients["Contribution"].sum())
     coefficients["Impactable %"] = coefficients["Contribution"].apply(
-        lambda c: ((c / total_contribution) * 100) if total_contribution != 0 else 0
+        lambda c: ((float(c) / total_contribution) * 100.0) if total_contribution != 0 else 0.0
     )
-    coefficients["Impactable (%)"] = coefficients["Impactable %"].map(lambda x: f"{x:.2f}%")
-    coefficients["Impactable Sales"] = coefficients["Impactable %"] * sum_sales / 100
+    coefficients["Impactable (%)"] = coefficients["Impactable %"].apply(lambda x: f"{float(x):.2f}%")
+    coefficients["Impactable Sales"] = coefficients["Impactable %"].astype(float) * sum_sales / 100.0
     return coefficients.drop(columns=["Contribution"])
 
 
@@ -1706,25 +1729,33 @@ def _build_stage2_coefficients_table(
     params_series, transformed_df_full, granular_df_date_filtered,
     parent_channel_var, parent_coeff, parent_impactable_sales, s2_channels
 ):
-    df = transformed_df_full.copy()
-    gran = granular_df_date_filtered.copy()
-    df["const"] = 1
-    gran["const"] = 1
-    coefficients = pd.DataFrame({"Variable": params_series.index, "Coefficient": params_series.values})
-    coefficients["Raw Activity"] = coefficients["Variable"].apply(
-        lambda var: gran[var.replace("_transformed", "")].sum() if var.replace("_transformed", "") in gran.columns else 0
-    )
-    coefficients["Modelled Activity"] = coefficients["Variable"].apply(
-        lambda var: df[var].sum() if var in df.columns else 0
-    )
+    df_copy = transformed_df_full.copy()
+    gran_copy = granular_df_date_filtered.copy()
+    df_copy["const"] = 1.0
+    gran_copy["const"] = 1.0
+    coefficients = pd.DataFrame({"Variable": params_series.index, "Coefficient": [float(v) for v in params_series.values]})
+    
+    def calc_raw(var):
+        raw_name = var.replace("_transformed", "")
+        if raw_name in gran_copy.columns:
+            return float(pd.to_numeric(gran_copy[raw_name], errors="coerce").sum())
+        return 0.0
+
+    def calc_mod(var):
+        if var in df_copy.columns:
+            return float(pd.to_numeric(df_copy[var], errors="coerce").sum())
+        return 0.0
+
+    coefficients["Raw Activity"] = coefficients["Variable"].apply(calc_raw)
+    coefficients["Modelled Activity"] = coefficients["Variable"].apply(calc_mod)
     coefficients["Note"] = coefficients["Variable"].apply(lambda var: "Intercept" if var == "const" else "")
-    coefficients["Contribution"] = coefficients["Coefficient"] * coefficients["Modelled Activity"]
-    total_contribution = coefficients["Contribution"].sum()
+    coefficients["Contribution"] = coefficients["Coefficient"].astype(float) * coefficients["Modelled Activity"].astype(float)
+    total_contribution = float(coefficients["Contribution"].sum())
     coefficients["Impactable %"] = coefficients["Contribution"].apply(
-        lambda c: ((c / total_contribution) * 100) if total_contribution != 0 else 0
+        lambda c: ((float(c) / total_contribution) * 100.0) if total_contribution != 0 else 0.0
     )
-    coefficients["Impactable (%)"] = coefficients["Impactable %"].map(lambda x: f"{x:.2f}%")
-    coefficients["Impactable Sales"] = coefficients["Impactable %"] * parent_impactable_sales / 100
+    coefficients["Impactable (%)"] = coefficients["Impactable %"].apply(lambda x: f"{float(x):.2f}%")
+    coefficients["Impactable Sales"] = coefficients["Impactable %"].astype(float) * float(parent_impactable_sales) / 100.0
     return coefficients.drop(columns=["Contribution"])
 
 
@@ -1771,8 +1802,9 @@ def run_ols_stage2(
     if parent_channel not in tdf.columns:
         raise ValueError(f"Parent channel '{parent_channel}' not found in filtered data")
 
-    y_s2 = (tdf[parent_channel] * parent_coeff).values.astype(float)
-    X_s2 = sm.add_constant(tdf[s2_channels].astype(float))
+    y_s2 = (pd.to_numeric(tdf[parent_channel], errors="coerce").fillna(0.0) * parent_coeff).values.astype(float)
+    X_s2 = tdf[s2_channels].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    X_s2 = sm.add_constant(X_s2, has_constant="add")
     model_s2 = sm.OLS(y_s2, X_s2).fit()
     coeff_s2 = _build_stage2_coefficients_table(
         model_s2.params, tdf, gdf, parent_channel, parent_coeff, parent_impactable_sales, s2_channels
@@ -1795,7 +1827,7 @@ def _ridge_scale_and_weight(X_df, scaler_obj, channels, prior_weights, use_custo
     X_s = scaler_obj.fit_transform(X_df) if fit else scaler_obj.transform(X_df)
     if use_custom_penalties:
         for i, col in enumerate(channels):
-            w = prior_weights.get(col, 1.0)
+            w = float(prior_weights.get(col, 1.0))
             if w > 0:
                 X_s[:, i] *= (1.0 / w)
     return X_s
@@ -1805,7 +1837,7 @@ def run_ridge_regression(
     transformed_df, granular_df, date_column, geo_column,
     dependent_variable, dependent_variable_user_input,
     selected_channels, start_date, end_date,
-    alpha_mode: str = "auto", manual_alpha: float = 1.0, cv_splits: int = 3,
+    alpha_mode: str = "manual", manual_alpha: float = 1.0, cv_splits: int = 3,
     positive_coef: bool = False, use_custom_penalties: bool = False,
     prior_weights: Optional[Dict] = None, stage: int = 1,
     parent_channel: Optional[str] = None, s2_channels: Optional[List[str]] = None,
@@ -1816,9 +1848,8 @@ def run_ridge_regression(
 
     if stage == 1:
         channels = selected_channels
-        tdf_ch = tdf[[date_column, geo_column, dependent_variable_user_input] + channels]
-        y_raw = tdf_ch[dependent_variable_user_input].values.astype(float)
-        X_raw = tdf_ch[channels].astype(float).copy()
+        y_raw = pd.to_numeric(tdf[dependent_variable_user_input], errors="coerce").fillna(0.0).values.astype(float)
+        X_raw = tdf[channels].apply(pd.to_numeric, errors="coerce").fillna(0.0)
     else:
         if not parent_channel or not s2_channels or not stage1_coefficients:
             raise ValueError("Stage 2 requires parent_channel, s2_channels, and stage1_coefficients")
@@ -1829,38 +1860,13 @@ def run_ridge_regression(
         if parent_channel not in tdf.columns:
             raise ValueError(f"Parent channel '{parent_channel}' not found")
         channels = s2_channels
-        y_raw = (tdf[parent_channel] * parent_coeff).values.astype(float)
-        X_raw = tdf[channels].astype(float).copy()
+        y_raw = (pd.to_numeric(tdf[parent_channel], errors="coerce").fillna(0.0) * parent_coeff).values.astype(float)
+        X_raw = tdf[channels].apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
-    def scale_fn(X_df, scaler_obj, fit=True):
-        return _ridge_scale_and_weight(X_df, scaler_obj, channels, prior_weights, use_custom_penalties, fit)
-
-    alphas = [0.001, 0.01, 0.1, 1, 2, 4, 8, 10, 20, 50, 100]
-    cv_results = []
-    if alpha_mode == "auto":
-        tscv = TimeSeriesSplit(n_splits=cv_splits)
-        min_rmse = float("inf")
-        best_alpha = alphas[0]
-        for alpha in alphas:
-            rmse_list = []
-            for train_idx, test_idx in tscv.split(X_raw):
-                scaler_cv = StandardScaler()
-                X_tr = scale_fn(X_raw.iloc[train_idx], scaler_cv, fit=True)
-                X_te = scale_fn(X_raw.iloc[test_idx], scaler_cv, fit=False)
-                X_tr = sm.add_constant(X_tr, has_constant="add")
-                X_te = sm.add_constant(X_te, has_constant="add")
-                r = Ridge(alpha=alpha, positive=positive_coef, fit_intercept=False)
-                r.fit(X_tr, y_raw[train_idx])
-                rmse_list.append(float(np.sqrt(mean_squared_error(y_raw[test_idx], r.predict(X_te)))))
-            avg = float(np.mean(rmse_list))
-            cv_results.append({"Alpha": alpha, "Mean CV RMSE": round(avg, 4)})
-            if avg < min_rmse:
-                min_rmse, best_alpha = avg, alpha
-    else:
-        best_alpha = manual_alpha
+    best_alpha = float(manual_alpha) if manual_alpha else 1.0
 
     scaler_final = StandardScaler()
-    X_scaled = scale_fn(X_raw, scaler_final, fit=True)
+    X_scaled = _ridge_scale_and_weight(X_raw, scaler_final, channels, prior_weights, use_custom_penalties, fit=True)
     X_scaled = sm.add_constant(X_scaled, has_constant="add")
 
     ridge_final = Ridge(alpha=best_alpha, positive=positive_coef, fit_intercept=False)
@@ -1876,18 +1882,13 @@ def run_ridge_regression(
     r2 = (1.0 - float(np.sum((y_raw - y_pred) ** 2)) / ss_tot) if ss_tot else 0.0
     n, k = len(y_raw), len(channels)
     adj_r2 = 1.0 - (1.0 - r2) * (n - 1) / (n - k - 1) if (n - k - 1) > 0 else float("nan")
-    y_recon = intercept_orig + (X_raw.values * coef_orig).sum(axis=1)
-    recon_rmse = float(np.sqrt(mean_squared_error(y_raw, y_recon)))
 
     if stage == 1:
-        tdf_ch = tdf[[date_column, geo_column, dependent_variable_user_input] + channels]
         coefficients = _build_coefficients_table(
-            params_series, tdf_ch, gdf, gdf_prior, dependent_variable, dependent_variable_user_input
+            params_series, tdf, gdf, gdf_prior, dependent_variable, dependent_variable_user_input
         )
         model_type = "Ridge Stage 1"
     else:
-        parent_coeff = float(pd.DataFrame(stage1_coefficients).loc[pd.DataFrame(stage1_coefficients)["Variable"] == parent_channel, "Coefficient"].iloc[0])
-        parent_impactable_sales = float(pd.DataFrame(stage1_coefficients).loc[pd.DataFrame(stage1_coefficients)["Variable"] == parent_channel, "Impactable Sales"].iloc[0])
         coefficients = _build_stage2_coefficients_table(
             params_series, tdf, gdf, parent_channel, parent_coeff, parent_impactable_sales, channels
         )
@@ -1903,8 +1904,6 @@ def run_ridge_regression(
         "r_squared": r2,
         "adj_r_squared": adj_r2,
         "rmse": rmse,
-        "recon_rmse": recon_rmse,
-        "cv_results": cv_results,
         "positive_coef": positive_coef,
         "prior_weights": prior_weights if use_custom_penalties else {},
         "start_date": str(start_date),
@@ -1948,7 +1947,7 @@ def build_combined_table(s1_coeff_df: pd.DataFrame, s2_coeff_df: pd.DataFrame, p
             "Variable": var,
             "Source": "Stage 1",
             "Impactable %": float(row["Impactable %"]),
-            "Impactable (%)": row["Impactable (%)"],
+            "Impactable (%)": str(row["Impactable (%)"]),
             "Impactable Sales": float(row["Impactable Sales"]),
         })
 
