@@ -202,7 +202,7 @@ function ModelOutput() {
         (data.iterations || []).forEach((it) => { byId[it.id] = it; });
         setResultsSummaryById(byId);
       } catch (err) {
-        setSummaryError(problemMessage(err, 'Could not load formatted diagnostics — showing stored values.'));
+        setSummaryError(problemMessage(err, 'Could not load formatted diagnostics showing stored values.'));
       }
     })();
   }, [modelHistory]);
@@ -243,14 +243,14 @@ function ModelOutput() {
 
   const channelRows = useMemo(() => {
     if (!viewingModel || !coefficientLookup.rows) {
-      console.log('[channelRows guard] bailing out early —', {
+      console.log('[channelRows guard] bailing out early', {
         viewingModelPresent: !!viewingModel,
         viewingModelName: viewingModel?.name ?? null,
         'coefficientLookup.rows': coefficientLookup.rows,
         'coefficientLookup.foundKey': coefficientLookup.foundKey,
         reason: !viewingModel
           ? 'no viewingModel selected at all'
-          : 'viewingModel exists, but coefficientLookup.rows is null/empty — no usable coefficients array found under any checked key',
+          : 'viewingModel exists, but coefficientLookup.rows is null or empty no usable coefficients array found under any checked key',
       });
       return [];
     }
@@ -297,7 +297,7 @@ function ModelOutput() {
     const deduped = [...byVariable.values()];
     if (deduped.length !== mapped.length) {
       console.warn(
-        `[channelRows] Collapsed ${mapped.length} coefficient rows down to ${deduped.length} unique channels — ` +
+        `[channelRows] Collapsed ${mapped.length} coefficient rows down to ${deduped.length} unique channels` +
         `some channels were selected as BOTH their raw and _transformed variant in Model Configuration. ` +
         'Kept the _transformed row, dropped the raw duplicate for each.'
       );
@@ -417,7 +417,7 @@ function ModelOutput() {
     console.log('highLevelImpact (Section 3 tiers):', highLevelImpact);
     if (!channelRows.length) {
       console.warn(
-        'channelRows is empty — Sections 3/4/5 will render nothing. ' +
+        'channelRows is empty Sections 3/4/5 will render nothing. ' +
         'This model has no usable coefficients array under any checked key. ' +
         'See coefficientDiagnostic for the exact field list.'
       );
@@ -453,7 +453,7 @@ function ModelOutput() {
         entityColumnGuess = headerCols.find((c) => /npi|hcp_id|^id$|entity/i.test(c)) || null;
         console.log('ARD header columns:', headerCols);
       } else {
-        console.warn('No ard filename on this model, or no workflowId yet — cannot fetch a CSV at all.');
+        console.warn('No ard filename on this model, or no workflowId yet cannot fetch a CSV at all.');
       }
 
       // Confirmed from the last run: hcp_level_ard.csv's own header has NONE
@@ -468,11 +468,11 @@ function ModelOutput() {
         workflowStateData?.transformation?.output_csv ||
         null;
       if (guessedTransformedCsv) {
-        console.log('Found a candidate transformed_csv in workflow.state_data.transformation — using that instead of the raw ARD.');
+        console.log('Found a candidate transformed_csv in workflow.state_data.transformation using that instead of the raw ARD.');
       } else {
         console.warn(
           'No transformed_csv found under state_data.transformation.{transformed_csv,csv_data,output_csv}. ' +
-          'Falling back to the raw ARD, which we already know is missing the _transformed columns — ' +
+          'Falling back to the raw ARD, which we already know is missing the _transformed columns' +
           'expect the same "not in index" error. Check the "[Workflow debug]" console group above for ' +
           'where a real transformed CSV might actually be stored.'
         );
@@ -510,7 +510,7 @@ function ModelOutput() {
       console.log('Response:', result);
       console.log('Response has coefficients?', Array.isArray(result?.coefficients), result?.coefficients?.length ?? 0, 'rows');
     } catch (err) {
-      console.error('Request failed — the error/detail below should say exactly which field is missing or wrong:', err);
+      console.error('Request failed the error/detail below should say exactly which field is missing or wrong:', err);
       console.log('problemMessage(err):', problemMessage(err, 'no message'));
     } finally {
       console.groupEnd();
@@ -577,6 +577,24 @@ function ModelOutput() {
 
   const currentCurve = apiCurves[responseChannel] || null;
 
+  // Auto-generate response curves once finalized, instead of requiring a
+  // manual click. Fires once per finalized-model view (guarded so it doesn't
+  // refire on every render), and again whenever the underlying channel list
+  // changes size (e.g. a different model gets finalized). Deliberately NOT
+  // re-triggered on every spend edit — spend changes affect the curve INPUT
+  // (spend_nation/stop/step), so re-running per keystroke would spam the
+  // endpoint; a debounce would help but the button removal request was about
+  // eliminating the manual click, not adding a new implicit trigger surface,
+  // so this fires once per (model, channel-set) and stays put until a fresh
+  // finalize event changes what's being modeled.
+  const channelCount = deepDive.length;
+  useEffect(() => {
+    if (!isViewingFinalized || !channelCount || !numTime || !numGeo) return;
+    if (Object.keys(apiCurves).length) return; // already generated for this view
+    handleGenerateCurves();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isViewingFinalized, channelCount, viewingModel?.id]);
+
   const responseCurveDerived = useMemo(() => {
     if (!currentCurve || !currentCurve.length) return null;
     const d = deepDive.find((x) => x.variable === responseChannel);
@@ -626,7 +644,7 @@ function ModelOutput() {
       overall_comparison: [
         { metric: 'Promotional Lift Share (%)', yours: `${(100 - baselineShare).toFixed(1)}%`, benchmark: '34.5%', status: '🟡 Near Benchmark' },
         { metric: 'Baseline Organic Share (%)', yours: `${baselineShare.toFixed(1)}%`, benchmark: '45.0%', status: '🟡 Near Benchmark' },
-        { metric: 'Average Portfolio ROI', yours: avgPortfolioRoi !== null ? `${avgPortfolioRoi.toFixed(2)}x` : '—', benchmark: '2.10x', status: '🟡 Near Benchmark' },
+        { metric: 'Average Portfolio ROI', yours: avgPortfolioRoi !== null ? `${avgPortfolioRoi.toFixed(2)}x` : '', benchmark: '2.10x', status: '🟡 Near Benchmark' },
       ],
       channel_benchmarks: deepDive.filter((d) => d.roi !== null).map((d) => {
         const benchVal = Number((d.roi * 0.85 + 0.3).toFixed(2));
@@ -655,7 +673,7 @@ function ModelOutput() {
       setBenchmarkResult(data);
       setBenchmarkIsFallback(false);
     } catch (err) {
-      setBenchmarkError(problemMessage(err, 'Live benchmark service unavailable — showing an estimated comparison instead.'));
+      setBenchmarkError(problemMessage(err, 'Live benchmark service unavailable showing an estimated comparison instead.'));
       setBenchmarkResult(buildFallbackBenchmark());
       setBenchmarkIsFallback(true);
     } finally {
@@ -669,8 +687,8 @@ function ModelOutput() {
   // other placeholder metric falls back to "—" rather than guessing.
   const resolveYours = (metric, yours) => {
     if (yours !== 'Calculated from Model') return yours;
-    if (/average portfolio roi/i.test(metric)) return avgPortfolioRoi !== null ? `${avgPortfolioRoi.toFixed(2)}x` : '—';
-    return '—';
+    if (/average portfolio roi/i.test(metric)) return avgPortfolioRoi !== null ? `${avgPortfolioRoi.toFixed(2)}x` : '';
+    return '';
   };
 
   const [showStatSummary, setShowStatSummary] = useState(false);
@@ -694,7 +712,7 @@ function ModelOutput() {
           {workflowError && <div className="mo-error">{workflowError}</div>}
 
           {modelHistory.length === 0 ? (
-            <p className="mo-empty">No models have been run yet — go to Model Configuration to run one first.</p>
+            <p className="mo-empty">No models have been run yet go to Model Configuration to run one first.</p>
           ) : (
             <>
               {/* ---- 1. Model Registry ---- */}
@@ -713,15 +731,15 @@ function ModelOutput() {
                         const isRowViewing = m.id === viewingId;
                         return (
                           <tr key={m.id} className={isRowViewing ? 'is-viewing' : ''} onClick={() => setViewingId(m.id)}>
-                            <td><strong>{m.name}</strong>{m.id === finalizedId && <span className="finalized-tag">★ Finalized</span>}</td>
+                            <td><strong>{m.name}</strong>{m.id === finalizedId && <span className="finalized-tag">Finalized</span>}</td>
                             <td><span className="grain-badge">{m.level?.toUpperCase()}</span></td>
                             <td>{m.type?.toUpperCase()}</td>
-                            <td>{m.dependentVar || m.targetKpi || '—'}</td>
-                            <td>{stats.r2?.toFixed(4) ?? '—'}</td>
-                            <td>{stats.adjR2?.toFixed(4) ?? '—'}</td>
-                            <td>{stats.rmse?.toFixed(2) ?? '—'}</td>
+                            <td>{m.dependentVar || m.targetKpi || 'NA'}</td>
+                            <td>{stats.r2?.toFixed(4) ?? 'NA'}</td>
+                            <td>{stats.adjR2?.toFixed(4) ?? 'NA'}</td>
+                            <td>{stats.rmse?.toFixed(2) ?? 'NA'}</td>
                             <td>{m.startDate} → {m.endDate}</td>
-                            <td><span className="status-complete">✓ Complete</span></td>
+                            <td><span className="status-complete">Complete</span></td>
                             <td>
                               <button
                                 type="button"
@@ -745,10 +763,10 @@ function ModelOutput() {
                   <div>
                     <span className="reviewing-label">Currently Reviewing:</span>
                     <span className="reviewing-name">{viewingModel.name}</span>
-                    {isViewingFinalized && <span className="reviewing-finalized-badge">✓ Finalized Model</span>}
+                    {isViewingFinalized && <span className="reviewing-finalized-badge">Finalized Model</span>}
                     <p className="reviewing-meta">
                       Level: <strong>{viewingModel.level?.toUpperCase()}</strong> · Type: <strong>{viewingModel.type?.toUpperCase()}</strong> ·
-                      R²: <strong>{getDisplayStats(viewingModel).r2?.toFixed(4) ?? '—'}</strong> · RMSE: <strong>{getDisplayStats(viewingModel).rmse?.toFixed(2) ?? '—'}</strong>
+                      R²: <strong>{getDisplayStats(viewingModel).r2?.toFixed(4) ?? 'NA'}</strong> · RMSE: <strong>{getDisplayStats(viewingModel).rmse?.toFixed(2) ?? 'NA'}</strong>
                     </p>
                     {finalizeError && <p className="mo-error" style={{ marginTop: '0.5rem', marginBottom: 0 }}>{finalizeError}</p>}
                   </div>
@@ -757,7 +775,7 @@ function ModelOutput() {
                     onClick={() => handleFinalize(viewingModel.id)}
                     disabled={isFinalizing}
                   >
-                    {isFinalizing ? 'Saving...' : isViewingFinalized ? '★ Re-Confirm Finalized' : 'Finalize Model'}
+                    {isFinalizing ? 'Saving...' : isViewingFinalized ? 'Re-Confirm Finalized' : 'Finalize Model'}
                   </button>
                 </div>
               )}
@@ -790,7 +808,7 @@ function ModelOutput() {
                             <div key={bucket} className="exec-stat-card">
                               <p className="exec-stat-label">{EXEC_LABELS[bucket]}</p>
                               <p className="exec-stat-value">{pct.toFixed(1)}%</p>
-                              <p className="exec-stat-units">{sales > 0 ? `${Math.round(Math.abs(sales)).toLocaleString()} Units` : '—'}</p>
+                              <p className="exec-stat-units">{sales > 0 ? `${Math.round(Math.abs(sales)).toLocaleString()} Units` : 'NA'}</p>
                             </div>
                           );
                         })}
@@ -839,7 +857,7 @@ function ModelOutput() {
                           <input type="number" min="0" value={spendByChannel[d.variable] ?? ''} onChange={(e) => updateSpend(d.variable, e.target.value)} />
                           <div className="spend-card-roi-row">
                             <span>Current ROI:</span>
-                            <span className="spend-card-roi-value">{d.roi !== null ? `${d.roi.toFixed(2)}x` : '—'}</span>
+                            <span className="spend-card-roi-value">{d.roi !== null ? `${d.roi.toFixed(2)}x` : 'Na'}</span>
                           </div>
                         </div>
                       ))}
@@ -858,9 +876,9 @@ function ModelOutput() {
                               <td><strong>{d.variable}</strong></td>
                               <td><span className="tier-badge" style={{ backgroundColor: `${BUCKET_COLORS[d.bucket]}22`, color: BUCKET_COLORS[d.bucket] }}>{BUCKET_LABELS[d.bucket]}</span></td>
                               <td>{Math.round(d.impactableSales).toLocaleString()}</td>
-                              <td>{highLevelImpact ? ((d.impactableSales / highLevelImpact.salesTotal) * 100).toFixed(2) : '—'}%</td>
+                              <td>{highLevelImpact ? ((d.impactableSales / highLevelImpact.salesTotal) * 100).toFixed(2) : 'NA'}%</td>
                               <td>${d.spend.toLocaleString()}</td>
-                              <td>{d.roi !== null ? <span className={`roi-value ${d.roi >= 1 ? 'good' : 'bad'}`}>{d.roi.toFixed(2)}x</span> : <span className="roi-value neutral">—</span>}</td>
+                              <td>{d.roi !== null ? <span className={`roi-value ${d.roi >= 1 ? 'good' : 'bad'}`}>{d.roi.toFixed(2)}x</span> : <span className="roi-value neutral">NA</span>}</td>
                               <td>{d.longTermRoi !== undefined ? <span className={`roi-value ${d.longTermRoi >= 1 ? 'good' : 'bad'}`}>{Number(d.longTermRoi).toFixed(2)}x</span> : <span className="roi-value neutral">—</span>}</td>
                             </tr>
                           ))}
@@ -875,27 +893,12 @@ function ModelOutput() {
                     <p className="mo-section-desc">Explore how increasing or decreasing spend affects incremental sales volume and marginal returns. Diminishing returns demonstrate saturation limits per tactic.</p>
                     {!isViewingFinalized ? (
                       <div className="locked-state">
-                        <span className="locked-icon">🔒</span>
                         <p className="locked-title">Finalize this model to unlock response curves</p>
                         <p className="locked-desc">Response curves require real computation and are only generated for a finalized model.</p>
                       </div>
                     ) : (
                       <>
-                        <div className="benchmark-controls-row">
-                          <div className="benchmark-field"><label>Number of Time Periods</label><input type="number" min="1" value={numTime} onChange={(e) => setNumTime(e.target.value)} /></div>
-                          <div className="benchmark-field"><label>Number of Geo Units</label><input type="number" min="1" value={numGeo} onChange={(e) => setNumGeo(e.target.value)} /></div>
-                          <div className="benchmark-field">
-                            <label>Saturation Function</label>
-                            <select value={saturationFunction} onChange={(e) => setSaturationFunction(e.target.value)}>
-                              <option value="log">Log</option>
-                              <option value="power">Power</option>
-                            </select>
-                          </div>
-                        </div>
                         {curvesError && <div className="mo-error">{curvesError}</div>}
-                        <button className="generate-curves-btn" onClick={handleGenerateCurves} disabled={isGeneratingCurves}>
-                          {isGeneratingCurves ? 'Generating...' : '▶ Generate Response Curves'}
-                        </button>
 
                         <div className="channel-pill-row">
                           <span className="channel-pill-row-label">SELECT CHANNEL:</span>
@@ -905,7 +908,7 @@ function ModelOutput() {
                         </div>
 
                         {!currentCurve ? (
-                          <p className="mo-empty">Click "Generate Response Curves" to see this channel's curve.</p>
+                          <p className="mo-empty">{isGeneratingCurves ? 'Generating response curves...' : 'Response curves generate automatically once a model is finalized.'}</p>
                         ) : (
                           <>
                             <div className="rc-stat-row rc-stat-row-4">
@@ -965,7 +968,6 @@ function ModelOutput() {
                     <p className="mo-section-desc">Compare your model's promotional lift and tactic ROIs against historical pharma &amp; commercial benchmarks segmented by therapy type, lifecycle maturity, and competitive dynamics.</p>
                     {!isViewingFinalized ? (
                       <div className="locked-state">
-                        <span className="locked-icon">🔒</span>
                         <p className="locked-title">Finalize this model to unlock benchmarks</p>
                         <p className="locked-desc">Benchmark comparisons are only available for a finalized model.</p>
                       </div>
@@ -995,7 +997,7 @@ function ModelOutput() {
 
                         {benchmarkResult && (
                           <>
-                            <div className="cohort-banner">Benchmark Cohort: {benchmarkResult.benchmark_group}{benchmarkIsFallback && ' (estimated — live service unavailable)'}</div>
+                            <div className="cohort-banner">Benchmark Cohort: {benchmarkResult.benchmark_group}{benchmarkIsFallback && ' (estimated live service unavailable)'}</div>
                             <p className="mo-section-title" style={{ fontSize: '0.75rem' }}>Overall Metric Comparisons</p>
                             <table className="benchmark-table">
                               <thead><tr><th>Metric</th><th>Yours</th><th>Benchmark</th><th>Status</th></tr></thead>
@@ -1042,10 +1044,10 @@ function ModelOutput() {
                     <p className="mo-section-title">8. Model Diagnostics &amp; Statistical Evaluation</p>
                     {summaryError && <div className="mo-note">{summaryError}</div>}
                     <div className="diag-stat-row">
-                      <div className="diag-stat-card"><p className="diag-stat-value">{getDisplayStats(viewingModel).r2?.toFixed(4) ?? '—'}</p><p className="diag-stat-label">R² (Fit)</p></div>
-                      <div className="diag-stat-card"><p className="diag-stat-value">{getDisplayStats(viewingModel).adjR2?.toFixed(4) ?? '—'}</p><p className="diag-stat-label">Adjusted R²</p></div>
-                      <div className="diag-stat-card"><p className="diag-stat-value">{getDisplayStats(viewingModel).rmse?.toFixed(2) ?? '—'}</p><p className="diag-stat-label">RMSE</p></div>
-                      <div className="diag-stat-card"><p className="diag-stat-value">{viewingModel.type === 'ridge' ? ((viewingModel.alpha ?? viewingModel.ridgeLambda)?.toFixed?.(4) ?? String(viewingModel.alpha ?? viewingModel.ridgeLambda ?? '—')) : 'N/A (OLS)'}</p><p className="diag-stat-label">Alpha (λ)</p></div>
+                      <div className="diag-stat-card"><p className="diag-stat-value">{getDisplayStats(viewingModel).r2?.toFixed(4) ?? 'NA'}</p><p className="diag-stat-label">R² (Fit)</p></div>
+                      <div className="diag-stat-card"><p className="diag-stat-value">{getDisplayStats(viewingModel).adjR2?.toFixed(4) ?? 'NA'}</p><p className="diag-stat-label">Adjusted R²</p></div>
+                      <div className="diag-stat-card"><p className="diag-stat-value">{getDisplayStats(viewingModel).rmse?.toFixed(2) ?? 'NA'}</p><p className="diag-stat-label">RMSE</p></div>
+                      <div className="diag-stat-card"><p className="diag-stat-value">{viewingModel.type === 'ridge' ? ((viewingModel.alpha ?? viewingModel.ridgeLambda)?.toFixed?.(4) ?? String(viewingModel.alpha ?? viewingModel.ridgeLambda ?? 'NA')) : 'N/A (OLS)'}</p><p className="diag-stat-label">Alpha (λ)</p></div>
                     </div>
                     <button className="stat-summary-toggle" onClick={() => setShowStatSummary((v) => !v)}>
                       {showStatSummary ? '▾' : '▶'} View Full Statistical OLS / Ridge Summary Output

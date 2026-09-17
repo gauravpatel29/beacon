@@ -318,7 +318,6 @@ function Home() {
               </button>
               <button className="btn btn-secondary" onClick={openWorkflowDialog}>Continue Workflow</button>
               <button className="btn btn-tertiary" >Interact With Workflow</button>
-              <button className="btn btn-tertiary" >Interact with Workflow</button>
             </div>
           </div>
 

@@ -4,6 +4,7 @@ import { ResponsiveContainer, CartesianGrid, XAxis, YAxis, Tooltip, LineChart, L
 import { ChartTooltip } from '../../components/charts/ChartTooltip.jsx';
 import { AXIS_TICK, CHART_COLORS, GRID, LINE_TYPE, X_LABEL, Y_LABEL } from '../../components/charts/chartTheme.js';
 import cloud from '../../assets/sidebar_icon/cloud.png';
+import PageFooterNav from '../../components/PageFooterNav/PageFooterNav.jsx';
 import {
   ApiError,
   commitSpec,
@@ -2341,8 +2342,11 @@ function DataIngestion() {
           </div>
         </div>
       )}
+      <PageFooterNav currentStepId="data-ingestion" />
     </div>
   );
+  
+
 }
 
 export default DataIngestion;
