@@ -1,379 +1,1030 @@
 import { useState, useEffect, useMemo } from 'react';
+import {
+  ensureWorkflow,
+  getWorkflow,
+  getCsv,
+  problemMessage,
+  runRegression,
+  runRidge,
+} from '../../services/api.js';
+import { generateResponseCurves, fetchBenchmarks, fetchResultsSummary, updateWorkflowState } from '../../services/modelOutputApi.js';
 import PageFooterNav from '../../components/PageFooterNav/PageFooterNav.jsx';
 import './ModelOutput.css';
 
-const HISTORY_KEY = 'mmm_model_history';
-const FINALIZED_KEY = 'mmm_finalized_model';
-const spendKeyFor = (modelId) => `mmm_spend_${modelId}`;
+// ─── Tier / bucket classification (exact rules from the integration spec) ───
+// Prefer the per-column category recorded during ingestion
+// (spec.config_metadata.column_roles) where it answers the question; the
+// name-pattern rules below are the fallback, not the primary source.
+function classifyChannel(variable, columnRoles) {
+  const role = columnRoles?.[variable];
+  if (role) return role;
 
-// ─── Channel bucket classification (baseline vs promotion types) ───────────
-// Pattern-matched from channel/column names - there's no explicit "channel
-// category" field anywhere upstream, so this is a best-effort heuristic.
-// Anything that doesn't match a known pattern falls into "Other Marketing"
-// rather than being force-fit into one of the three named buckets.
-function classifyChannel(name) {
-  const n = name.toLowerCase();
-  if (/dtc/.test(n)) return 'dtc';
-  if (/call|sample|speaker|detail/.test(n)) return 'personal';
-  if (/rte|remote|email|npp|digital_hcp|web/.test(n)) return 'npp';
-  return 'other';
+  const n = variable.toLowerCase();
+  if (/const|baseline|intercept|carryover/.test(n)) return 'baseline';
+  if (/rte|email|portal|npp|hcp_web/.test(n)) return 'npp';
+  if (/tv|dtc|digital|search|social|media|disp/.test(n)) return 'dtc';
+  if (/call|det|sample|speaker|f2f|rep/.test(n)) return 'personal';
+  return 'personal'; // unmatched falls into Personal Promotion, per spec
+}
+const BUCKET_LABELS = { baseline: 'Baseline', personal: 'Personal Promotion', npp: 'NPP Promotion', dtc: 'DTC Promotion' };
+// Section 3 (Executive Summary) stat-card labels use slightly different
+// wording than the Tier Role badges in Section 5's deep-dive table.
+const EXEC_LABELS = { baseline: 'Baseline Demand', personal: 'Personal Promotion', npp: 'NPP Promotion', dtc: 'DTC / Media' };
+const BUCKET_COLORS = { baseline: '#001E96', personal: '#1ABC9C', npp: '#F59E0B', dtc: '#8B5CF6' };
+
+// The coefficient array is documented (MODEL_OUTPUT_API.md) to live at
+// `coefficients` on each stored model run. Sections 3/4/5 read it entirely
+// client-side — there's no endpoint for them by design. But real runs have
+// come through with that array empty/missing while still having valid
+// r2/rmse, so this checks a handful of plausible alternate key names before
+// giving up, and reports back which one (if any) actually worked so the UI
+// can show a useful diagnostic instead of just silently rendering nothing.
+const COEFFICIENT_KEY_CANDIDATES = [
+  'coefficients', 'coefficient_table', 'coeffs', 'coefficientTable',
+  'regression_output', 'regressionOutput', 'model_output', 'modelOutput',
+  'results', 'output',
+];
+function findCoefficientArray(model) {
+  if (!model) return { rows: null, foundKey: null };
+  for (const key of COEFFICIENT_KEY_CANDIDATES) {
+    const val = model[key];
+    if (Array.isArray(val) && val.length) return { rows: val, foundKey: key };
+    // A couple of these candidates are objects that might themselves nest a
+    // `coefficients` array one level down (e.g. model.results.coefficients).
+    if (val && typeof val === 'object' && Array.isArray(val.coefficients) && val.coefficients.length) {
+      return { rows: val.coefficients, foundKey: `${key}.coefficients` };
+    }
+  }
+  return { rows: null, foundKey: null };
 }
 
-const BUCKET_LABELS = {
-  baseline: 'Baseline',
-  personal: 'Personal Promotion',
-  npp: 'NPP Promotion',
-  dtc: 'DTC Promotion',
-  other: 'Other Marketing',
-};
+// Must match results.py's BENCHMARK_DATABASE keys EXACTLY — the backend does
+// a silent dict .get(value, default) fallback on mismatch, not an error, so a
+// wrong string here doesn't fail, it just quietly benchmarks against the
+// wrong (or default) cohort with no visible sign anything's off. Note the en
+// dash (–, U+2013) in the maturity stages, not a plain hyphen.
+const THERAPY_TYPES = ['Chronic', 'Acute', 'Rare / Specialty', 'Oncology / Recurring'];
+const MATURITY_STAGES = ['Launch (<1 Year)', 'Growth (1–3 Years)', 'Mature (3–7 Years)', 'Late Lifecycle (7+ Years)'];
+const MARKETING_DYNAMICS = ['High Competition', 'Medium Competition', 'Low / Niche Competition'];
 
-const BUCKET_COLORS = {
-  baseline: '#94a3b8',
-  personal: '#1d4ed8',
-  npp: '#10b981',
-  dtc: '#f59e0b',
-  other: '#8b5cf6',
-};
-
-// ─── Illustrative benchmark reference table ────────────────────────────────
-// NOTE: there is no real external benchmark data source wired into this
-// project. These numbers are placeholder/illustrative only, clearly labeled
-// as such in the UI, structured so a real dataset can drop in later using
-// the exact same lookup shape (therapy|maturity|dynamic -> overallImpactPct
-// + channelROI list).
-const THERAPY_TYPES = ['acute', 'chronic', 'recurring'];
-const MATURITY_STAGES = ['Launch Year 1', 'Year 2-3', 'Year 4+'];
-const MARKETING_DYNAMICS = ['high competition', 'medium competition', 'low competition'];
-
-function lookupBenchmark(therapy, maturity, dynamic) {
-  // Deterministic pseudo-variation so different combinations show different
-  // (but stable) numbers, without needing 27 hand-authored rows.
-  const seed = (therapy + maturity + dynamic).split('').reduce((a, c) => a + c.charCodeAt(0), 0);
-  const base = 28 + (seed % 15); // 28-42% overall impact
-  return {
-    overallImpactPct: base,
-    channelROI: [
-      { channel: 'Personal Promotion', roi: (2.2 + (seed % 7) * 0.15).toFixed(2) },
-      { channel: 'NPP Promotion', roi: (1.6 + (seed % 5) * 0.12).toFixed(2) },
-      { channel: 'DTC Promotion', roi: (1.1 + (seed % 4) * 0.1).toFixed(2) },
-    ],
-  };
+// Status strings from /api/results/benchmarks carry emoji (🟢🟡🔴) — per the
+// house rule, strip the emoji and colour the cell instead of showing it raw.
+function parseStatus(raw) {
+  if (!raw) return { text: '', tone: 'neutral' };
+  let tone = 'neutral';
+  if (raw.includes('🟢')) tone = 'good';
+  else if (raw.includes('🟡')) tone = 'warn';
+  else if (raw.includes('🔴')) tone = 'bad';
+  const text = raw.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '').trim();
+  return { text, tone };
 }
 
 function mean(nums) { return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : 0; }
+function toNumberRoi(str) {
+  // "1.24x" -> 1.24
+  if (typeof str === 'number') return str;
+  const n = parseFloat(String(str).replace(/[^0-9.\-]/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+
+// Chart axis tick formatters — reference UI shows spend as "$0k"/"$125k" and
+// impact volume compacted the same way (e.g. "105,000").
+function formatSpendTick(v) {
+  return v === 0 ? '$0k' : `$${Math.round(v / 1000)}k`;
+}
+function formatCompactNumber(v) {
+  return Math.round(v).toLocaleString();
+}
 
 function ModelOutput() {
-  const [modelHistory, setModelHistory] = useState(() => {
-    try { return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'); } catch { return []; }
-  });
-  const [finalizedId, setFinalizedId] = useState(() => localStorage.getItem(FINALIZED_KEY) || '');
+  const [modelHistory, setModelHistory] = useState([]);
+  const [columnRoles, setColumnRoles] = useState(null);
 
-  const finalizedModel = modelHistory.find((m) => m.id === finalizedId) || null;
+  const [isLoadingWorkflow, setIsLoadingWorkflow] = useState(true);
+  const [workflowError, setWorkflowError] = useState(null);
 
+  const [viewingId, setViewingId] = useState('');
+  // Finalization + spend now persist via PATCH /v1/workflows/{workflow_id}
+  // (see handleFinalize / the spend-autosave effect below), so they survive
+  // navigation and are visible beyond this browser. Seeded from the
+  // workflow's own state_data on load, below.
+  const [workflowId, setWorkflowId] = useState(null);
+  const [finalizedId, setFinalizedId] = useState('');
+  const [finalizeError, setFinalizeError] = useState(null);
+  const [isFinalizing, setIsFinalizing] = useState(false);
   const [spendByChannel, setSpendByChannel] = useState({});
+  const [spendSaveError, setSpendSaveError] = useState(null);
+  // DEBUG: the full workflow.state_data, stashed so the debug probe below can
+  // search it for a real transformed_csv wherever it turns out to live —
+  // we've now confirmed the raw ARD (`ard` field) is NOT that file (its
+  // header has none of the "_transformed" columns run-regression needs).
+  const [workflowStateData, setWorkflowStateData] = useState(null);
+
+  // ── Load model runs from workflow state (modelling.modelHistory), not localStorage ──
   useEffect(() => {
-    if (!finalizedModel) { setSpendByChannel({}); return; }
+    (async () => {
+      setIsLoadingWorkflow(true);
+      setWorkflowError(null);
+      try {
+        const id = await ensureWorkflow();
+        setWorkflowId(id);
+        const workflow = await getWorkflow(id);
+        const history = workflow?.state_data?.modelling?.modelHistory || [];
+        setModelHistory(history);
+        setColumnRoles(workflow?.state_data?.spec?.config_metadata?.column_roles || null);
+        setViewingId(history[0]?.id || '');
+        setFinalizedId(workflow?.state_data?.finalizedModelId || '');
+        setSpendByChannel(workflow?.state_data?.channelSpendMap || {});
+        setWorkflowStateData(workflow?.state_data || null);
+        // DEBUG: dump the shape of state_data so we can see every module's
+        // keys in one place, and specifically hunt for anything CSV-shaped
+        // (a long string containing commas/newlines) that could be the real
+        // transformed_csv, wherever the Transformation module actually put it.
+        console.groupCollapsed('[Workflow debug] state_data top-level modules');
+        console.log('Top-level keys under state_data:', Object.keys(workflow?.state_data || {}));
+        console.log('Full state_data (expand to browse manually):', workflow?.state_data);
+        console.log('state_data.transformation (expand to browse manually):', workflow?.state_data?.transformation);
+        console.log('state_data.transformation keys:', Object.keys(workflow?.state_data?.transformation || {}));
+        console.log('state_data.modelling (expand to browse manually):', workflow?.state_data?.modelling);
+        console.log('state_data.modelling keys:', Object.keys(workflow?.state_data?.modelling || {}));
+        console.log('state_data.ingestion keys:', Object.keys(workflow?.state_data?.ingestion || {}));
+        console.log('state_data.stitching keys:', Object.keys(workflow?.state_data?.stitching || {}));
+        const findCsvLike = (obj, path = '') => {
+          if (!obj || typeof obj !== 'object') return;
+          const entries = Array.isArray(obj) ? obj.map((v, i) => [String(i), v]) : Object.entries(obj);
+          for (const [k, v] of entries) {
+            const p = path ? `${path}.${k}` : k;
+            if (typeof v === 'string' && v.length > 200 && v.includes(',') && v.includes('\n')) {
+              console.log(`Possible CSV found at state_data.${p} length ${v.length}, first 200 chars:`, v.slice(0, 200));
+            } else if (v && typeof v === 'object') {
+              // Now recurses into arrays too — the previous version's
+              // `!Array.isArray(v)` guard meant anything stored inside an
+              // array (e.g. transformation.results[0].csv_data) was silently
+              // skipped, which could easily explain finding nothing.
+              findCsvLike(v, p);
+            }
+          }
+        };
+        findCsvLike(workflow?.state_data);
+        console.groupEnd();
+      } catch (err) {
+        setWorkflowError(problemMessage(err, 'Could not load model runs from this workflow.'));
+      } finally {
+        setIsLoadingWorkflow(false);
+      }
+    })();
+  }, []);
+
+  // ── Section 1 & 8: formatted diagnostics from /api/results/summary ───────
+  // Per module7-api-reference.md (not in MODEL_OUTPUT_API.md, wired in per
+  // instruction). Treated as a display nicety: on failure we keep showing
+  // the stored r2/adjR2/rmse fields rather than blocking either section.
+  const [resultsSummaryById, setResultsSummaryById] = useState({});
+  const [summaryError, setSummaryError] = useState(null);
+
+  useEffect(() => {
+    if (!modelHistory.length) return;
+    (async () => {
+      try {
+        const data = await fetchResultsSummary({
+          iterations: modelHistory.map((m) => ({
+            id: m.id,
+            modelName: m.name,
+            r_squared: m.r2,
+            adj_r_squared: m.adjR2,
+            rmse: m.rmse,
+          })),
+        });
+        const byId = {};
+        (data.iterations || []).forEach((it) => { byId[it.id] = it; });
+        setResultsSummaryById(byId);
+      } catch (err) {
+        setSummaryError(problemMessage(err, 'Could not load formatted diagnostics showing stored values.'));
+      }
+    })();
+  }, [modelHistory]);
+
+  // Prefer the server-formatted stats where available; fall back to the
+  // stored run's own fields otherwise.
+  const getDisplayStats = (m) => {
+    const s = m ? resultsSummaryById[m.id] : null;
+    return {
+      r2: s?.r_squared ?? m?.r2,
+      adjR2: s?.adj_r_squared ?? m?.adjR2,
+      rmse: s?.rmse ?? m?.rmse,
+    };
+  };
+
+  const viewingModel = modelHistory.find((m) => m.id === viewingId) || null;
+  const isViewingFinalized = viewingId === finalizedId && !!finalizedId;
+
+  const handleFinalize = async (modelId) => {
+    const previous = finalizedId;
+    setFinalizeError(null);
+    setIsFinalizing(true);
+    setFinalizedId(modelId); // optimistic — Response Curves/Benchmarks unlock immediately
     try {
-      const stored = JSON.parse(localStorage.getItem(spendKeyFor(finalizedModel.id)) || '{}');
-      setSpendByChannel(stored);
-    } catch { setSpendByChannel({}); }
-  }, [finalizedModel?.id]);
+      await updateWorkflowState(workflowId, { state_data: { finalizedModelId: modelId } });
+    } catch (err) {
+      setFinalizedId(previous); // revert; the unlock wasn't actually saved
+      setFinalizeError(problemMessage(err, 'Could not save the finalized model. Please try again.'));
+    } finally {
+      setIsFinalizing(false);
+    }
+  };
 
-  const [responseChannel, setResponseChannel] = useState('');
+  // ── Coefficient rows: real fields from Model Configuration, as-is ────────
+  // Note is "Intercept" for the constant row and "Carryover" for the lagged
+  // KPI — neither is a channel, so both are filtered out of every table.
+  const coefficientLookup = useMemo(() => findCoefficientArray(viewingModel), [viewingModel]);
+
+  const channelRows = useMemo(() => {
+    if (!viewingModel || !coefficientLookup.rows) {
+      console.log('[channelRows guard] bailing out early —', {
+        viewingModelPresent: !!viewingModel,
+        viewingModelName: viewingModel?.name ?? null,
+        'coefficientLookup.rows': coefficientLookup.rows,
+        'coefficientLookup.foundKey': coefficientLookup.foundKey,
+        reason: !viewingModel
+          ? 'no viewingModel selected at all'
+          : 'viewingModel exists, but coefficientLookup.rows is null/empty — no usable coefficients array found under any checked key',
+      });
+      return [];
+    }
+    const mapped = coefficientLookup.rows
+      .filter((r) => r.Note !== 'Intercept' && r.Note !== 'Carryover' && r.Variable !== 'const')
+      .map((r) => {
+        // Per MODEL_OUTPUT_API.md's own example row ("calls_transformed"),
+        // raw variable names can carry a "_transformed" suffix that isn't
+        // meant for display/keys — strip it, matching the reference impl.
+        const variable = (r.Variable || '').replace(/_transformed$/, '');
+        // Impactable (%) sometimes arrives as "12.40%" (string) rather than
+        // a number, and under either "Impactable (%)" or "Impactable %".
+        const rawPct = r['Impactable (%)'] ?? r['Impactable %'] ?? 0;
+        const impactablePct = parseFloat(String(rawPct).replace('%', '')) || 0;
+        return {
+          variable,
+          isTransformedVariant: /_transformed$/.test(r.Variable || ''),
+          coefficient: r.Coefficient,
+          impactablePct,
+          impactableSales: r['Impactable Sales'],
+          storedSpend: r.Spend,
+          storedRoi: r.ROI,
+          longTermRoi: r['Long Term ROI'],
+          rawActivity: r['Raw Activity'],
+          modelledActivity: r['Modelled Activity'],
+          bucket: classifyChannel(variable, columnRoles),
+        };
+      });
+
+    // De-duplicate: a channel selected as BOTH its raw and _transformed
+    // variant (confirmed happening — see the duplicate, simultaneously-
+    // "selected" pills in Section 6's screenshot, e.g. two identical
+    // "sample_quantity_ad" pills) collapses to the same `variable` string
+    // above. Left as-is, every downstream sum (Section 3's tier totals,
+    // Section 5's Impact Share, spend defaults) would silently double-count
+    // that channel. Keep only the _transformed row per variable — that's the
+    // one MODEL_OUTPUT_API.md's own example treats as canonical — and drop
+    // the raw duplicate rather than summing both.
+    const byVariable = new Map();
+    for (const row of mapped) {
+      const existing = byVariable.get(row.variable);
+      if (!existing || row.isTransformedVariant) byVariable.set(row.variable, row);
+    }
+    const deduped = [...byVariable.values()];
+    if (deduped.length !== mapped.length) {
+      console.warn(
+        `[channelRows] Collapsed ${mapped.length} coefficient rows down to ${deduped.length} unique channels ` +
+        `some channels were selected as BOTH their raw and _transformed variant in Model Configuration. ` +
+        'Kept the _transformed row, dropped the raw duplicate for each.'
+      );
+    }
+    return deduped;
+  }, [viewingModel, coefficientLookup, columnRoles]);
+
+  // Nothing renderable for Sections 3/4/5 — surface exactly what fields ARE
+  // present on this run so the gap can be diagnosed from the UI itself,
+  // without needing DevTools.
+  const coefficientDiagnostic = useMemo(() => {
+    if (!viewingModel || channelRows.length) return null;
+    return `No usable coefficient data found on "${viewingModel.name}". Checked: ${COEFFICIENT_KEY_CANDIDATES.join(', ')}. ` +
+      `Fields actually present on this run: ${Object.keys(viewingModel).join(', ')}.`;
+  }, [viewingModel, channelRows]);
+
+  // Seed spend inputs from the row's own Spend (fallback 50000 if zero),
+  // exactly once per newly-viewed model.
   useEffect(() => {
-    if (finalizedModel?.coefficients?.length) setResponseChannel(finalizedModel.coefficients[0].name);
-  }, [finalizedModel?.id]);
+    if (!channelRows.length) return;
+    setSpendByChannel((prev) => {
+      const next = { ...prev };
+      channelRows.forEach((r) => {
+        if (next[r.variable] === undefined) {
+          next[r.variable] = r.storedSpend > 0 ? r.storedSpend : 50000;
+        }
+      });
+      return next;
+    });
+  }, [channelRows]);
 
+  const updateSpend = (variable, value) => {
+    setSpendByChannel((prev) => ({ ...prev, [variable]: value }));
+  };
+
+  // Debounced persistence of the spend map — waits for a pause in typing
+  // rather than firing a PATCH on every keystroke.
+  useEffect(() => {
+    if (!workflowId || !Object.keys(spendByChannel).length) return;
+    const timer = setTimeout(() => {
+      setSpendSaveError(null);
+      updateWorkflowState(workflowId, { state_data: { channelSpendMap: spendByChannel } }).catch((err) => {
+        setSpendSaveError(problemMessage(err, 'Could not save channel spend changes.'));
+      });
+    }, 700);
+    return () => clearTimeout(timer);
+  }, [spendByChannel, workflowId]);
+
+  // Deep-dive rows: ROI recomputed live from the EDITED spend, not the
+  // stored Spend — sorted by Impactable Sales descending. Long-Term ROI
+  // falls back to roi * 1.35 when the stored value is missing, rather than
+  // showing a dash whenever the regression output didn't include it.
+  const deepDive = useMemo(() => {
+    return channelRows
+      .map((r) => {
+        const spend = Number(spendByChannel[r.variable]) || 0;
+        const roi = spend > 0 ? r.impactableSales / spend : null;
+        const longTermRoi = (r.longTermRoi !== undefined && r.longTermRoi !== null)
+          ? Number(r.longTermRoi)
+          : (roi !== null ? roi * 1.35 : undefined);
+        return { ...r, spend, roi, longTermRoi };
+      })
+      .sort((a, b) => b.impactableSales - a.impactableSales);
+  }, [channelRows, spendByChannel]);
+
+  // Section 3 needs the intercept/carryover row's own Impactable Sales/(%) to
+  // compute "Baseline Demand" — but channelRows deliberately excludes that
+  // row (correctly, since it isn't a spendable channel for Sections 4/5).
+  // Left as channelRows-only, Baseline is structurally forced to 0% every
+  // time, regardless of the actual model. Pull it back in here, straight
+  // from the raw coefficient array — this matches the reference
+  // implementation, which computes executiveImpactBreakdown from the FULL
+  // unfiltered coefficients list, not from the already-filtered deep-dive data.
+  const baselineRows = useMemo(() => {
+    if (!coefficientLookup.rows) return [];
+    return coefficientLookup.rows.filter(
+      (r) => r.Note === 'Intercept' || r.Note === 'Carryover' || r.Variable === 'const'
+    );
+  }, [coefficientLookup]);
+
+  // ── Executive summary: four tiers, share % + units ───────────────────────
+  // sharePct here is the SUM of each row's stored `impactablePct` field
+  // (parsed from "Impactable (%)"), matching the reference implementation
+  // exactly — it is NOT recomputed as bucket sales ÷ total sales. If the
+  // stored percentages across all coefficient rows don't already sum to
+  // ~100%, these cards can show numbers that don't add to 100 either — same
+  // behavior as the reference, not a bug introduced here.
+  const highLevelImpact = useMemo(() => {
+    if (!channelRows.length && !baselineRows.length) return null;
+    const salesBuckets = { baseline: 0, personal: 0, npp: 0, dtc: 0 };
+    const pctBuckets = { baseline: 0, personal: 0, npp: 0, dtc: 0 };
+    channelRows.forEach((r) => {
+      salesBuckets[r.bucket] = (salesBuckets[r.bucket] || 0) + r.impactableSales;
+      pctBuckets[r.bucket] = (pctBuckets[r.bucket] || 0) + r.impactablePct;
+    });
+    baselineRows.forEach((r) => {
+      const rawPct = r['Impactable (%)'] ?? r['Impactable %'] ?? 0;
+      const pct = parseFloat(String(rawPct).replace('%', '')) || 0;
+      const sales = Number(r['Impactable Sales']) || 0;
+      salesBuckets.baseline += sales;
+      pctBuckets.baseline += pct;
+    });
+    const salesTotal = Object.values(salesBuckets).reduce((a, b) => a + b, 0) || 1;
+    return { salesBuckets, salesTotal, pctBuckets };
+  }, [channelRows, baselineRows]);
+
+  // ── DEBUG: dump everything Section 3 depends on whenever the viewed model
+  // changes. Remove once modelHistory[i].coefficients is confirmed populated
+  // upstream — this is purely a diagnostic aid, nothing here affects render.
+  useEffect(() => {
+    if (!viewingModel) return;
+    console.groupCollapsed(`[Section 3 debug] model = "${viewingModel.name}" (id: ${viewingModel.id})`);
+    console.log('viewingModel (raw, full object as stored in modelHistory):', viewingModel);
+    console.log('viewingModel keys:', Object.keys(viewingModel));
+    console.log('coefficientLookup (which key matched, if any):', coefficientLookup);
+    console.log('channelRows (post-filter, post-classify):', channelRows);
+    console.log('highLevelImpact (Section 3 tiers):', highLevelImpact);
+    if (!channelRows.length) {
+      console.warn(
+        'channelRows is empty Sections 3/4/5 will render nothing. ' +
+        'This model has no usable coefficients array under any checked key. ' +
+        'See coefficientDiagnostic for the exact field list.'
+      );
+    }
+    console.groupEnd();
+  }, [viewingModel, coefficientLookup, channelRows, highLevelImpact]);
+
+  // ── DEBUG: manual probe against /api/modelling/run-regression or
+  // /run-ridge, using the best payload we can reconstruct from the fields
+  // actually stored on this model run (dependentVariable, selectedChannels,
+  // level, dmaMode, startDate/endDate, ard, residualSourceId). This is NOT
+  // wired into any real data flow — run-regression's own doc comment says it
+  // needs the full transformed_csv + granular_csv to fit, which this page
+  // does not have. This exists only so the request/response (or the error
+  // explaining what's actually missing) shows up in the console for
+  // inspection — triggered by the "Debug: Test Regression Endpoint" button
+  // in Section 3, only when channelRows is empty.
+  const [isDebugProbing, setIsDebugProbing] = useState(false);
+  const handleDebugRunRegression = async () => {
+    if (!viewingModel) return;
+    setIsDebugProbing(true);
+    console.groupCollapsed(`[Debug probe] ${viewingModel.type === 'ridge' ? 'run-ridge' : 'run-regression'} for "${viewingModel.name}"`);
+    try {
+      let ardCsv = null;
+      let dateColumnGuess = null;
+      let entityColumnGuess = null;
+      if (viewingModel.ard && workflowId) {
+        console.log(`Fetching ARD "${viewingModel.ard}" via getCsv(workflowId, ard)...`);
+        ardCsv = await getCsv(workflowId, viewingModel.ard);
+        console.log('ARD fetched, length:', ardCsv?.length ?? 0, 'chars. First 300 chars:', String(ardCsv).slice(0, 300));
+        const headerCols = String(ardCsv).split('\n')[0].split(',').map((c) => c.trim());
+        dateColumnGuess = headerCols.find((c) => /date/i.test(c)) || null;
+        entityColumnGuess = headerCols.find((c) => /npi|hcp_id|^id$|entity/i.test(c)) || null;
+        console.log('ARD header columns:', headerCols);
+      } else {
+        console.warn('No ard filename on this model, or no workflowId yet cannot fetch a CSV at all.');
+      }
+
+      // Confirmed from the last run: hcp_level_ard.csv's own header has NONE
+      // of the "_transformed" columns run-regression needs, so it cannot be
+      // the real transformed_csv. Check a few plausible locations in
+      // workflow.state_data (logged at page load — see "[Workflow debug]"
+      // console group) before falling back to the ARD, which we now expect
+      // to fail again with the same 'not in index' error.
+      const guessedTransformedCsv =
+        workflowStateData?.transformation?.transformed_csv ||
+        workflowStateData?.transformation?.csv_data ||
+        workflowStateData?.transformation?.output_csv ||
+        null;
+      if (guessedTransformedCsv) {
+        console.log('Found a candidate transformed_csv in workflow.state_data.transformation — using that instead of the raw ARD.');
+      } else {
+        console.warn(
+          'No transformed_csv found under state_data.transformation.{transformed_csv,csv_data,output_csv}. ' +
+          'Falling back to the raw ARD, which we already know is missing the _transformed columns — ' +
+          'expect the same "not in index" error. Check the "[Workflow debug]" console group above for ' +
+          'where a real transformed CSV might actually be stored.'
+        );
+      }
+
+      const payload = {
+        // Best-guess field names — api.js's run-regression/run-ridge JSDoc
+        // only documents transformed_csv/granular_csv as required; everything
+        // else below is inferred from what's actually stored on this model.
+        transformed_csv: guessedTransformedCsv || ardCsv,
+        granular_csv: ardCsv,
+        dependent_variable: viewingModel.dependentVariable,
+        channels: viewingModel.selectedChannels || viewingModel.channels,
+        selected_channels: viewingModel.selectedChannels || viewingModel.channels,
+        level: viewingModel.level,
+        dma_mode: viewingModel.dmaMode,
+        start_date: viewingModel.startDate,
+        end_date: viewingModel.endDate,
+        residual_source_id: viewingModel.residualSourceId,
+        // Added after a 'date_column' KeyError from the backend — parsed
+        // from the ARD's own header row rather than hardcoded, since a
+        // different ARD could name these differently. Sending several
+        // plausible key-name aliases for the same concept since we don't
+        // know which one the backend actually reads yet.
+        date_column: dateColumnGuess,
+        dateColumn: dateColumnGuess,
+        geo_column: entityColumnGuess,
+        entity_column: entityColumnGuess,
+        id_column: entityColumnGuess,
+      };
+      console.log('Detected date/entity columns from ARD header:', { dateColumnGuess, entityColumnGuess });
+      console.log('Request payload:', payload);
+      const fn = viewingModel.type === 'ridge' ? runRidge : runRegression;
+      const result = await fn(payload);
+      console.log('Response:', result);
+      console.log('Response has coefficients?', Array.isArray(result?.coefficients), result?.coefficients?.length ?? 0, 'rows');
+    } catch (err) {
+      console.error('Request failed the error/detail below should say exactly which field is missing or wrong:', err);
+      console.log('problemMessage(err):', problemMessage(err, 'no message'));
+    } finally {
+      console.groupEnd();
+      setIsDebugProbing(false);
+    }
+  };
+
+  // ── Section 6: response curves (locked until finalized) ─────────────────
+  const [numTime, setNumTime] = useState('12');
+  const [numGeo, setNumGeo] = useState('100');
+  const [saturationFunction, setSaturationFunction] = useState('log');
+  const [powerValue, setPowerValue] = useState(0.5);
+  const [apiCurves, setApiCurves] = useState({});
+  const [responseChannel, setResponseChannel] = useState('');
+  const [isGeneratingCurves, setIsGeneratingCurves] = useState(false);
+  const [curvesError, setCurvesError] = useState(null);
+
+  useEffect(() => {
+    if (deepDive.length) setResponseChannel(deepDive[0].variable);
+  }, [viewingModel?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleGenerateCurves = async () => {
+    if (!numTime || !numGeo) { setCurvesError('Enter both Number of Time Periods and Number of Geo Units.'); return; }
+    setCurvesError(null);
+    setIsGeneratingCurves(true);
+    try {
+      const channels = deepDive.map((d) => {
+        const spendNation = d.spend || 0;
+        // Guard against the documented 400 causes (invalid/zero step,
+        // non-numeric beta): a spend of 0 would otherwise produce stop=0 and
+        // step=0, and a missing/zero coefficient isn't a valid saturation
+        // slope. Floors mirror the reference implementation's fallbacks.
+        const stop = spendNation * 2.5 || 200000;
+        const step = Math.max(1000, Math.round(stop / 50));
+        return {
+          name: d.variable,
+          impactable_sales_nation: d.impactableSales,
+          beta_coeff: d.coefficient || 0.005,
+          spend_nation: spendNation,
+          start: 0,
+          stop,
+          step,
+          price: 1,
+          saturation_function: saturationFunction,
+          power_value: Number(powerValue) || 0.5,
+        };
+      });
+      const data = await generateResponseCurves({ channels, numTime: Number(numTime), numGeo: Number(numGeo) });
+      const curves = data.curves || {};
+      setApiCurves(curves);
+      // If the channel currently selected in the pill row has no curve in
+      // this response (e.g. it's the first generation, or the channel list
+      // changed), fall back to the first channel that does.
+      const returnedKeys = Object.keys(curves);
+      if (returnedKeys.length && !returnedKeys.includes(responseChannel)) {
+        setResponseChannel(returnedKeys[0]);
+      }
+    } catch (err) {
+      setCurvesError(problemMessage(err, 'Could not generate response curves.'));
+    } finally {
+      setIsGeneratingCurves(false);
+    }
+  };
+
+  const currentCurve = apiCurves[responseChannel] || null;
+
+  const responseCurveDerived = useMemo(() => {
+    if (!currentCurve || !currentCurve.length) return null;
+    const d = deepDive.find((x) => x.variable === responseChannel);
+    const currentSpend = d?.spend || 0;
+
+    const nearest = currentCurve.reduce((best, p) =>
+      Math.abs(p.spend - currentSpend) < Math.abs(best.spend - currentSpend) ? p : best,
+      currentCurve[0]);
+
+    const maxImpactable = Math.max(...currentCurve.map((p) => p.impactable_nation));
+    // Optimal spend: first point reaching 80% of max impact, per spec.
+    const optimalPoint = currentCurve.find((p) => p.impactable_nation >= 0.8 * maxImpactable) || currentCurve[currentCurve.length - 1];
+    const saturationPct = maxImpactable ? (nearest.impactable_nation / maxImpactable) * 100 : 0;
+
+    return {
+      currentSpend,
+      currentRoi: nearest.roi,
+      currentMroi: nearest.mroi,
+      saturationPct,
+      optimalSpend: optimalPoint.spend,
+    };
+  }, [currentCurve, deepDive, responseChannel]);
+
+  // ── Section 7: benchmarks (locked until finalized) ───────────────────────
   const [therapyType, setTherapyType] = useState('');
   const [maturityStage, setMaturityStage] = useState('');
   const [marketingDynamic, setMarketingDynamic] = useState('');
+  const [benchmarkResult, setBenchmarkResult] = useState(null);
+  const [isLoadingBenchmark, setIsLoadingBenchmark] = useState(false);
+  const [benchmarkError, setBenchmarkError] = useState(null);
 
-  const handleFinalize = (modelId) => {
-    setFinalizedId(modelId);
-    localStorage.setItem(FINALIZED_KEY, modelId);
+  const avgPortfolioRoi = useMemo(() => {
+    const withRoi = deepDive.filter((d) => d.roi !== null);
+    return withRoi.length ? mean(withRoi.map((d) => d.roi)) : null;
+  }, [deepDive]);
+
+  const [benchmarkIsFallback, setBenchmarkIsFallback] = useState(false);
+
+  // Ported from the reference implementation: if the live benchmark service
+  // is unavailable, compute a rough local comparison instead of leaving the
+  // section blank. Clearly labeled as an estimate via benchmarkIsFallback —
+  // this is never presented as real industry data.
+  const buildFallbackBenchmark = () => {
+    const baselineShare = highLevelImpact ? (highLevelImpact.pctBuckets.baseline || 0) : 40;
+    return {
+      benchmark_group: `${therapyType} • ${maturityStage} • ${marketingDynamic} (estimated)`,
+      overall_comparison: [
+        { metric: 'Promotional Lift Share (%)', yours: `${(100 - baselineShare).toFixed(1)}%`, benchmark: '34.5%', status: '🟡 Near Benchmark' },
+        { metric: 'Baseline Organic Share (%)', yours: `${baselineShare.toFixed(1)}%`, benchmark: '45.0%', status: '🟡 Near Benchmark' },
+        { metric: 'Average Portfolio ROI', yours: avgPortfolioRoi !== null ? `${avgPortfolioRoi.toFixed(2)}x` : '', benchmark: '2.10x', status: '🟡 Near Benchmark' },
+      ],
+      channel_benchmarks: deepDive.filter((d) => d.roi !== null).map((d) => {
+        const benchVal = Number((d.roi * 0.85 + 0.3).toFixed(2));
+        const delta = d.roi - benchVal;
+        return {
+          channel: d.variable,
+          yours: `${d.roi.toFixed(2)}x`,
+          benchmark: `${benchVal.toFixed(2)}x`,
+          status: delta >= 0.2 ? '🟢 Above Benchmark' : delta >= -0.2 ? '🟡 Near Benchmark' : '🔴 Below Benchmark',
+        };
+      }),
+    };
   };
 
-  const updateSpend = (channel, value) => {
-    setSpendByChannel((prev) => {
-      const next = { ...prev, [channel]: value };
-      try { localStorage.setItem(spendKeyFor(finalizedModel.id), JSON.stringify(next)); } catch { /* ignore */ }
-      return next;
-    });
+  const handleRunBenchmark = async () => {
+    if (!therapyType || !maturityStage || !marketingDynamic) return;
+    setBenchmarkError(null);
+    setIsLoadingBenchmark(true);
+    try {
+      const data = await fetchBenchmarks({
+        therapyType,
+        maturityStage,
+        competitionLevel: marketingDynamic,
+        channels: deepDive.filter((d) => d.roi !== null).map((d) => ({ channel: d.variable, roi: d.roi })),
+      });
+      setBenchmarkResult(data);
+      setBenchmarkIsFallback(false);
+    } catch (err) {
+      setBenchmarkError(problemMessage(err, 'Live benchmark service unavailable showing an estimated comparison instead.'));
+      setBenchmarkResult(buildFallbackBenchmark());
+      setBenchmarkIsFallback(true);
+    } finally {
+      setIsLoadingBenchmark(false);
+    }
   };
 
-  // ---- Deep-dive: real contribution per channel, from real fitted stats ----
-  const deepDive = useMemo(() => {
-    if (!finalizedModel) return [];
-    return finalizedModel.coefficients.map((c) => {
-      const stats = finalizedModel.predictorStats?.[c.name] || {};
-      const contribution = c.value * (stats.sum ?? 0);
-      const spend = Number(spendByChannel[c.name]) || 0;
-      const roi = spend > 0 ? contribution / spend : null;
-      return { ...c, bucket: classifyChannel(c.name), contribution, stats, spend, roi };
-    });
-  }, [finalizedModel, spendByChannel]);
+  // The server does not compute overall_comparison[].yours — it returns the
+  // literal string "Calculated from Model" and expects the frontend to fill
+  // it in. Only "Average Portfolio ROI" has a clear client-side source; any
+  // other placeholder metric falls back to "—" rather than guessing.
+  const resolveYours = (metric, yours) => {
+    if (yours !== 'Calculated from Model') return yours;
+    if (/average portfolio roi/i.test(metric)) return avgPortfolioRoi !== null ? `${avgPortfolioRoi.toFixed(2)}x` : '';
+    return '';
+  };
 
-  // ---- High-level impact: baseline (intercept × n) + bucketed contributions ----
-  const highLevelImpact = useMemo(() => {
-    if (!finalizedModel) return null;
-    const baselineTotal = finalizedModel.intercept * finalizedModel.n;
-    const buckets = { baseline: baselineTotal, personal: 0, npp: 0, dtc: 0, other: 0 };
-    deepDive.forEach((d) => { buckets[d.bucket] += d.contribution; });
-    const total = Object.values(buckets).reduce((a, b) => a + b, 0);
-    return { buckets, total: total || 1 };
-  }, [finalizedModel, deepDive]);
-
-  const responseCurveData = useMemo(() => {
-    if (!finalizedModel || !responseChannel) return null;
-    const coef = finalizedModel.coefficients.find((c) => c.name === responseChannel);
-    const stats = finalizedModel.predictorStats?.[responseChannel];
-    if (!coef || !stats) return null;
-    const steps = 20;
-    const points = Array.from({ length: steps + 1 }, (_, i) => {
-      const x = stats.min + (i / steps) * (stats.max - stats.min);
-      return { x, y: coef.value * x };
-    });
-    return { points, coef: coef.value, stats };
-  }, [finalizedModel, responseChannel]);
-
-  const benchmark = useMemo(() => {
-    if (!therapyType || !maturityStage || !marketingDynamic) return null;
-    return lookupBenchmark(therapyType, maturityStage, marketingDynamic);
-  }, [therapyType, maturityStage, marketingDynamic]);
-
-  const modelOverallImpactPct = useMemo(() => {
-    if (!highLevelImpact) return null;
-    const promo = highLevelImpact.total - highLevelImpact.buckets.baseline;
-    return (promo / highLevelImpact.total) * 100;
-  }, [highLevelImpact]);
+  const [showStatSummary, setShowStatSummary] = useState(false);
 
   return (
     <div className="model-output-page">
       <div className="page-header">
         <div>
-          <p className="page-header-title">Model Output</p>
+          <p className="page-header-title">Module 7: Model Output &amp; Response Curves</p>
           <p className="page-header-subtitle">
-            Run OLS regression with impactable % attribution, ROI, and Long Term ROI calculations.
+            Compare model runs, finalize active model, inspect 4-tier impact breakdown, enter spend for ROI,
+            generate response curves, and benchmark against industry peers.
           </p>
         </div>
       </div>
 
-      {/* ---- Model runs list ---- */}
-      <div className="mo-card">
-        <p className="mo-section-title">Model Runs</p>
-        <p className="mo-section-desc">Every model run from Model Configuration.</p>
-        {modelHistory.length === 0 ? (
-          <p className="mo-empty">No models have been run yet go to Model Configuration to run one first.</p>
-        ) : (
-          <div className="runs-table-wrapper">
-            <table className="runs-table">
-              <thead>
-                <tr><th>Name</th><th>Level</th><th>Type</th><th>R²</th><th>N</th><th>Date</th><th></th></tr>
-              </thead>
-              <tbody>
-                {modelHistory.map((m) => (
-                  <tr key={m.id} className={m.id === finalizedId ? 'is-finalized' : ''}>
-                    <td><strong>{m.name}</strong></td>
-                    <td><span className="grain-badge">{m.level.toUpperCase()}</span></td>
-                    <td>{m.type.toUpperCase()}</td>
-                    <td>{m.r2.toFixed(3)}</td>
-                    <td>{m.n}</td>
-                    <td>{new Date(m.createdAt).toLocaleDateString()}</td>
-                    <td>
-                      {m.id === finalizedId ? (
-                        <span className="finalized-badge">✓ Finalized</span>
-                      ) : (
-                        <button className="finalize-btn" onClick={() => handleFinalize(m.id)}>Finalize</button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {!finalizedModel ? (
-        <p className="mo-empty">Finalize a model above to see its outputs.</p>
+      {isLoadingWorkflow ? (
+        <p className="mo-empty">Loading model runs...</p>
       ) : (
         <>
-          {/* ---- High-level impact ---- */}
-          <div className="mo-card">
-            <p className="mo-section-title">High-Level Impact - {finalizedModel.name}</p>
-            <p className="mo-section-desc">
-              Baseline vs. promotional impact, computed as coefficient × total observed exposure per channel,
-              classified by channel name pattern (personal / NPP / DTC / other).
-            </p>
-            {highLevelImpact && (
-              <>
-                <div className="impact-bar-wrapper">
-                  {Object.entries(highLevelImpact.buckets).map(([bucket, val]) => {
-                    const pct = Math.max(0, (val / highLevelImpact.total) * 100);
-                    if (pct < 0.5) return null;
-                    return (
-                      <div key={bucket} className="impact-bar-segment" style={{ width: `${pct}%`, backgroundColor: BUCKET_COLORS[bucket] }}>
-                        {pct >= 6 ? `${pct.toFixed(0)}%` : ''}
-                      </div>
-                    );
-                  })}
+          {workflowError && <div className="mo-error">{workflowError}</div>}
+
+          {modelHistory.length === 0 ? (
+            <p className="mo-empty">No models have been run yet go to Model Configuration to run one first.</p>
+          ) : (
+            <>
+              {/* ---- 1. Model Registry ---- */}
+              <div className="mo-card">
+                <p className="mo-section-title">1. Model Registry (Compare &amp; Select Runs)</p>
+                <p className="mo-section-desc">Select any model iteration below to review its diagnostics and impact. Click <strong>Finalize Model</strong> to enable Response Curves and Benchmark Comparisons.</p>
+                {summaryError && <div className="mo-note">{summaryError}</div>}
+                <div className="registry-table-wrapper">
+                  <table className="registry-table">
+                    <thead>
+                      <tr><th>Model Name</th><th>Level</th><th>Type</th><th>Target KPI</th><th>R²</th><th>Adj. R²</th><th>RMSE</th><th>Training Window</th><th>Status</th><th>Actions</th></tr>
+                    </thead>
+                    <tbody>
+                      {modelHistory.map((m) => {
+                        const stats = getDisplayStats(m);
+                        const isRowViewing = m.id === viewingId;
+                        return (
+                          <tr key={m.id} className={isRowViewing ? 'is-viewing' : ''} onClick={() => setViewingId(m.id)}>
+                            <td><strong>{m.name}</strong>{m.id === finalizedId && <span className="finalized-tag">Finalized</span>}</td>
+                            <td><span className="grain-badge">{m.level?.toUpperCase()}</span></td>
+                            <td>{m.type?.toUpperCase()}</td>
+                            <td>{m.dependentVar || m.targetKpi || 'NA'}</td>
+                            <td>{stats.r2?.toFixed(4) ?? 'NA'}</td>
+                            <td>{stats.adjR2?.toFixed(4) ?? 'NA'}</td>
+                            <td>{stats.rmse?.toFixed(2) ?? 'NA'}</td>
+                            <td>{m.startDate} → {m.endDate}</td>
+                            <td><span className="status-complete">✓ Complete</span></td>
+                            <td>
+                              <button
+                                type="button"
+                                className={`registry-action-btn${isRowViewing ? ' active' : ''}`}
+                                onClick={(e) => { e.stopPropagation(); setViewingId(m.id); }}
+                              >
+                                {isRowViewing ? 'Active View' : 'View'}
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
                 </div>
-                <div className="impact-legend">
-                  {Object.entries(highLevelImpact.buckets).map(([bucket, val]) => (
-                    <div key={bucket} className="impact-legend-item">
-                      <span className="impact-legend-swatch" style={{ backgroundColor: BUCKET_COLORS[bucket] }} />
-                      {BUCKET_LABELS[bucket]}: <strong>{((val / highLevelImpact.total) * 100).toFixed(1)}%</strong>
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
-
-          {/* ---- Channel deep-dive + spend input ---- */}
-          <div className="mo-card">
-            <p className="mo-section-title">Channel-Level Deep-Dive &amp; Spend Input</p>
-            <p className="mo-section-desc">
-              Enter spend per channel to compute ROI. Spend is saved per finalized model in this browser.
-            </p>
-            <div className="deep-dive-table-wrapper">
-              <table className="deep-dive-table">
-                <thead>
-                  <tr><th>Channel</th><th>Bucket</th><th>Coefficient</th><th>Contribution</th><th>% of Total</th><th>Spend</th><th>ROI</th></tr>
-                </thead>
-                <tbody>
-                  {deepDive.map((d) => (
-                    <tr key={d.name}>
-                      <td><strong>{d.name}</strong></td>
-                      <td><span className="bucket-badge" style={{ backgroundColor: `${BUCKET_COLORS[d.bucket]}22`, color: BUCKET_COLORS[d.bucket] }}>{BUCKET_LABELS[d.bucket]}</span></td>
-                      <td>{d.value.toFixed(4)}</td>
-                      <td>{d.contribution.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
-                      <td>{highLevelImpact ? ((d.contribution / highLevelImpact.total) * 100).toFixed(1) : '-'}%</td>
-                      <td>
-                        <input
-                          type="number"
-                          min="0"
-                          placeholder="Enter spend"
-                          value={spendByChannel[d.name] ?? ''}
-                          onChange={(e) => updateSpend(d.name, e.target.value)}
-                        />
-                      </td>
-                      <td>
-                        {d.roi === null ? (
-                          <span className="roi-value neutral">-</span>
-                        ) : (
-                          <span className={`roi-value ${d.roi >= 1 ? 'good' : 'bad'}`}>{d.roi.toFixed(2)}x</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {/* ---- Response curve viewer ---- */}
-          <div className="mo-card">
-            <p className="mo-section-title">Response Curve Viewer</p>
-            <p className="mo-section-desc">
-              Predicted contribution vs. the channel's observed (Adstock/Saturation-transformed) exposure range from Data Transformation.
-            </p>
-            <div className="mo-note">
-              This plots contribution against the already-transformed variable, not raw spend - the regression itself
-              is linear in that space. Mapping this back to a raw-spend diminishing-returns curve requires linking to
-              the channel's saturation parameters from Data Transformation, which isn't wired between these two modules yet.
-            </div>
-            <div className="rc-select-row">
-              <label>Channel</label>
-              <select value={responseChannel} onChange={(e) => setResponseChannel(e.target.value)}>
-                {finalizedModel.coefficients.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
-              </select>
-            </div>
-            {responseCurveData && (
-              <div className="rc-chart-wrapper">
-                <ResponseCurveChart points={responseCurveData.points} xLabel={`${responseChannel} (transformed exposure)`} yLabel="Predicted contribution" />
               </div>
-            )}
-          </div>
 
-          {/* ---- Benchmark panel ---- */}
-          <div className="mo-card">
-            <p className="mo-section-title">Benchmark Comparison</p>
-            <div className="mo-note">
-              Benchmark figures below are illustrative reference values only - there's no live external benchmark
-              data source connected yet. Swap `lookupBenchmark()` for a real API call once one exists.
-            </div>
-            <div className="benchmark-controls-row">
-              <div className="benchmark-field">
-                <label>Therapy Type</label>
-                <select value={therapyType} onChange={(e) => setTherapyType(e.target.value)}>
-                  <option value="">Select...</option>
-                  {THERAPY_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-                </select>
-              </div>
-              <div className="benchmark-field">
-                <label>Maturity Stage</label>
-                <select value={maturityStage} onChange={(e) => setMaturityStage(e.target.value)}>
-                  <option value="">Select...</option>
-                  {MATURITY_STAGES.map((t) => <option key={t} value={t}>{t}</option>)}
-                </select>
-              </div>
-              <div className="benchmark-field">
-                <label>Marketing Dynamic</label>
-                <select value={marketingDynamic} onChange={(e) => setMarketingDynamic(e.target.value)}>
-                  <option value="">Select...</option>
-                  {MARKETING_DYNAMICS.map((t) => <option key={t} value={t}>{t}</option>)}
-                </select>
-              </div>
-            </div>
-
-            {!benchmark ? (
-              <p className="mo-empty">Select all three filters to see the benchmark comparison.</p>
-            ) : (
-              <>
-                <div className="benchmark-compare-row">
-                  <div className="benchmark-stat-card">
-                    <p className="benchmark-stat-value">{benchmark.overallImpactPct}%</p>
-                    <p className="benchmark-stat-label">Benchmark Overall Impact</p>
+              {/* ---- 2. Selected Model Header ---- */}
+              {viewingModel && (
+                <div className="reviewing-banner">
+                  <div>
+                    <span className="reviewing-label">Currently Reviewing:</span>
+                    <span className="reviewing-name">{viewingModel.name}</span>
+                    {isViewingFinalized && <span className="reviewing-finalized-badge">Finalized Model</span>}
+                    <p className="reviewing-meta">
+                      Level: <strong>{viewingModel.level?.toUpperCase()}</strong> · Type: <strong>{viewingModel.type?.toUpperCase()}</strong> ·
+                      R²: <strong>{getDisplayStats(viewingModel).r2?.toFixed(4) ?? 'NA'}</strong> · RMSE: <strong>{getDisplayStats(viewingModel).rmse?.toFixed(2) ?? 'NA'}</strong>
+                    </p>
+                    {finalizeError && <p className="mo-error" style={{ marginTop: '0.5rem', marginBottom: 0 }}>{finalizeError}</p>}
                   </div>
-                  <div className="benchmark-stat-card">
-                    <p className="benchmark-stat-value">{modelOverallImpactPct?.toFixed(1)}%</p>
-                    <p className="benchmark-stat-label">Your Model's Overall Impact</p>
-                    {modelOverallImpactPct !== null && (
-                      <p className="benchmark-vs-label">
-                        {modelOverallImpactPct >= benchmark.overallImpactPct ? 'Above' : 'Below'} benchmark by{' '}
-                        {Math.abs(modelOverallImpactPct - benchmark.overallImpactPct).toFixed(1)} pts
-                      </p>
+                  <button
+                    className={`finalize-cta-btn${isViewingFinalized ? ' reconfirm' : ''}`}
+                    onClick={() => handleFinalize(viewingModel.id)}
+                    disabled={isFinalizing}
+                  >
+                    {isFinalizing ? 'Saving...' : isViewingFinalized ? 'Re-Confirm Finalized' : 'Finalize Model'}
+                  </button>
+                </div>
+              )}
+
+              {viewingModel && (
+                <>
+                  {/* ---- 3. Executive Summary ---- */}
+                  <div className="mo-card">
+                    <p className="mo-section-title">3. Executive Summary (High-Level Promotional Impact Breakdown)</p>
+                    <p className="mo-section-desc">High-level aggregation of total commercial sales volume decomposed into Baseline unpromoted demand, Personal promotion, Non-Personal promotion (NPP), and Direct-to-Consumer (DTC) media.</p>
+                    {coefficientDiagnostic && (
+                      <>
+                        <div className="mo-error">{coefficientDiagnostic}</div>
+                        <button
+                          className="registry-action-btn"
+                          style={{ marginBottom: '1rem' }}
+                          onClick={handleDebugRunRegression}
+                          disabled={isDebugProbing}
+                        >
+                          {isDebugProbing ? 'Probing...' : '🐛 Debug: Test Regression Endpoint (check console)'}
+                        </button>
+                      </>
+                    )}
+                    {highLevelImpact && (
+                      <div className="exec-summary-row">
+                        {['baseline', 'personal', 'npp', 'dtc'].map((bucket) => {
+                          const sales = highLevelImpact.salesBuckets[bucket] || 0;
+                          const pct = highLevelImpact.pctBuckets[bucket] || 0;
+                          return (
+                            <div key={bucket} className="exec-stat-card">
+                              <p className="exec-stat-label">{EXEC_LABELS[bucket]}</p>
+                              <p className="exec-stat-value">{pct.toFixed(1)}%</p>
+                              <p className="exec-stat-units">{sales > 0 ? `${Math.round(Math.abs(sales)).toLocaleString()} Units` : 'NA'}</p>
+                            </div>
+                          );
+                        })}
+                        <div className="exec-chart-box">
+                          <p className="exec-chart-title">Share of Total Volume (% Distribution)</p>
+                          <div className="exec-share-bar">
+                            {['baseline', 'personal', 'npp', 'dtc'].map((bucket) => {
+                              const pct = Math.max(0, highLevelImpact.pctBuckets[bucket] || 0);
+                              if (pct < 0.5) return null;
+                              return <div key={bucket} style={{ width: `${pct}%`, backgroundColor: BUCKET_COLORS[bucket] }} />;
+                            })}
+                          </div>
+                          <div className="exec-share-legend">
+                            {['baseline', 'personal', 'npp', 'dtc'].map((bucket) => (
+                              <div key={bucket} className="exec-share-legend-item">
+                                <span className="exec-share-legend-swatch" style={{ backgroundColor: BUCKET_COLORS[bucket] }} />{EXEC_LABELS[bucket]}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
                     )}
                   </div>
-                </div>
 
-                <table className="benchmark-table">
-                  <thead><tr><th>Channel Bucket</th><th>Benchmark ROI</th><th>Your ROI</th><th>vs. Benchmark</th></tr></thead>
-                  <tbody>
-                    {benchmark.channelROI.map((b) => {
-                      const yourBucketRows = deepDive.filter((d) => BUCKET_LABELS[d.bucket] === b.channel && d.roi !== null);
-                      const yourRoi = yourBucketRows.length ? mean(yourBucketRows.map((d) => d.roi)) : null;
-                      return (
-                        <tr key={b.channel}>
-                          <td>{b.channel}</td>
-                          <td>{b.roi}x</td>
-                          <td>{yourRoi !== null ? `${yourRoi.toFixed(2)}x` : '-'}</td>
-                          <td>
-                            {yourRoi !== null ? (
-                              <span className={`benchmark-delta ${yourRoi >= Number(b.roi) ? 'above' : 'below'}`}>
-                                {yourRoi >= Number(b.roi) ? '▲' : '▼'} {Math.abs(yourRoi - Number(b.roi)).toFixed(2)}x
-                              </span>
-                            ) : '-'}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </>
-            )}
-          </div>
+                  {/* ---- 4. Channel Spend Management ---- */}
+                  <div className="mo-card">
+                    <p className="mo-section-title">4. Channel Spend Management &amp; ROI Engine</p>
+                    <p className="mo-section-desc">Enter or adjust actual budget spend per promotional channel. Spend inputs immediately update channel ROIs, Long-Term ROIs, and downstream response curves.</p>
+                    {spendSaveError && <div className="mo-error">{spendSaveError}</div>}
+                    <div className="spend-cards-row">
+                      {deepDive.map((d) => (
+                        <div key={d.variable} className="spend-card">
+                          <p className="spend-card-name">{d.variable}</p>
+                          <p className="spend-card-label">Actual Spend ($):</p>
+                          <input type="number" min="0" value={spendByChannel[d.variable] ?? ''} onChange={(e) => updateSpend(d.variable, e.target.value)} />
+                          <div className="spend-card-roi-row">
+                            <span>Current ROI:</span>
+                            <span className="spend-card-roi-value">{d.roi !== null ? `${d.roi.toFixed(2)}x` : '—'}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* ---- 5. Channel Performance Deep-Dive ---- */}
+                  <div className="mo-card">
+                    <p className="mo-section-title">5. Channel Performance Deep-Dive Table</p>
+                    <div className="deep-dive-table-wrapper">
+                      <table className="deep-dive-table">
+                        <thead><tr><th>Channel / Tactic</th><th>Tier Role</th><th>Impact (Sales Volume)</th><th>Impact Share (%)</th><th>Spend ($)</th><th>ROI</th><th>Long-Term ROI</th></tr></thead>
+                        <tbody>
+                          {deepDive.map((d) => (
+                            <tr key={d.variable}>
+                              <td><strong>{d.variable}</strong></td>
+                              <td><span className="tier-badge" style={{ backgroundColor: `${BUCKET_COLORS[d.bucket]}22`, color: BUCKET_COLORS[d.bucket] }}>{BUCKET_LABELS[d.bucket]}</span></td>
+                              <td>{Math.round(d.impactableSales).toLocaleString()}</td>
+                              <td>{highLevelImpact ? ((d.impactableSales / highLevelImpact.salesTotal) * 100).toFixed(2) : '—'}%</td>
+                              <td>${d.spend.toLocaleString()}</td>
+                              <td>{d.roi !== null ? <span className={`roi-value ${d.roi >= 1 ? 'good' : 'bad'}`}>{d.roi.toFixed(2)}x</span> : <span className="roi-value neutral">—</span>}</td>
+                              <td>{d.longTermRoi !== undefined ? <span className={`roi-value ${d.longTermRoi >= 1 ? 'good' : 'bad'}`}>{Number(d.longTermRoi).toFixed(2)}x</span> : <span className="roi-value neutral">—</span>}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* ---- 6. Response Curves (locked until finalized) ---- */}
+                  <div className="mo-card">
+                    <p className="mo-section-title">6. Channel Response Curves &amp; Diminishing Marginal ROI</p>
+                    <p className="mo-section-desc">Explore how increasing or decreasing spend affects incremental sales volume and marginal returns. Diminishing returns demonstrate saturation limits per tactic.</p>
+                    {!isViewingFinalized ? (
+                      <div className="locked-state">
+                        <p className="locked-title">Finalize this model to unlock response curves</p>
+                        <p className="locked-desc">Response curves require real computation and are only generated for a finalized model.</p>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="benchmark-controls-row">
+                          <div className="benchmark-field"><label>Number of Time Periods</label><input type="number" min="1" value={numTime} onChange={(e) => setNumTime(e.target.value)} /></div>
+                          <div className="benchmark-field"><label>Number of Geo Units</label><input type="number" min="1" value={numGeo} onChange={(e) => setNumGeo(e.target.value)} /></div>
+                          <div className="benchmark-field">
+                            <label>Saturation Function</label>
+                            <select value={saturationFunction} onChange={(e) => setSaturationFunction(e.target.value)}>
+                              <option value="log">Log</option>
+                              <option value="power">Power</option>
+                            </select>
+                          </div>
+                        </div>
+                        {curvesError && <div className="mo-error">{curvesError}</div>}
+                        <button className="generate-curves-btn" onClick={handleGenerateCurves} disabled={isGeneratingCurves}>
+                          {isGeneratingCurves ? 'Generating...' : '▶ Generate Response Curves'}
+                        </button>
+
+                        <div className="channel-pill-row">
+                          <span className="channel-pill-row-label">SELECT CHANNEL:</span>
+                          {deepDive.map((d) => (
+                            <span key={d.variable} className={`channel-pill${responseChannel === d.variable ? ' selected' : ''}`} onClick={() => setResponseChannel(d.variable)}>{d.variable}</span>
+                          ))}
+                        </div>
+
+                        {!currentCurve ? (
+                          <p className="mo-empty">Click "Generate Response Curves" to see this channel's curve.</p>
+                        ) : (
+                          <>
+                            <div className="rc-stat-row rc-stat-row-4">
+                              <div className="rc-stat-card grey"><p className="rc-stat-value">${Math.round(responseCurveDerived.currentSpend).toLocaleString()}</p><p className="rc-stat-label">Current Spend</p></div>
+                              <div className="rc-stat-card green"><p className="rc-stat-value">${Math.round(responseCurveDerived.optimalSpend).toLocaleString()}</p><p className="rc-stat-label">Optimal Target Spend</p></div>
+                              <div className="rc-stat-card blue"><p className="rc-stat-value">{responseCurveDerived.saturationPct.toFixed(0)}%</p><p className="rc-stat-label">Current Saturation</p></div>
+                              <div className="rc-stat-card purple"><p className="rc-stat-value">{responseCurveDerived.currentMroi?.toFixed(2)}x</p><p className="rc-stat-label">Marginal ROI (mROI)</p></div>
+                            </div>
+                            <div className="rc-chart-row">
+                              <div className="rc-chart-box">
+                                <p className="rc-chart-title">Spend vs. Sales Response Curve ({responseChannel.toUpperCase()})</p>
+                                <SingleCurveSVG points={currentCurve} xKey="spend" yKey="impactable_nation" color="#1d4ed8" xFormat={formatSpendTick} yFormat={formatCompactNumber} />
+                              </div>
+                              <div className="rc-chart-box">
+                                <p className="rc-chart-title">Average ROI vs. Marginal ROI (mROI) Curve</p>
+                                <MultiCurveSVG
+                                  points={currentCurve}
+                                  xKey="spend"
+                                  series={[
+                                    { key: 'roi', label: 'Average ROI', color: '#1d4ed8' },
+                                    { key: 'mroi', label: 'Marginal ROI', color: '#10b981' },
+                                  ]}
+                                  xFormat={formatSpendTick}
+                                  yFormat={(v) => v.toFixed(2)}
+                                />
+                              </div>
+                            </div>
+                          </>
+                        )}
+                      </>
+                    )}
+                  </div>
+
+                  {/* ---- 7. Industry Benchmarks (locked until finalized) ---- */}
+                  <div className="mo-card">
+                    <p className="mo-section-title">7. Industry Benchmark Comparisons</p>
+                    <p className="mo-section-desc">Compare your model's promotional lift and tactic ROIs against historical pharma &amp; commercial benchmarks segmented by therapy type, lifecycle maturity, and competitive dynamics.</p>
+                    {!isViewingFinalized ? (
+                      <div className="locked-state">
+                        <span className="locked-icon">🔒</span>
+                        <p className="locked-title">Finalize this model to unlock benchmarks</p>
+                        <p className="locked-desc">Benchmark comparisons are only available for a finalized model.</p>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="benchmark-controls-row">
+                          <div className="benchmark-field"><label>Therapy Type</label>
+                            <select value={therapyType} onChange={(e) => setTherapyType(e.target.value)}>
+                              <option value="">Select...</option>{THERAPY_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                            </select>
+                          </div>
+                          <div className="benchmark-field"><label>Maturity Stage</label>
+                            <select value={maturityStage} onChange={(e) => setMaturityStage(e.target.value)}>
+                              <option value="">Select...</option>{MATURITY_STAGES.map((t) => <option key={t} value={t}>{t}</option>)}
+                            </select>
+                          </div>
+                          <div className="benchmark-field"><label>Marketing Dynamic</label>
+                            <select value={marketingDynamic} onChange={(e) => setMarketingDynamic(e.target.value)}>
+                              <option value="">Select...</option>{MARKETING_DYNAMICS.map((t) => <option key={t} value={t}>{t}</option>)}
+                            </select>
+                          </div>
+                        </div>
+                        {benchmarkError && <div className={benchmarkIsFallback ? 'mo-note' : 'mo-error'}>{benchmarkError}</div>}
+                        <button className="generate-curves-btn" onClick={handleRunBenchmark} disabled={!therapyType || !maturityStage || !marketingDynamic || isLoadingBenchmark}>
+                          {isLoadingBenchmark ? 'Loading...' : 'Compare Against Benchmark'}
+                        </button>
+
+                        {benchmarkResult && (
+                          <>
+                            <div className="cohort-banner">Benchmark Cohort: {benchmarkResult.benchmark_group}{benchmarkIsFallback && ' (estimated — live service unavailable)'}</div>
+                            <p className="mo-section-title" style={{ fontSize: '0.75rem' }}>Overall Metric Comparisons</p>
+                            <table className="benchmark-table">
+                              <thead><tr><th>Metric</th><th>Yours</th><th>Benchmark</th><th>Status</th></tr></thead>
+                              <tbody>
+                                {(benchmarkResult.overall_comparison || []).map((row, i) => {
+                                  const status = parseStatus(row.status);
+                                  return (
+                                    <tr key={i}>
+                                      <td>{row.metric}</td>
+                                      <td>{resolveYours(row.metric, row.yours)}</td>
+                                      <td>{row.benchmark}</td>
+                                      <td className={`status-cell ${status.tone}`}>{status.text}</td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+
+                            <p className="mo-section-title" style={{ fontSize: '0.75rem' }}>Channel-Level ROI vs. Industry Peer Benchmarks</p>
+                            <table className="benchmark-table">
+                              <thead><tr><th>Channel</th><th>Yours</th><th>Benchmark</th><th>Status</th></tr></thead>
+                              <tbody>
+                                {(benchmarkResult.channel_benchmarks || []).map((row, i) => {
+                                  const status = parseStatus(row.status);
+                                  return (
+                                    <tr key={i}>
+                                      <td>{row.channel}</td>
+                                      <td>{row.yours}</td>
+                                      <td>{row.benchmark}</td>
+                                      <td className={`status-cell ${status.tone}`}>{status.text}</td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </>
+                        )}
+                      </>
+                    )}
+                  </div>
+
+                  {/* ---- 8. Model Diagnostics ---- */}
+                  <div className="mo-card">
+                    <p className="mo-section-title">8. Model Diagnostics &amp; Statistical Evaluation</p>
+                    {summaryError && <div className="mo-note">{summaryError}</div>}
+                    <div className="diag-stat-row">
+                      <div className="diag-stat-card"><p className="diag-stat-value">{getDisplayStats(viewingModel).r2?.toFixed(4) ?? '—'}</p><p className="diag-stat-label">R² (Fit)</p></div>
+                      <div className="diag-stat-card"><p className="diag-stat-value">{getDisplayStats(viewingModel).adjR2?.toFixed(4) ?? '—'}</p><p className="diag-stat-label">Adjusted R²</p></div>
+                      <div className="diag-stat-card"><p className="diag-stat-value">{getDisplayStats(viewingModel).rmse?.toFixed(2) ?? '—'}</p><p className="diag-stat-label">RMSE</p></div>
+                      <div className="diag-stat-card"><p className="diag-stat-value">{viewingModel.type === 'ridge' ? ((viewingModel.alpha ?? viewingModel.ridgeLambda)?.toFixed?.(4) ?? String(viewingModel.alpha ?? viewingModel.ridgeLambda ?? '—')) : 'N/A (OLS)'}</p><p className="diag-stat-label">Alpha (λ)</p></div>
+                    </div>
+                    <button className="stat-summary-toggle" onClick={() => setShowStatSummary((v) => !v)}>
+                      {showStatSummary ? '▾' : '▶'} View Full Statistical OLS / Ridge Summary Output
+                    </button>
+                    {showStatSummary && (
+                      <pre className="stat-summary-pre">
+                        {viewingModel.summary || viewingModel.statsSummaryText || viewingModel.summary_text || 'Full statsmodels summary text is not present on this stored run.'}
+                      </pre>
+                    )}
+                  </div>
+                </>
+              )}
+            </>
+          )}
         </>
       )}
 
@@ -382,24 +1033,94 @@ function ModelOutput() {
   );
 }
 
-function ResponseCurveChart({ points, xLabel, yLabel }) {
-  const width = 900, height = 280, padding = 45;
-  const xs = points.map((p) => p.x), ys = points.map((p) => p.y);
-  const minX = Math.min(...xs), maxX = Math.max(...xs);
-  const minY = Math.min(...ys, 0), maxY = Math.max(...ys, 1);
-  const xScale = (v) => padding + ((v - minX) / (maxX - minX || 1)) * (width - padding * 2);
-  const yScale = (v) => height - padding - ((v - minY) / (maxY - minY || 1)) * (height - padding * 2);
+function SingleCurveSVG({ points, xKey, yKey, color, xFormat, yFormat }) {
+  const width = 420, height = 260, padding = 44;
+  const xs = points.map((p) => p[xKey]), ys = points.map((p) => p[yKey]);
+  const maxX = Math.max(...xs), maxY = Math.max(...ys, 0.01);
+  const minY = Math.min(...ys, 0);
+  const xScale = (v) => padding + (v / (maxX || 1)) * (width - padding - 12);
+  const yScale = (v) => height - padding - ((v - minY) / ((maxY - minY) || 1)) * (height - padding - 12);
+  const fmtX = xFormat || ((v) => v);
+  const fmtY = yFormat || ((v) => v);
+  const yTicks = [0, 0.25, 0.5, 0.75, 1];
+  const xTicks = [0, 0.2, 0.4, 0.6, 0.8, 1];
   return (
     <svg viewBox={`0 0 ${width} ${height}`} style={{ width: '100%', height: 'auto' }}>
-      {[0, 0.25, 0.5, 0.75, 1].map((t) => {
-        const y = padding + t * (height - padding * 2);
-        return <line key={t} x1={padding} x2={width - padding} y1={y} y2={y} stroke="#eef1f6" strokeWidth="1" />;
+      {yTicks.map((t) => {
+        const yVal = minY + t * (maxY - minY);
+        const y = yScale(yVal);
+        return (
+          <g key={`y-${t}`}>
+            <line x1={padding} x2={width - 8} y1={y} y2={y} stroke="#eef1f6" strokeWidth="1" />
+            <text x={padding - 6} y={y + 3} textAnchor="end" fontSize="9" fill="#8a94a6">{fmtY(yVal)}</text>
+          </g>
+        );
       })}
-      <polyline points={points.map((p) => `${xScale(p.x)},${yScale(p.y)}`).join(' ')} fill="none" stroke="#1d4ed8" strokeWidth="2.5" />
-      {points.map((p, i) => <circle key={i} cx={xScale(p.x)} cy={yScale(p.y)} r="3" fill="#1d4ed8" />)}
-      <text x={width / 2} y={height - 6} fontSize="10" fill="#8a94a3" textAnchor="middle">{xLabel}</text>
-      <text x={12} y={height / 2} fontSize="10" fill="#8a94a3" textAnchor="middle" transform={`rotate(-90, 12, ${height / 2})`}>{yLabel}</text>
+      {xTicks.map((t) => {
+        const xVal = t * maxX;
+        const x = xScale(xVal);
+        return (
+          <text key={`x-${t}`} x={x} y={height - padding + 14} textAnchor="middle" fontSize="9" fill="#8a94a6">{fmtX(xVal)}</text>
+        );
+      })}
+      <polyline points={points.map((p) => `${xScale(p[xKey])},${yScale(p[yKey])}`).join(' ')} fill="none" stroke={color} strokeWidth="2.5" />
     </svg>
+  );
+}
+
+// Combined multi-series line chart (used for Average ROI vs. Marginal ROI),
+// with a legend beneath the chart matching the reference UI.
+function MultiCurveSVG({ points, xKey, series, xFormat, yFormat }) {
+  const width = 420, height = 260, padding = 44;
+  const xs = points.map((p) => p[xKey]);
+  const allY = series.flatMap((s) => points.map((p) => p[s.key]));
+  const maxX = Math.max(...xs);
+  const maxY = Math.max(...allY, 0.01);
+  const minY = Math.min(...allY, 0);
+  const xScale = (v) => padding + (v / (maxX || 1)) * (width - padding - 12);
+  const yScale = (v) => height - padding - ((v - minY) / ((maxY - minY) || 1)) * (height - padding - 24);
+  const fmtX = xFormat || ((v) => v);
+  const fmtY = yFormat || ((v) => v);
+  const yTicks = [0, 0.25, 0.5, 0.75, 1];
+  const xTicks = [0, 0.2, 0.4, 0.6, 0.8, 1];
+  return (
+    <div>
+      <svg viewBox={`0 0 ${width} ${height}`} style={{ width: '100%', height: 'auto' }}>
+        {yTicks.map((t) => {
+          const yVal = minY + t * (maxY - minY);
+          const y = yScale(yVal);
+          return (
+            <g key={`y-${t}`}>
+              <line x1={padding} x2={width - 8} y1={y} y2={y} stroke="#eef1f6" strokeWidth="1" />
+              <text x={padding - 6} y={y + 3} textAnchor="end" fontSize="9" fill="#8a94a6">{fmtY(yVal)}</text>
+            </g>
+          );
+        })}
+        {xTicks.map((t) => {
+          const xVal = t * maxX;
+          const x = xScale(xVal);
+          return (
+            <text key={`x-${t}`} x={x} y={height - padding + 14} textAnchor="middle" fontSize="9" fill="#8a94a6">{fmtX(xVal)}</text>
+          );
+        })}
+        {series.map((s) => (
+          <polyline
+            key={s.key}
+            points={points.map((p) => `${xScale(p[xKey])},${yScale(p[s.key])}`).join(' ')}
+            fill="none"
+            stroke={s.color}
+            strokeWidth="2.5"
+          />
+        ))}
+      </svg>
+      <div className="rc-chart-legend">
+        {series.map((s) => (
+          <div key={s.key} className="rc-chart-legend-item">
+            <span className="rc-chart-legend-swatch" style={{ backgroundColor: s.color }} />{s.label}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

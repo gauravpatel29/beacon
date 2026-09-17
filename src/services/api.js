@@ -451,3 +451,27 @@ export function problemMessage(err, fallback = 'Something went wrong.') {
   if (err instanceof ApiError) return err.text;
   return err?.message || fallback;
 }
+
+// ─── Module 7: Results, Response Curves & Benchmarks ──────────────────────
+// Same request()/json() pattern as every other section above. The previous
+// version of this block referenced an undefined `API` object (axios-style
+// calls that don't belong in this fetch()-based file) and would have thrown
+// "API is not defined" the moment any of these were actually called — that's
+// what the browser's "does not provide an export named ..." error was
+// pointing at.
+const resultsPost = (endpoint, payload) =>
+  request(`/api/results/${endpoint}`, { method: 'POST', ...json(payload) });
+
+/** Formats/normalizes regression diagnostics across iterations. Used by Sections 1 & 8 of Model Output. */
+export const resultsSummary = (payload) => resultsPost('summary', payload);
+
+/** Industry ROI comparison by therapy/maturity/competition. Used by Section 7 of Model Output. */
+export const fetchBenchmarkComparison = (payload) => resultsPost('benchmarks', payload);
+
+/** Saturation curves + incremental sales + mROI per channel. Used by Section 6 of Model Output. */
+export const generateResponseCurves = (payload) =>
+  request('/api/response-curves/generate', { method: 'POST', ...json(payload) });
+
+/** Budget optimization across channels — not yet wired to any Model Output section. */
+export const runOptimization = (payload) =>
+  request('/api/optimization/run', { method: 'POST', ...json(payload) });

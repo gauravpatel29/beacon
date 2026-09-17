@@ -60,6 +60,32 @@
 .run-optimizer-btn:hover { opacity: 0.92; }
 .run-optimizer-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* ---- Model linkage badges ---- */
+.model-badge {
+  font-size: 0.72rem; font-weight: var(--font-weight-bold); padding: 0.3rem 0.7rem;
+  border-radius: var(--radius-pill); white-space: nowrap;
+}
+.model-badge.level { background-color: var(--color-primary-light); color: var(--color-primary); }
+.model-badge.type { background-color: #eef1f6; color: var(--color-text-secondary); }
+.model-badge.finalized { background-color: #eafaf0; color: #1f8a4c; border: 1px solid #b7e4c7; }
+.model-badge.warn { background-color: #fdf3e3; color: #8a5a10; border: 1px solid #e0a940; }
+
+/* ---- Constraint preset buttons ---- */
+.constraint-preset-btn {
+  padding: 0.45rem 0.9rem; border-radius: var(--radius-pill); border: 1px solid var(--color-border);
+  background-color: #f7f9fc; color: var(--color-text-secondary); font-size: 0.75rem; font-weight: var(--font-weight-semibold);
+  white-space: nowrap; cursor: pointer;
+}
+.constraint-preset-btn:hover { background-color: #eef1f6; }
+
+/* ---- Scenario history "Load" action button ---- */
+.registry-action-btn {
+  padding: 0.4rem 0.9rem; border-radius: var(--radius-pill); border: 1px solid var(--color-border);
+  background-color: var(--color-white); color: var(--color-text-secondary); font-size: 0.72rem; font-weight: var(--font-weight-semibold);
+  white-space: nowrap; cursor: pointer;
+}
+.registry-action-btn:hover { background-color: var(--color-primary-light); border-color: var(--color-primary); color: var(--color-primary); }
+
 /* ---- Output ---- */
 .opt-stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.6rem; margin-bottom: var(--spacing-md); }
 .opt-stat-card { background-color: var(--color-primary-light); border-radius: var(--radius-sm); padding: var(--spacing-sm); text-align: center; }
