@@ -68,8 +68,8 @@ export const FILE_CATEGORIES = [
   {
     id: 'sales',
     label: 'Sales File',
-    grain: 'HCP × Period',
-    desc: 'HCP × Month Week grain; used as allocation base',
+    grain: 'HCP/DMA × Month/Week',
+    desc: 'HCP/DMA × Month/Week grain; used as allocation base',
     required: true,
   },
   {
@@ -107,6 +107,12 @@ export const FILE_CATEGORIES = [
   desc: 'Supplementary or reference data that doesn\'t fit the standard categories above.',
   required: false,
 },
+];
+
+export const PROMO_SUB_TIERS = [
+  { id: "Personal Promotion", label: "Personal Promotion (Rep Calls, Detailing, Samples, Events)", badge: "bg-emerald-100 text-emerald-800 border-emerald-300" },
+  { id: "Non Personal Promotion", label: "Non Personal Promotion (RTE, Emails, Portal, HCP Web)", badge: "bg-amber-100 text-amber-800 border-amber-300" },
+  { id: "DTC Promotion", label: "DTC Promotion (TV, Digital Ads, Search, Social, Print)", badge: "bg-purple-100 text-purple-800 border-purple-300" },
 ];
 
 const DATA_TYPE_OPTIONS = [
@@ -632,13 +638,40 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
 }
 
 /**
+ * Whether a role id is the "Independent Promotions" role - judged from its
+ * label text via `roleMeta`, not a hardcoded id, since the id strings
+ * themselves live in columnRoles.js and aren't re-declared here.
+ */
+function isPromoRole(roleId) {
+  const meta = roleMeta(roleId);
+  const label = `${meta?.short || ''} ${meta?.hint || ''}`.toLowerCase();
+  return label.includes('promo');
+}
+
+/**
+ * Best-effort mirror of `restoreColumnRoles` for sub-tiers: the saved object
+ * is keyed by the renamed column name, this screen works in original names,
+ * so it is mapped back through `renameMap` on the way in. Written locally
+ * because columnRoles.js does not (yet) export an equivalent - if the
+ * backend isn't sending `config_metadata.promo_sub_tiers` yet, this simply
+ * returns {} and every row starts unset, same as a first upload.
+ */
+function restorePromoSubTiers(saved, renameMap) {
+  if (!saved) return {};
+  const reverse = Object.fromEntries(Object.entries(renameMap).map(([from, to]) => [to, from]));
+  return Object.fromEntries(
+    Object.entries(saved).map(([renamedCol, tier]) => [reverse[renamedCol] || renamedCol, tier])
+  );
+}
+
+/**
  * What each column in this file IS, for the screens downstream.
  *
  * Every column starts on a guess from its name, so the table is answerable by
  * exception rather than one dropdown at a time. The roles ride along in the
  * manifest's `config_metadata`, which the engine stores without interpreting.
  */
-function ColumnRoleTable({ file, onChange, onBulk }) {
+function ColumnRoleTable({ file, onChange, onSubTierChange, onBulk }) {
   const columns = file.columns || [];
   const roles = rolesFor(columns, file.columnRoles);
   const dropped = new Set(columns.filter((c) => !(file.selectedCols || columns).includes(c)));
@@ -692,12 +725,14 @@ function ColumnRoleTable({ file, onChange, onBulk }) {
             <tr>
               <th>Column</th>
               <th>Category</th>
+              <th>Promotional Sub-Tier</th>
               <th>Sample values</th>
             </tr>
           </thead>
           <tbody>
             {columns.map((col) => {
               const meta = roleMeta(roles[col]);
+              const isPromo = isPromoRole(roles[col]);
               return (
                 <tr key={col} className={dropped.has(col) ? 'is-dropped' : ''}>
                   <td className="role-col-name">
@@ -723,6 +758,24 @@ function ColumnRoleTable({ file, onChange, onBulk }) {
                         </option>
                       ))}
                     </select>
+                  </td>
+                  <td>
+                    {isPromo ? (
+                      <select
+                        className="role-select tone-emerald"
+                        value={file.promoSubTiers?.[col] || ''}
+                        disabled={dropped.has(col)}
+                        onChange={(e) => onSubTierChange(col, e.target.value)}
+                        aria-label={`Promotional sub-tier for ${col}`}
+                      >
+                        <option value="">Select sub-tier…</option>
+                        {PROMO_SUB_TIERS.map((tier) => (
+                          <option key={tier.id} value={tier.id}>{tier.label}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span className="role-samples">NA</span>
+                    )}
                   </td>
                   <td className="role-samples">{sampleFor(col) || '-'}</td>
                 </tr>
@@ -1014,6 +1067,7 @@ function DataIngestion() {
             // rest of the app sees; this screen works in original names, so
             // they are mapped back on the way in.
             columnRoles: restoreColumnRoles(spec.config_metadata?.column_roles, renameMap),
+            promoSubTiers: restorePromoSubTiers(spec.config_metadata?.promo_sub_tiers, renameMap),
             columns: rawColumns,
             previewRows: currentDataset.preview || [],
             // `dataset.columns` is the DERIVED column list. The preview rows are
@@ -1116,6 +1170,7 @@ function DataIngestion() {
           id: `file-${++fileIdCounter}`, filename: dataset.filename, name: dataset.filename, workflowId,
           category: suggestCategory(dataset.filename), columns, previewRows: dataset.preview || [],
           columnRoles: rolesFor(columns),
+          promoSubTiers: {},
           totalRows: dataset.row_count || 0, isParsing: false, parseError: null, selectedCols: columns,
           renameMap: {},
           profile,
@@ -1204,9 +1259,22 @@ function DataIngestion() {
   };
 
   // Assign Category tab: one column's modelling role.
-  const setColumnRole = (file, column, role) =>
+  const setColumnRole = (file, column, role) => {
+    const updates = { columnRoles: { ...rolesFor(file.columns, file.columnRoles), [column]: role } };
+    // A column that stops being an Independent Promotion no longer needs a
+    // sub-tier; clearing it here avoids a stale choice silently reappearing
+    // if the column is switched back to Promotions later.
+    if (!isPromoRole(role) && file.promoSubTiers?.[column]) {
+      updates.promoSubTiers = { ...file.promoSubTiers };
+      delete updates.promoSubTiers[column];
+    }
+    updateFileConfig(file.id, updates);
+  };
+
+  // Assign Category tab: one Independent-Promotion column's sub-tier.
+  const setPromoSubTier = (file, column, subTier) =>
     updateFileConfig(file.id, {
-      columnRoles: { ...rolesFor(file.columns, file.columnRoles), [column]: role },
+      promoSubTiers: { ...(file.promoSubTiers || {}), [column]: subTier },
     });
 
   // Standardize tab
@@ -1753,6 +1821,7 @@ function DataIngestion() {
                 <ColumnRoleTable
                   file={selectedFile}
                   onChange={(column, role) => setColumnRole(selectedFile, column, role)}
+                  onSubTierChange={(column, tier) => setPromoSubTier(selectedFile, column, tier)}
                   onBulk={(next) => updateFileConfig(selectedFile.id, { columnRoles: next })}
                 />
                   </>
