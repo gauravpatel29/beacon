@@ -66,9 +66,22 @@ function findCoefficientArray(model) {
 // wrong string here doesn't fail, it just quietly benchmarks against the
 // wrong (or default) cohort with no visible sign anything's off. Note the en
 // dash (–, U+2013) in the maturity stages, not a plain hyphen.
-const THERAPY_TYPES = ['Chronic', 'Acute', 'Rare / Specialty', 'Oncology / Recurring'];
 const MATURITY_STAGES = ['Launch (<1 Year)', 'Growth (1–3 Years)', 'Mature (3–7 Years)', 'Late Lifecycle (7+ Years)'];
 const MARKETING_DYNAMICS = ['High Competition', 'Medium Competition', 'Low / Niche Competition'];
+
+// Hardcoded per explicit instruction — NOT derived from /api/results/benchmarks.
+// results.py's real overall_comparison only ever returns 3 rows (Promotional
+// Lift Share, Baseline Organic Share, Average Portfolio ROI), each a single
+// benchmark value, not 6 categories with ranges. This table is static and
+// does not change with the selected Maturity/Competition filters.
+const PROMOTIONAL_IMPACT_BENCHMARKS = [
+  { category: 'Baseline Impact %', benchmark: '40–55%' },
+  { category: 'Salesforce Impact %', benchmark: '22–30%' },
+  { category: 'HCP PP (Personal Promo) Impact %', benchmark: '4–8%' },
+  { category: 'Access Impact %', benchmark: '12–19%' },
+  { category: 'HCP NPP (Non-Personal Promo) Impact %', benchmark: '5–10%' },
+  { category: 'Consumer NPP / DTC Impact %', benchmark: '6–12%' },
+];
 
 // Status strings from /api/results/benchmarks carry emoji (🟢🟡🔴) — per the
 // house rule, strip the emoji and colour the cell instead of showing it raw.
@@ -619,7 +632,11 @@ function ModelOutput() {
   }, [currentCurve, deepDive, responseChannel]);
 
   // ── Section 7: benchmarks (locked until finalized) ───────────────────────
-  const [therapyType, setTherapyType] = useState('');
+  // Therapy Type is no longer a user-facing filter (removed per screenshot),
+  // but results.py's own default is `payload.get("therapy_type", "Chronic")`
+  // — so the real endpoint call still needs a value, hardcoded to match that
+  // same default rather than sending nothing.
+  const THERAPY_TYPE_FIXED = 'Chronic';
   const [maturityStage, setMaturityStage] = useState('');
   const [marketingDynamic, setMarketingDynamic] = useState('');
   const [benchmarkResult, setBenchmarkResult] = useState(null);
@@ -640,7 +657,7 @@ function ModelOutput() {
   const buildFallbackBenchmark = () => {
     const baselineShare = highLevelImpact ? (highLevelImpact.pctBuckets.baseline || 0) : 40;
     return {
-      benchmark_group: `${therapyType} • ${maturityStage} • ${marketingDynamic} (estimated)`,
+      benchmark_group: `${maturityStage} • ${marketingDynamic} (estimated)`,
       overall_comparison: [
         { metric: 'Promotional Lift Share (%)', benchmark: '34.5%', status: '🟡 Near Benchmark' },
         { metric: 'Baseline Organic Share (%)', benchmark: '45.0%', status: '🟡 Near Benchmark' },
@@ -660,12 +677,12 @@ function ModelOutput() {
   };
 
   const handleRunBenchmark = async () => {
-    if (!therapyType || !maturityStage || !marketingDynamic) return;
+    if (!maturityStage || !marketingDynamic) return;
     setBenchmarkError(null);
     setIsLoadingBenchmark(true);
     try {
       const data = await fetchBenchmarks({
-        therapyType,
+        therapyType: THERAPY_TYPE_FIXED,
         maturityStage,
         competitionLevel: marketingDynamic,
         channels: deepDive.filter((d) => d.roi !== null).map((d) => ({ channel: d.variable, roi: d.roi })),
@@ -697,7 +714,7 @@ function ModelOutput() {
     <div className="model-output-page">
       <div className="page-header">
         <div>
-          <p className="page-header-title">Module 7: Response Curves</p>
+          <p className="page-header-title">Response Curves</p>
           <p className="page-header-subtitle">
             Compare model runs, finalize active model, inspect 4-tier impact breakdown, enter spend for ROI,
             generate response curves, and benchmark against industry peers.
@@ -717,7 +734,7 @@ function ModelOutput() {
             <>
               {/* ---- 1. Model Registry ---- */}
               <div className="mo-card">
-                <p className="mo-section-title">1. Model Registry (Compare &amp; Select Runs)</p>
+                <p className="mo-section-title">Model Registry (Compare &amp; Select Runs)</p>
                 <p className="mo-section-desc">Select any model iteration below to review its diagnostics and impact. Click <strong>Finalize Model</strong> to enable Response Curves and Benchmark Comparisons.</p>
                 {summaryError && <div className="mo-note">{summaryError}</div>}
                 <div className="registry-table-wrapper">
@@ -784,7 +801,7 @@ function ModelOutput() {
                 <>
                   {/* ---- 3. Executive Summary ---- */}
                   <div className="mo-card">
-                    <p className="mo-section-title">3. Executive Summary (High-Level Promotional Impact Breakdown)</p>
+                    <p className="mo-section-title">Executive Summary (High-Level Promotional Impact Breakdown)</p>
                     <p className="mo-section-desc">High-level aggregation of total commercial sales volume decomposed into Baseline unpromoted demand, Personal promotion, Non-Personal promotion (NPP), and Direct-to-Consumer (DTC) media.</p>
                     {coefficientDiagnostic && (
                       <>
@@ -846,7 +863,7 @@ function ModelOutput() {
 
                   {/* ---- 4. Channel Spend Management ---- */}
                   <div className="mo-card">
-                    <p className="mo-section-title">4. Channel Spend Management &amp; ROI Engine</p>
+                    <p className="mo-section-title">Channel Spend Management &amp; ROI Engine</p>
                     <p className="mo-section-desc">Enter or adjust actual budget spend per promotional channel. Spend inputs immediately update channel ROIs, Long-Term ROIs, and downstream response curves.</p>
                     {spendSaveError && <div className="mo-error">{spendSaveError}</div>}
                     <div className="spend-cards-row">
@@ -866,7 +883,7 @@ function ModelOutput() {
 
                   {/* ---- 5. Channel Performance Deep-Dive ---- */}
                   <div className="mo-card">
-                    <p className="mo-section-title">5. Channel Performance Deep-Dive Table</p>
+                    <p className="mo-section-title">Channel Performance Deep-Dive Table</p>
                     <div className="deep-dive-table-wrapper">
                       <table className="deep-dive-table">
                         <thead><tr><th>Channel / Tactic</th><th>Tier Role</th><th>Impact (Sales Volume)</th><th>Impact Share (%)</th><th>Spend ($)</th><th>ROI</th><th>Long-Term ROI</th></tr></thead>
@@ -889,7 +906,7 @@ function ModelOutput() {
 
                   {/* ---- 6. Response Curves (locked until finalized) ---- */}
                   <div className="mo-card">
-                    <p className="mo-section-title">6. Channel Response Curves &amp; Diminishing Marginal ROI</p>
+                    <p className="mo-section-title">Channel Response Curves &amp; Diminishing Marginal ROI</p>
                     <p className="mo-section-desc">Explore how increasing or decreasing spend affects incremental sales volume and marginal returns. Diminishing returns demonstrate saturation limits per tactic.</p>
                     {!isViewingFinalized ? (
                       <div className="locked-state">
@@ -964,8 +981,8 @@ function ModelOutput() {
 
                   {/* ---- 7. Industry Benchmarks (locked until finalized) ---- */}
                   <div className="mo-card">
-                    <p className="mo-section-title">7. Industry Benchmark Comparisons</p>
-                    <p className="mo-section-desc">Compare your model's promotional lift and tactic ROIs against historical pharma &amp; commercial benchmarks segmented by therapy type, lifecycle maturity, and competitive dynamics.</p>
+                    <p className="mo-section-title">Industry Benchmark Comparisons (Maturity Stage &times; Competition Level)</p>
+                    <p className="mo-section-desc">Compare your model results against the standard pharma commercial benchmark matrix segmented by lifecycle stage and competition level.</p>
                     {!isViewingFinalized ? (
                       <div className="locked-state">
                         <p className="locked-title">Finalize this model to unlock benchmarks</p>
@@ -974,60 +991,64 @@ function ModelOutput() {
                     ) : (
                       <>
                         <div className="benchmark-controls-row">
-                          <div className="benchmark-field"><label>Therapy Type</label>
-                            <select value={therapyType} onChange={(e) => setTherapyType(e.target.value)}>
-                              <option value="">Select...</option>{THERAPY_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-                            </select>
-                          </div>
                           <div className="benchmark-field"><label>Maturity Stage</label>
                             <select value={maturityStage} onChange={(e) => setMaturityStage(e.target.value)}>
                               <option value="">Select...</option>{MATURITY_STAGES.map((t) => <option key={t} value={t}>{t}</option>)}
                             </select>
                           </div>
-                          <div className="benchmark-field"><label>Marketing Dynamic</label>
+                          <div className="benchmark-field"><label>Competition Level</label>
                             <select value={marketingDynamic} onChange={(e) => setMarketingDynamic(e.target.value)}>
                               <option value="">Select...</option>{MARKETING_DYNAMICS.map((t) => <option key={t} value={t}>{t}</option>)}
                             </select>
                           </div>
                         </div>
                         {benchmarkError && <div className={benchmarkIsFallback ? 'mo-note' : 'mo-error'}>{benchmarkError}</div>}
-                        <button className="generate-curves-btn" onClick={handleRunBenchmark} disabled={!therapyType || !maturityStage || !marketingDynamic || isLoadingBenchmark}>
+                        <button className="generate-curves-btn" onClick={handleRunBenchmark} disabled={!maturityStage || !marketingDynamic || isLoadingBenchmark}>
                           {isLoadingBenchmark ? 'Loading...' : 'Compare Against Benchmark'}
                         </button>
 
                         {benchmarkResult && (
                           <>
-                            <div className="cohort-banner">Benchmark Cohort: {benchmarkResult.benchmark_group}{benchmarkIsFallback && ' (estimated live service unavailable)'}</div>
-                            <p className="mo-section-title" style={{ fontSize: '0.75rem' }}>Overall Metric Comparisons</p>
-                            <table className="benchmark-table">
-                              <thead><tr><th>Metric</th><th>Benchmark</th></tr></thead>
+                            <div className="cohort-banner-lg">
+                              Benchmark Cohort: Maturity: {maturityStage} &bull; Competition: {marketingDynamic}
+                              {benchmarkIsFallback && ' (estimated — live service unavailable)'}
+                            </div>
+
+                            <p className="benchmark-subheading">Promotional Impact % Share Benchmarks:</p>
+                            <table className="benchmark-table-lg">
+                              <thead><tr><th>category</th><th>benchmark</th></tr></thead>
                               <tbody>
-                                {(benchmarkResult.overall_comparison || []).map((row, i) => {
-                                  const status = parseStatus(row.status);
-                                  return (
-                                    <tr key={i}>
-                                      <td>{row.metric}</td>
-                                      {/* <td>{resolveYours(row.metric, row.yours)}</td> */}
-                                      <td>{row.benchmark}</td>
-                                      {/* <td className={`status-cell ${status.tone}`}>{status.text}</td> */}
-                                    </tr>
-                                  );
-                                })}
+                                {PROMOTIONAL_IMPACT_BENCHMARKS.map((row) => (
+                                  <tr key={row.category}>
+                                    <td>{row.category}</td>
+                                    <td>{row.benchmark}</td>
+                                  </tr>
+                                ))}
                               </tbody>
                             </table>
 
-                            <p className="mo-section-title" style={{ fontSize: '0.75rem' }}>Channel-Level ROI vs. Industry Peer Benchmarks</p>
-                            <table className="benchmark-table">
-                              <thead><tr><th>Channel</th><th>Yours</th><th>Benchmark</th><th>Status</th></tr></thead>
+                            <p className="benchmark-subheading">Channel-Level ROI vs. Industry Peer Benchmarks:</p>
+                            <table className="benchmark-table-lg">
+                              <thead><tr><th>channel</th><th>category</th><th>yours</th><th>benchmark</th><th>status</th></tr></thead>
                               <tbody>
                                 {(benchmarkResult.channel_benchmarks || []).map((row, i) => {
                                   const status = parseStatus(row.status);
+                                  // No category field comes back from the benchmark endpoint — this
+                                  // reuses the same tier classification already computed for this
+                                  // channel in Sections 3/5 (deepDive[].bucket), rather than inventing
+                                  // a value. Falls back to '—' only if the channel isn't in deepDive
+                                  // for some reason (e.g. it had no ROI and was filtered out upstream).
+                                  const matched = deepDive.find((d) => d.variable === row.channel);
+                                  const categoryLabel = matched ? BUCKET_LABELS[matched.bucket] : '—';
                                   return (
                                     <tr key={i}>
                                       <td>{row.channel}</td>
+                                      <td>{categoryLabel}</td>
                                       <td>{row.yours}</td>
                                       <td>{row.benchmark}</td>
-                                      <td className={`status-cell ${status.tone}`}>{status.text}</td>
+                                      <td className={`status-cell-lg ${status.tone}`}>
+                                        {status.text}
+                                      </td>
                                     </tr>
                                   );
                                 })}
@@ -1041,7 +1062,7 @@ function ModelOutput() {
 
                   {/* ---- 8. Model Diagnostics ---- */}
                   <div className="mo-card">
-                    <p className="mo-section-title">8. Model Diagnostics &amp; Statistical Evaluation</p>
+                    <p className="mo-section-title">Model Diagnostics &amp; Statistical Evaluation</p>
                     {summaryError && <div className="mo-note">{summaryError}</div>}
                     <div className="diag-stat-row">
                       <div className="diag-stat-card"><p className="diag-stat-value">{getDisplayStats(viewingModel).r2?.toFixed(4) ?? 'NA'}</p><p className="diag-stat-label">R² (Fit)</p></div>
