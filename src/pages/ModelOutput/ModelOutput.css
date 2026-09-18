@@ -62,15 +62,17 @@
 
 /* ---- 2. Selected Model Header ---- */
 .reviewing-banner {
-  background-color: #0f1729; border-radius: var(--radius-md); padding: var(--spacing-md) var(--spacing-lg);
+  background-color: var(--color-white); border-radius: var(--radius-md); box-shadow: var(--shadow-card);
+  border: 1px solid var(--color-border-light);
+  padding: var(--spacing-md) var(--spacing-lg);
   display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--spacing-md);
   margin-bottom: var(--spacing-md);
 }
-.reviewing-label { font-size: 0.68rem; font-weight: var(--font-weight-semibold); color: #a7b0c0; text-transform: uppercase; letter-spacing: 0.05em; }
-.reviewing-name { font-size: 1.05rem; font-weight: var(--font-weight-bold); color: var(--color-white); margin-left: 0.6rem; }
+.reviewing-label { font-size: 0.68rem; font-weight: var(--font-weight-semibold); color: var(--color-text-light); text-transform: uppercase; letter-spacing: 0.05em; }
+.reviewing-name { font-size: 1.05rem; font-weight: var(--font-weight-bold); color: var(--color-text-primary); margin-left: 0.6rem; }
 .reviewing-finalized-badge { font-size: 0.68rem; font-weight: var(--font-weight-bold); color: #1f8a4c; background-color: #eafaf0; padding: 0.2rem 0.6rem; border-radius: var(--radius-pill); margin-left: 0.6rem; }
-.reviewing-meta { font-size: 0.78rem; color: #a7b0c0; margin-top: 0.25rem; }
-.reviewing-meta strong { color: var(--color-white); }
+.reviewing-meta { font-size: 0.78rem; color: var(--color-text-secondary); margin-top: 0.25rem; }
+.reviewing-meta strong { color: var(--color-text-primary); }
 .finalize-cta-btn {
   padding: 0.7rem 1.3rem; border-radius: var(--radius-pill); font-size: 0.8rem; font-weight: var(--font-weight-bold);
   background-color: #1f8a4c; color: var(--color-white); white-space: nowrap;
@@ -78,6 +80,7 @@
 .finalize-cta-btn:hover { opacity: 0.9; }
 .finalize-cta-btn.reconfirm { background-color: #1f8a4c; border: none; }
 .finalize-cta-btn.reconfirm:hover { opacity: 0.9; }
+
 
 /* ---- 1. Registry Actions column ---- */
 .registry-action-btn {
@@ -172,6 +175,38 @@
   background-color: var(--color-primary-light); border-radius: var(--radius-sm); padding: 0.7rem 1rem;
   font-size: 0.82rem; font-weight: var(--font-weight-semibold); color: var(--color-primary); margin-bottom: var(--spacing-md);
 }
+
+.cohort-banner-lg {
+  background-color: #eef0ff; border: 1px solid #c7ccfb; border-radius: 10px;
+  padding: 1rem 1.3rem; font-size: 0.9rem; font-weight: var(--font-weight-bold);
+  color: #2733a8; margin-bottom: var(--spacing-lg);
+}
+
+.benchmark-subheading {
+  font-size: 0.88rem; font-weight: var(--font-weight-bold); color: var(--color-text-primary);
+  margin: var(--spacing-lg) 0 0.7rem;
+}
+
+.benchmark-table-lg {
+  width: 100%; border-collapse: collapse; margin-bottom: var(--spacing-md);
+  border: 1px solid var(--color-border-light); border-radius: var(--radius-sm); overflow: hidden;
+}
+.benchmark-table-lg th {
+  text-align: left; font-size: 0.8rem; font-weight: var(--font-weight-semibold); color: var(--color-text-secondary);
+  padding: 0.9rem 1.1rem; background-color: #f7f9fc; border-bottom: 1px solid var(--color-border-light);
+}
+.benchmark-table-lg td { font-size: 0.88rem; padding: 0.9rem 1.1rem; border-bottom: 1px solid var(--color-border-light); color: var(--color-text-primary); }
+.benchmark-table-lg tr:last-child td { border-bottom: none; }
+.benchmark-table-lg tr:hover td { background-color: #fbfcfe; }
+
+.status-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 0.5rem; vertical-align: middle; }
+.status-dot.good { background-color: #1f8a4c; }
+.status-dot.warn { background-color: #c07a1f; }
+.status-dot.bad { background-color: #c0392b; }
+.status-cell-lg { font-weight: var(--font-weight-semibold); }
+.status-cell-lg.good { color: #1f8a4c; }
+.status-cell-lg.warn { color: #c07a1f; }
+.status-cell-lg.bad { color: #c0392b; }
 
 .benchmark-table { width: 100%; border-collapse: collapse; margin-bottom: var(--spacing-md); }
 .benchmark-table th { text-align: left; font-size: 0.68rem; font-weight: var(--font-weight-semibold); color: var(--color-text-light); text-transform: lowercase; padding: 0.55rem 0.8rem; border-bottom: 1px solid var(--color-border-light); background-color: #f7f9fc; }
