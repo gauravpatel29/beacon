@@ -505,7 +505,7 @@
   color: var(--color-text-light);
 }
 
-/* ---- Step 1: level as two cards ---- */
+/* ---- Step 2: level as two cards ---- */
 .level-card-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(200px, 260px));
@@ -529,6 +529,55 @@
   background-color: var(--color-primary-light);
 }
 
+/* The card whose grain doesn't match the detected dataset - not just a
+   different look, genuinely unclickable (disabled attribute set in JSX). */
+.level-card.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background-color: #f7f9fc;
+}
+.level-card.disabled:hover { border-color: var(--color-border); background-color: #f7f9fc; }
+
+/* ---- Step 1: real-time grain detection from the ARD's own metadata ---- */
+.grain-detection-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: var(--spacing-sm);
+  padding: 0.7rem 1rem;
+  border-radius: var(--radius-sm);
+  background-color: #eef0ff;
+  border: 1px solid #c7ccfb;
+}
+
+.grain-detection-icon { font-size: 1rem; }
+
+.grain-detection-text {
+  flex: 1;
+  min-width: 220px;
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+}
+.grain-detection-text strong { color: #2733a8; }
+
+.grain-pill-row { display: flex; gap: 0.4rem; }
+
+.grain-pill {
+  font-size: 0.72rem;
+  font-weight: var(--font-weight-semibold);
+  padding: 0.3rem 0.7rem;
+  border-radius: var(--radius-pill);
+  background-color: #eef1f6;
+  color: var(--color-text-light);
+  white-space: nowrap;
+}
+
+.grain-pill.active {
+  background-color: #dcdcff;
+  color: #2733a8;
+}
+
 .level-card strong {
   display: block;
   font-size: 0.85rem;
@@ -548,7 +597,7 @@
   color: var(--color-primary) !important;
 }
 
-/* ---- Step 2: what the model is built on ---- */
+/* ---- Step 1: what the model is built on ---- */
 .dataset-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));

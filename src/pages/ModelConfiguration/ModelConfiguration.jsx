@@ -44,6 +44,13 @@ const num = (v, dp = 4) => (Number.isFinite(Number(v)) ? Number(v).toFixed(dp) :
 /** A coefficient row's key. `Variable` is unique within one fit. */
 const rowKey = (r) => r.Variable ?? r.variable ?? JSON.stringify(r);
 
+/**
+ * Step 3's starting point for Model Name: the dataset chosen in Step 1,
+ * as-is. Strips a trailing file extension defensively (ARD names in this
+ * app generally don't carry one, but an uploaded file's filename might).
+ */
+const defaultModelName = (ardMeta) => (ardMeta?.filename || '').replace(/\.(csv|xlsx?|tsv)$/i, '').trim();
+
 function ModelConfiguration() {
   const [workflowId, setWorkflowId] = useState(null);
   const [allArds, setAllArds] = useState([]);
@@ -90,6 +97,11 @@ function ModelConfiguration() {
   const [channelsError, setChannelsError] = useState(null);
 
   const [modelName, setModelName] = useState('');
+  // Whether the user has hand-edited the name since it was last defaulted.
+  // While false, Model Name tracks the Step 1 dataset choice; a manual edit
+  // stops that tracking so it isn't silently overwritten, and picking a
+  // different dataset in Step 1 resumes it (see the effect below).
+  const [modelNameTouched, setModelNameTouched] = useState(false);
   const [modelType, setModelType] = useState('ols'); // 'ols' | 'ridge'
 
   // Ridge. The engine chooses alpha by cross-validation unless told otherwise,
@@ -143,29 +155,57 @@ function ModelConfiguration() {
     return () => { cancelled = true; };
   }, []);
 
-  const ardsForLevel = useMemo(
-    () => allArds.filter((a) => (a.grain || '').toLowerCase() === modelLevel),
-    [allArds, modelLevel]
-  );
-
+  // Dataset selection now comes first (Step 1) and spans every ARD, regardless
+  // of grain — the old `ardsForLevel` filter assumed modelLevel was already
+  // chosen, which is backwards from the new flow: the chosen ARD's own real
+  // `.grain` field is what determines the level, not the other way around.
+  //
   // Which ARD is open. Derived rather than synced through an effect: the list
-  // arrives after the first render and changes with the level, and an effect
-  // that writes the selection back on every such change is both an extra
-  // render and a stale-value hazard - the prepare effect below would run once
-  // against the old filename before the new one landed.
+  // arrives after the first render, and an effect that writes the selection
+  // back on every such change is both an extra render and a stale-value
+  // hazard - the prepare effect below would run once against the old
+  // filename before the new one landed.
   //
   // `selectedArdFilename` is the user's override; it only counts while it
-  // names an ARD that exists at this level.
+  // names an ARD that actually exists.
   const activeArd = useMemo(() => {
-    if (!ardsForLevel.length) return '';
-    const has = (name) => Boolean(name) && ardsForLevel.some((a) => a.filename === name);
+    if (!allArds.length) return '';
+    const has = (name) => Boolean(name) && allArds.some((a) => a.filename === name);
     if (has(selectedArdFilename)) return selectedArdFilename;
     // The ARD from the saved state, else the one the transformation set was
     // built on - that is the only one with transformed channels in it.
     if (has(restoredArd)) return restoredArd;
     if (has(savedSet?.ard)) return savedSet.ard;
-    return ardsForLevel[0].filename;
-  }, [ardsForLevel, savedSet, selectedArdFilename, restoredArd]);
+    return allArds[0].filename;
+  }, [allArds, savedSet, selectedArdFilename, restoredArd]);
+
+  const activeArdMeta = useMemo(
+    () => allArds.find((a) => a.filename === activeArd) || null,
+    [allArds, activeArd]
+  );
+  // Real metadata already carried on the ARD (set when it was built on Data
+  // Stitching, based on whether an NPI or a DMA key is actually present) -
+  // not a client-side guess from column names.
+  const detectedGrain = (activeArdMeta?.grain || '').toLowerCase(); // 'hcp' | 'dma' | ''
+
+  // Step 3's Model Name defaults to the Step 1 dataset choice, and stays in
+  // sync with it - switching datasets updates the name again - right up
+  // until the user types their own; `modelNameTouched` is cleared by the
+  // Step 1 picker itself so a fresh dataset choice always gets a fresh
+  // default, even after a previous manual edit.
+  useEffect(() => {
+    if (modelNameTouched || !activeArdMeta) return;
+    const next = defaultModelName(activeArdMeta);
+    if (next) setModelName(next);
+  }, [activeArdMeta, modelNameTouched]);
+
+  // Model Level (Step 2) now follows the selected dataset's own grain rather
+  // than being picked first. Only re-synced when the detection actually
+  // resolves to one of the two known grains, so a dataset with no `.grain`
+  // metadata doesn't silently force the level to something wrong.
+  useEffect(() => {
+    if (detectedGrain === 'hcp' || detectedGrain === 'dma') setModelLevel(detectedGrain);
+  }, [detectedGrain]);
 
   // ── Build both frames ────────────────────────────────────────────────────
   useEffect(() => {
@@ -330,7 +370,18 @@ function ModelConfiguration() {
       if (s.modelLevel === 'hcp' || s.modelLevel === 'dma') setModelLevel(s.modelLevel);
       if (s.dmaMode === 'standalone' || s.dmaMode === 'residual') setDmaMode(s.dmaMode);
       if (str(s.residualSourceId)) setResidualSourceId(s.residualSourceId);
-      if (str(s.modelName)) setModelName(s.modelName);
+      // This hook's restore can fire again after the user has already
+      // switched datasets in Step 1 (e.g. while `ready` cycles during the
+      // reload), replaying the ORIGINAL saved snapshot - for the PREVIOUS
+      // dataset. Applying `s.modelName` unconditionally would then stomp the
+      // fresh default just set for the newly chosen dataset. Guarded here:
+      // only take the saved name when it belongs to the dataset the user
+      // currently has selected (or no explicit Step 1 choice has been made
+      // yet, i.e. the very first restore on page load).
+      if (str(s.modelName) && (!selectedArdFilename || s.ard === selectedArdFilename)) {
+        setModelName(s.modelName);
+        setModelNameTouched(true);
+      }
       if (s.modelType === 'ols' || s.modelType === 'ridge') setModelType(s.modelType);
       if (str(s.dateColumn)) setDateColumnChoice(s.dateColumn);
       if (str(s.geoColumn)) setGeoColumnChoice(s.geoColumn);
@@ -466,9 +517,26 @@ function ModelConfiguration() {
   );
 
   /** Put a history row's configuration back on the screen. */
+  // Switching the Step 1 dataset sets the new default name in the same
+  // update as the selection itself, rather than leaving it to the
+  // `activeArdMeta` effect a render later. That effect still exists as a
+  // fallback for non-interactive changes (initial load, restore), but doing
+  // it synchronously here means there is never a render in between where
+  // `selectedArdFilename` points at the new ARD while `modelName` still
+  // reflects the old one - which is the gap that let a stale name get
+  // captured and persisted by the auto-save, and come back after a reload.
+  const handleSelectArd = (filename) => {
+    setSelectedArdFilename(filename);
+    setModelNameTouched(false);
+    const meta = allArds.find((a) => a.filename === filename) || null;
+    const next = meta ? defaultModelName(meta) : '';
+    if (next) setModelName(next);
+  };
+
   const loadFromHistory = (m) => {
     setActiveHistoryId(m.id);
     setModelName(m.name);
+    setModelNameTouched(true);
     setModelLevel(m.level);
     setModelType(m.type);
     if (m.ard) setSelectedArdFilename(m.ard);
@@ -501,52 +569,49 @@ function ModelConfiguration() {
 
       {!isLoadingArds && !loadError && (
         <>
-          {/* ---- Step 1: model level ---- */}
+          {/* ---- Step 1: dataset ---- */}
           <div className="mc-card">
-            <p className="mc-section-title">Step 1 - Select Model Level</p>
-            <div className="level-card-row">
-              {[
-                { id: 'hcp', label: 'HCP-Level Modelling', desc: 'Physician and rep grain models' },
-                { id: 'dma', label: 'DMA-Level Modelling', desc: 'Designated Market Area grain models' },
-              ].map((lvl) => (
-                <button
-                  key={lvl.id}
-                  type="button"
-                  className={`level-card${modelLevel === lvl.id ? ' selected' : ''}`}
-                  onClick={() => setModelLevel(lvl.id)}
-                >
-                  <strong>{lvl.label}</strong>
-                  <span>{lvl.desc}</span>
-                  <span className="level-card-count">
-                    {allArds.filter((a) => (a.grain || '').toLowerCase() === lvl.id).length} ARD(s)
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* ---- Step 2: dataset ---- */}
-          <div className="mc-card">
-            <p className="mc-section-title">
-              Step 2 - {GRAIN_LABELS[modelLevel]} Transformed Dataset Selection
-            </p>
-            {ardsForLevel.length === 0 ? (
+            <p className="mc-section-title">Step 1 - Select Dataset (ARD / Transformed Table)</p>
+            {allArds.length === 0 ? (
               <div className="mc-source-note">
-                No {GRAIN_LABELS[modelLevel]}-level ARDs found. Build one on the Data Stitching &amp;
-                ARD Creation page, then save a transformation set for it.
+                No ARDs found. Build one on the Data Stitching page, then save a
+                transformation set for it.
               </div>
             ) : (
               <>
                 <div className="mc-field" style={{ maxWidth: 560 }}>
-                  <label>Select Transformed {GRAIN_LABELS[modelLevel]} Dataset</label>
-                  <select value={activeArd} onChange={(e) => setSelectedArdFilename(e.target.value)}>
-                    {ardsForLevel.map((a) => (
+                  <label>Select Dataset</label>
+                  <select
+                    value={activeArd}
+                    onChange={(e) => handleSelectArd(e.target.value)}
+                  >
+                    {allArds.map((a) => (
                       <option key={a.filename} value={a.filename}>
-                        {a.filename} ({a.grain || GRAIN_LABELS[modelLevel]} ·{' '}
+                        {a.filename} ({GRAIN_LABELS[(a.grain || '').toLowerCase()] || 'Unknown grain'} &bull;{' '}
                         {(a.row_count ?? 0).toLocaleString()} rows)
                       </option>
                     ))}
                   </select>
+                </div>
+
+                {/* Real detection, not a guess: activeArdMeta.grain is the same
+                    field Data Stitching set when the ARD was built, based on
+                    whether an NPI or a DMA key was actually present in it. */}
+                <div className="grain-detection-banner">
+                  <span className="grain-detection-text">
+                    Column Key Detection:{' '}
+                    {detectedGrain === 'hcp' && <strong>NPI Doctor Key detected. Recommended for HCP-level modeling.</strong>}
+                    {detectedGrain === 'dma' && <strong>DMA Geography Key detected. Recommended for DMA-level modeling.</strong>}
+                    {detectedGrain !== 'hcp' && detectedGrain !== 'dma' && <strong>Could not determine a grain for this dataset automatically.</strong>}
+                  </span>
+                  <span className="grain-pill-row">
+                    <span className={`grain-pill${detectedGrain === 'hcp' ? ' active' : ''}`}>
+                      HCP Grain {detectedGrain === 'hcp' ? '\u2713' : '\u2717'}
+                    </span>
+                    <span className={`grain-pill${detectedGrain === 'dma' ? ' active' : ''}`}>
+                      DMA Grain {detectedGrain === 'dma' ? '\u2713' : '\u2717'}
+                    </span>
+                  </span>
                 </div>
 
                 {/* What the model will actually be built on, read off the
@@ -558,7 +623,7 @@ function ModelConfiguration() {
                       <strong>{dateColumn || '-'}</strong>
                     </div>
                     <div>
-                      <span>Geography Column</span>
+                      <span>Geography Key</span>
                       <strong>{geoColumn || '-'}</strong>
                     </div>
                     <div>
@@ -566,8 +631,8 @@ function ModelConfiguration() {
                       <strong>{dependentVariable || '-'}</strong>
                     </div>
                     <div>
-                      <span>Transformed IVs</span>
-                      <strong>{channels.length} tactics ready</strong>
+                      <span>Promotional IVs</span>
+                      <strong>{channels.length} promotional channels</strong>
                     </div>
                   </div>
                 )}
@@ -593,6 +658,43 @@ function ModelConfiguration() {
             )}
           </div>
 
+          {/* ---- Step 2: model level ---- */}
+          <div className="mc-card">
+            <p className="mc-section-title">Step 2 - Model Level</p>
+            <p className="mc-hint" style={{ marginTop: 0, marginBottom: 'var(--spacing-sm)' }}>
+              Choose the aggregation level for this regression model based on detected dataset capabilities.
+            </p>
+            <div className="level-card-row">
+              {[
+                { id: 'hcp', label: 'HCP-Level Model', desc: 'Physician & Sales Rep grain' },
+                { id: 'dma', label: 'DMA-Level Model', desc: 'Designated Market Area grain' },
+              ].map((lvl) => {
+                // If detection is unresolved (no .grain on this ARD), leave
+                // both cards choosable rather than disabling both - an
+                // unknown state shouldn't strand the user with no path
+                // forward.
+                // Asymmetric on purpose: an HCP-detected dataset only allows
+                // the HCP-Level Model (disables DMA); a DMA-detected dataset
+                // allows BOTH cards, not just DMA. Unresolved detection (no
+                // .grain on this ARD) leaves both open either way.
+                const isAvailable = !detectedGrain || detectedGrain === 'dma' || detectedGrain === lvl.id;
+                return (
+                  <button
+                    key={lvl.id}
+                    type="button"
+                    className={`level-card${modelLevel === lvl.id ? ' selected' : ''}${!isAvailable ? ' disabled' : ''}`}
+                    onClick={() => { if (isAvailable) setModelLevel(lvl.id); }}
+                    disabled={!isAvailable}
+                    title={!isAvailable ? `This dataset's detected grain doesn't match ${lvl.label}.` : undefined}
+                  >
+                    <strong>{lvl.label}</strong>
+                    <span>{lvl.desc}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           {prepareError && <div className="mc-error-banner">{prepareError}</div>}
 
           {/* Everything downstream needs a frame. Dimmed rather than hidden, so
@@ -607,7 +709,7 @@ function ModelConfiguration() {
                   <input
                     type="text" value={modelName} maxLength={200}
                     className={isDuplicateName ? 'is-duplicate' : ''}
-                    onChange={(e) => setModelName(e.target.value)}
+                    onChange={(e) => { setModelName(e.target.value); setModelNameTouched(true); }}
                     placeholder="e.g. HCP OLS Baseline Model"
                   />
                   {isDuplicateName && (
@@ -835,7 +937,7 @@ function ModelConfiguration() {
                     >
                       {/* The suffix is on every one of them, so it carries no
                           information in this list. */}
-                      {selectedChannels.includes(c) ? '✓ ' : '+ '}{c.replace('_transformed', '')}
+                      {selectedChannels.includes(c) ? '' : '+ '}{c.replace('_transformed', '')}
                     </span>
                   ))}
                   {!channelColumns.length && (
@@ -874,8 +976,8 @@ function ModelConfiguration() {
                 {runStatus !== 'idle' && (
                   <span className={`run-status-badge ${runStatus}`}>
                     {runStatus === 'running' && 'Running…'}
-                    {runStatus === 'complete' && '✓ Complete'}
-                    {runStatus === 'failed' && '✕ Failed'}
+                    {runStatus === 'complete' && 'Complete'}
+                    {runStatus === 'failed' && 'Failed'}
                   </span>
                 )}
               </div>
@@ -987,7 +1089,7 @@ function ModelConfiguration() {
                           <td>{num(m.adjR2, 4)}</td>
                           <td>{num(m.rmse, 2)}</td>
                           <td className="history-window">{m.startDate} → {m.endDate}</td>
-                          <td><span className="history-status">✓ Complete</span></td>
+                          <td><span className="history-status">Complete</span></td>
                         </tr>
                       ))}
                     </tbody>
