@@ -105,6 +105,27 @@ function DataTransformation() {
   const [outlierRaw, setOutlierRaw] = useState(null);
   const [isScanningOutliers, setIsScanningOutliers] = useState(false);
   const [outlierScanError, setOutlierScanError] = useState(null);
+  // Row indices excluded from the working dataset — indexed into the
+  // ORIGINAL, unfiltered `rows` array (not the filtered one), so exclusions
+  // stay consistent across variables and across restore/re-exclude cycles.
+  const [excludedRowKeys, setExcludedRowKeys] = useState(() => new Set());
+
+  // The actual working dataset, with excluded rows removed. This is what
+  // Steps 2-4 (live channel preview, pre/post correlation, Save & Apply) run
+  // against — exclusion here is real pre-treatment, not just a chart filter.
+  // Kept indexed against the ORIGINAL `rows` array throughout (never against
+  // this filtered one), so the outlier scan's returned indices never need
+  // re-mapping after an exclusion changes what's in the working set.
+  // Declared early (right after the state it depends on) rather than near
+  // the rest of the Step 1 outlier logic further down — several Step 2-4
+  // effects reference it in their dependency arrays, and a const referenced
+  // in a dependency array before its own declaration line executes is a
+  // temporal-dead-zone error, not just a stale-value bug.
+  const effectiveCsv = useMemo(() => {
+    if (!excludedRowKeys.size) return activeCsv;
+    const keptRows = rows.filter((_, idx) => !excludedRowKeys.has(idx));
+    return Papa.unparse(keptRows, { columns });
+  }, [activeCsv, rows, columns, excludedRowKeys]);
 
   // Step 2 (was Step 1)
   const [dateKeys, setDateKeys] = useState([]);
@@ -471,7 +492,7 @@ function DataTransformation() {
       // same engine the model is fitted with, so what is previewed here is what
       // gets modelled.
       const data = await transformationApply({
-        csv_data: activeCsv,
+        csv_data: effectiveCsv,
         geo_column: geoKeys[0],
         date_column: dateKeys[0],
         dependent_variable: dependentVars[0],
@@ -601,15 +622,23 @@ function DataTransformation() {
     (async () => {
       const rawColumnsToScore = (transformResult?.transformedCols || [])
         .map((c) => c.raw).slice(0, 8);
-      if (!activeCsv || !rawColumnsToScore.length) {
+      if (!effectiveCsv || !rawColumnsToScore.length) {
         if (!cancelled) setPreCorrelation(null);
         return;
       }
       setIsScoringPreCorr(true);
       try {
         const data = await transformationCorrelation({
-          csv_data: activeCsv,
+          csv_data: effectiveCsv,
           columns: rawColumnsToScore,
+          // Without this, a derived variable (e.g. a combined column that
+          // only exists once the derivation formula runs) has no raw
+          // counterpart in effectiveCsv to score at all — it would silently
+          // be missing from this matrix while still showing correctly in
+          // the Post-Transformation one, which gets it from
+          // transformResult.csv (already computed server-side via the same
+          // parameter in the transformationApply call above).
+          derived_variables: toDerivedVariables(),
           threshold: 0,
         });
         if (!cancelled) { setPreCorrelation(data); setPreCorrError(null); }
@@ -625,7 +654,7 @@ function DataTransformation() {
     return () => { cancelled = true; };
     // Same reasoning as the post-transformation effect above: keyed on
     // transformResult (which only changes on Apply), never on corrThreshold.
-  }, [transformResult, activeCsv]);
+  }, [transformResult, effectiveCsv]);
 
   // The server returns the matrix column-major ({ colA: { colB: r } }); the
   // table renders rows, so it is pivoted once here.
@@ -671,14 +700,14 @@ function DataTransformation() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      if (!activeCsv || !activeInspectVar || !geoKeys.length || !dependentVars.length) {
+      if (!effectiveCsv || !activeInspectVar || !geoKeys.length || !dependentVars.length) {
         if (!cancelled) setPreview(null);
         return;
       }
       setIsPreviewing(true);
       try {
         const data = await transformationPreviewSingle({
-          csv_data: activeCsv,
+          csv_data: effectiveCsv,
           channel: activeInspectVar,
           geo_column: geoKeys[0],
           date_column: dateKeys[0] || '',
@@ -700,7 +729,7 @@ function DataTransformation() {
     return () => { cancelled = true; };
     // `configs` is a dependency so editing the inspected channel re-previews.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeCsv, activeInspectVar, configs, derivedVars, geoKeys, dateKeys, dependentVars, popKeys]);
+  }, [effectiveCsv, activeInspectVar, configs, derivedVars, geoKeys, dateKeys, dependentVars, popKeys]);
 
   // The server response, reshaped for the panels below. Statistics, bins and
   // curves all come from the engine, so what is shown here is what the model
@@ -753,8 +782,8 @@ function DataTransformation() {
   // eligibleColumns above — the KPI itself (e.g. trx_pso) needs outlier
   // inspection just as much as any channel.
   const numericColumnsAll = useMemo(
-    () => columns.filter((c) => isNumericColumn(rows, c)),
-    [columns, rows]
+    () => columns.filter((c) => !lockedKeys.has(c) && isNumericColumn(rows, c)),
+    [columns, rows, lockedKeys]
   );
 
   useEffect(() => {
@@ -838,13 +867,34 @@ function DataTransformation() {
 
   const outlierResult = useMemo(() => {
     if (!outlierRaw) return null;
+    const allFlagged = outlierRaw.outlier_indices || [];
     return {
       lower: Number(outlierRaw.lower_bound) || 0,
       upper: Number(outlierRaw.upper_bound) || 0,
-      flaggedIndices: outlierRaw.outlier_indices || [],
+      // Rows already excluded stop counting as "still flagged" — otherwise
+      // clicking Exclude wouldn't visibly change anything on screen.
+      flaggedIndices: allFlagged.filter((idx) => !excludedRowKeys.has(idx)),
       pct: Number(outlierRaw.outlier_pct) || 0,
     };
-  }, [outlierRaw]);
+  }, [outlierRaw, excludedRowKeys]);
+
+  const handleExcludeOutliers = () => {
+    if (!outlierResult || !outlierResult.flaggedIndices.length) return;
+    const count = outlierResult.flaggedIndices.length;
+    if (!window.confirm(
+      `${count} row(s) will be removed from the working dataset used for previews, correlation, and ` +
+      `Save & Apply. The original file on disk is not changed, and "Restore Original Dataset" puts them back.`
+    )) return;
+    setExcludedRowKeys((prev) => {
+      const next = new Set(prev);
+      outlierResult.flaggedIndices.forEach((idx) => next.add(idx));
+      return next;
+    });
+  };
+
+  const handleRestoreOriginalDataset = () => {
+    setExcludedRowKeys(new Set());
+  };
 
   return (
     <div className="transform-page">
@@ -960,6 +1010,26 @@ function DataTransformation() {
                     <div className="tstat-card grey"><p className="tstat-value">{outlierResult.lower.toFixed(0)}</p><p className="tstat-label">Lower Cutoff</p></div>
                     <div className="tstat-card grey"><p className="tstat-value">{outlierResult.upper.toFixed(0)}</p><p className="tstat-label">Upper Cutoff</p></div>
                   </div>
+                )}
+
+                <div className="outlier-exclude-row-t">
+                  {outlierResult && outlierResult.flaggedIndices.length > 0 && (
+                    <button type="button" className="exclude-outliers-btn-t" onClick={handleExcludeOutliers}>
+                      Exclude {outlierResult.flaggedIndices.length} Outliers from Dataset
+                    </button>
+                  )}
+                  {excludedRowKeys.size > 0 && (
+                    <button type="button" className="restore-dataset-btn-t" onClick={handleRestoreOriginalDataset}>
+                      &#8635; Restore Original Dataset (Undo Exclusions)
+                    </button>
+                  )}
+                </div>
+                {excludedRowKeys.size > 0 && (
+                  <p className="outlier-exclusion-note-t">
+                    {excludedRowKeys.size} row(s) currently excluded from the working dataset — this
+                    affects the live channel preview, the correlation matrices below, and Save &amp;
+                    Apply Transformation Set.
+                  </p>
                 )}
 
                 {histogramData && (

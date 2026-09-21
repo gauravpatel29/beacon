@@ -123,6 +123,248 @@
   display: none;
 }
 
+/* ---- Platform Connections (added below the upload dropzone) ---- */
+.upload-or-divider {
+  display: flex;
+  align-items: center;
+  text-align: center;
+  color: var(--color-text-light);
+  font-size: 0.72rem;
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: 0.06em;
+  margin: var(--spacing-lg) 0;
+}
+.upload-or-divider::before,
+.upload-or-divider::after {
+  content: '';
+  flex: 1;
+  border-bottom: 1px solid var(--color-border-light);
+}
+.upload-or-divider span { padding: 0 0.9rem; }
+
+.platform-connections-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+  margin-bottom: var(--spacing-md);
+}
+
+.platform-connections-title {
+  font-size: 1.05rem;
+  font-weight: var(--font-weight-bold);
+  color: var(--color-text-primary);
+}
+
+.platform-connections-subtitle {
+  font-size: var(--font-size-small);
+  color: var(--color-text-secondary);
+  margin-top: 0.15rem;
+}
+
+.add-platform-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.65rem 1.1rem;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, var(--color-primary) 0%, var(--color-primary-dark) 100%);
+  color: var(--color-white);
+  font-size: 0.82rem;
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+}
+.add-platform-btn:hover { opacity: 0.92; }
+
+.platform-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--spacing-md);
+}
+
+.platform-card {
+  background-color: var(--color-white);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-md);
+}
+
+.platform-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.7rem;
+}
+
+.platform-card-name {
+  font-size: 0.95rem;
+  font-weight: var(--font-weight-bold);
+  color: var(--color-text-primary);
+}
+
+.platform-card-badge {
+  font-size: 0.66rem;
+  font-weight: var(--font-weight-bold);
+  color: var(--color-white);
+  background-color: #1e2a6b;
+  padding: 0.2rem 0.6rem;
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+}
+
+.platform-card-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+  padding: 0.25rem 0;
+}
+.platform-card-row > span:first-child { min-width: 78px; color: var(--color-text-light); }
+.platform-card-row strong { color: var(--color-text-primary); font-weight: var(--font-weight-semibold); }
+.platform-card-host {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.platform-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.platform-status-dot.untested { background-color: #e0a940; }
+.platform-status-dot.connected { background-color: #1f8a4c; }
+.platform-status-dot.failed { background-color: #c0392b; }
+.platform-status-label { color: var(--color-text-primary); font-weight: var(--font-weight-semibold); }
+
+.platform-card-actions {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: 0.8rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--color-border-light);
+}
+
+.platform-action-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.55rem 0.8rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background-color: var(--color-white);
+  color: var(--color-primary);
+  font-size: 0.8rem;
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+}
+.platform-action-btn:hover { background-color: var(--color-primary-light); }
+.platform-action-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.platform-add-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: var(--spacing-lg) var(--spacing-md);
+  border: 1.5px dashed var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: #f7f9fc;
+  min-height: 170px;
+}
+.platform-add-card:hover { border-color: var(--color-primary); background-color: var(--color-primary-light); }
+.platform-add-icon { font-size: 1.6rem; color: var(--color-text-light); }
+.platform-add-label { font-size: 0.85rem; font-weight: var(--font-weight-semibold); color: var(--color-text-secondary); }
+.platform-add-caption { font-size: 0.66rem; letter-spacing: 0.05em; color: var(--color-text-light); }
+
+/* ---- Add / Configure Platform modal ---- */
+.platform-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(15, 23, 41, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: var(--spacing-md);
+}
+
+.platform-modal {
+  position: relative;
+  background-color: var(--color-white);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+  padding: var(--spacing-lg);
+  width: 100%;
+  max-width: 420px;
+}
+
+.platform-modal-close {
+  position: absolute;
+  top: 0.9rem;
+  right: 1rem;
+  font-size: 1.2rem;
+  line-height: 1;
+  color: var(--color-text-light);
+}
+.platform-modal-close:hover { color: var(--color-text-primary); }
+
+.platform-modal-title {
+  font-size: 1.05rem;
+  font-weight: var(--font-weight-bold);
+  color: var(--color-text-primary);
+}
+
+.platform-modal-subtitle {
+  font-size: var(--font-size-small);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--spacing-md);
+}
+
+.platform-field-label {
+  display: block;
+  font-size: 0.78rem;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+  margin: 0.7rem 0 0.35rem;
+}
+
+.platform-field-input {
+  width: 100%;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+  box-sizing: border-box;
+  background-color: var(--color-white);
+}
+
+.platform-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.7rem;
+  margin-top: var(--spacing-lg);
+}
+
+.platform-connect-btn {
+  padding: 0.65rem 1.2rem;
+  border-radius: var(--radius-sm);
+  border: none;
+  background-color: #6366d6;
+  color: var(--color-white);
+  font-size: 0.82rem;
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+}
+.platform-connect-btn:hover { opacity: 0.92; }
+.platform-connect-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
 /* ==========================================================================
    2. MAPPING VIEW - shown after files are uploaded
    ========================================================================== */
