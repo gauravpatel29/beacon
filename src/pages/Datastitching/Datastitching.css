@@ -184,6 +184,67 @@
   gap: var(--spacing-md);
 }
 
+.saved-ards-card {
+  background-color: var(--color-white);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+  padding: var(--spacing-md);
+  margin-top: var(--spacing-md);
+}
+
+.saved-ards-title {
+  font-size: 0.95rem;
+  font-weight: var(--font-weight-bold);
+  color: var(--color-text-primary);
+  margin-bottom: var(--spacing-sm);
+}
+
+.saved-ards-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.saved-ard-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  background-color: #f7f9fc;
+}
+
+.saved-ard-name {
+  font-size: 0.85rem;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.saved-ard-meta {
+  font-size: 0.75rem;
+  color: var(--color-text-light);
+  margin-top: 0.15rem;
+}
+
+.download-ard-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.5rem 0.9rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-primary);
+  background-color: var(--color-white);
+  color: var(--color-primary);
+  font-size: 0.78rem;
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+}
+.download-ard-btn:hover { background-color: var(--color-primary-light); }
+.download-ard-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
 /* Each section reads as its own card on the grey page, matching
    .upload-card / .mapping-config-panel on the Data Ingestion screen. */
 .source-files-card,
@@ -722,6 +783,50 @@
 .step-key-add:hover {
   border-style: solid;
   background-color: #f7f9fc;
+}
+
+/* ---- Rollup: per-column aggregation rules ---- */
+.agg-rule-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-md);
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--color-border-light);
+}
+.agg-rule-row:last-child { border-bottom: none; }
+.agg-rule-name {
+  font-size: 0.8rem;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.agg-rule-row .step-select { max-width: 220px; }
+
+/* ---- Allocate: media-metric multi-select pills ---- */
+.metric-pill-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.6rem;
+}
+.metric-pill {
+  padding: 0.4rem 0.9rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-border);
+  background-color: var(--color-white);
+  color: var(--color-text-secondary);
+  font-size: 0.78rem;
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.metric-pill.selected {
+  background-color: var(--color-primary);
+  border-color: var(--color-primary);
+  color: var(--color-white);
 }
 
 .stitching-actions {

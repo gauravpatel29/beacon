@@ -104,6 +104,22 @@
 .delta-positive { color: #1f8a4c; font-weight: var(--font-weight-semibold); }
 .delta-negative { color: #c0392b; font-weight: var(--font-weight-semibold); }
 
+/* ---- Comprehensive table spend-% badge ---- */
+.spend-pct-badge {
+  display: inline-block; padding: 0.15rem 0.55rem; border-radius: var(--radius-pill);
+  font-size: 0.72rem; font-weight: var(--font-weight-semibold); white-space: nowrap;
+}
+.spend-pct-badge.negative { background-color: #fdf3e3; color: #8a5a10; }
+.spend-pct-badge.positive { background-color: var(--color-primary-light); color: var(--color-primary); }
+
+/* ---- Comprehensive table CSV download (outlined pill) ---- */
+.download-csv-btn {
+  padding: 0.7rem 1.4rem; border-radius: var(--radius-pill); border: 1px solid var(--color-primary);
+  background-color: var(--color-white); color: var(--color-primary); font-size: 0.8rem; font-weight: var(--font-weight-bold);
+  white-space: nowrap; cursor: pointer;
+}
+.download-csv-btn:hover { background-color: var(--color-primary-light); }
+
 .compare-chart-wrapper { border: 1px solid var(--color-border-light); border-radius: var(--radius-sm); padding: var(--spacing-sm); }
 .compare-legend { display: flex; gap: 1.2rem; justify-content: center; margin-top: 0.5rem; }
 .compare-legend-item { display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; color: var(--color-text-secondary); }
