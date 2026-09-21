@@ -43,23 +43,27 @@ const NORMALIZATION_OPTIONS = [
 ];
 
 // The full range the engine accepts. 0.0 is not "no adstock": with a Horizon
-// above zero the engine reads it as a pure shift by that many weeks, which is
-// why it is labelled as a lag rather than as nothing.
+// above zero the engine reads it as a pure shift by that many PERIODS (rows),
+// which is why it is labelled as a lag rather than as nothing. The engine
+// itself is grain-agnostic — it just shifts/decays over N rows — so "weeks"
+// was only ever a UI labelling assumption, not a real constraint. See
+// detectedGranularity below, which replaces that assumption with the actual
+// spacing between dates in the loaded data.
 const ADSTOCK_OPTIONS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
-const HORIZON_OPTIONS = [
-  { value: 1, label: '1 week' },
-  { value: 2, label: '2 weeks' },
-  { value: 4, label: '4 weeks (1 month)' },
-  { value: 8, label: '8 weeks' },
-];
-// A pure delay applied beside the decay, sent as its own `Lag` key.
-const PURE_LAG_OPTIONS = [
-  { value: 0, label: '0 (none)' },
-  { value: 1, label: '1 week' },
-  { value: 2, label: '2 weeks' },
-  { value: 3, label: '3 weeks' },
-  { value: 4, label: '4 weeks' },
-];
+
+// Singular unit name per detected grain, and how many periods make sense to
+// offer as Adstock Horizon presets at that grain (weekly data offering "8
+// weeks" is reasonable; monthly data offering "8 months" of decay usually
+// isn't, so each grain gets its own preset list rather than reusing one).
+const GRANULARITY_UNIT = { daily: 'day', weekly: 'week', monthly: 'month', quarterly: 'quarter', yearly: 'year' };
+const HORIZON_OPTIONS_BY_GRAIN = {
+  daily: [1, 3, 7, 14, 30],
+  weekly: [1, 2, 4, 8],
+  monthly: [1, 2, 3, 6],
+  quarterly: [1, 2, 4],
+  yearly: [1, 2],
+};
+function pluralUnit(n, unit) { return `${n} ${unit}${n === 1 ? '' : 's'}`; }
 const SATURATION_OPTIONS = [
   { value: 'none', label: 'None (Linear)' },
   { value: 'log', label: 'Log: ln(1 + k·x)' },
@@ -129,6 +133,40 @@ function DataTransformation() {
 
   // Step 2 (was Step 1)
   const [dateKeys, setDateKeys] = useState([]);
+
+  // Detected from the actual data, not assumed. Looks at the spacing between
+  // every distinct date in the chosen date column and takes the median gap
+  // (median rather than mean so one bad/missing date doesn't skew it), then
+  // buckets that gap into the nearest common grain. Feeds the Horizon/Lag
+  // labels below — nothing about the actual transformation math changes,
+  // only what unit the period-count numbers are described in.
+  const detectedGranularity = useMemo(() => {
+    const dateCol = dateKeys[0];
+    if (!dateCol || !rows.length) return null;
+    const uniqueDates = [...new Set(rows.map((r) => r[dateCol]).filter(Boolean))]
+      .map((d) => new Date(d))
+      .filter((d) => !Number.isNaN(d.getTime()))
+      .sort((a, b) => a - b);
+    if (uniqueDates.length < 2) return null;
+    const gaps = [];
+    for (let i = 1; i < uniqueDates.length; i++) {
+      gaps.push((uniqueDates[i] - uniqueDates[i - 1]) / 86400000);
+    }
+    gaps.sort((a, b) => a - b);
+    const medianGapDays = gaps[Math.floor(gaps.length / 2)];
+    if (medianGapDays <= 2) return 'daily';
+    if (medianGapDays <= 10) return 'weekly';
+    if (medianGapDays <= 45) return 'monthly';
+    if (medianGapDays <= 100) return 'quarterly';
+    return 'yearly';
+  }, [rows, dateKeys]);
+
+  const granularityUnitLabel = GRANULARITY_UNIT[detectedGranularity] || 'week'; // weekly fallback if detection is inconclusive
+  const horizonOptions = useMemo(
+    () => (HORIZON_OPTIONS_BY_GRAIN[detectedGranularity] || HORIZON_OPTIONS_BY_GRAIN.weekly)
+      .map((v) => ({ value: v, label: pluralUnit(v, granularityUnitLabel) })),
+    [detectedGranularity, granularityUnitLabel]
+  );
   const [geoKeys, setGeoKeys] = useState([]);
   const [dependentVars, setDependentVars] = useState([]);
   const [zipKeys, setZipKeys] = useState([]);
@@ -152,6 +190,12 @@ function DataTransformation() {
 
   // Step 3: per-variable config
   const [configs, setConfigs] = useState({}); // { [varName]: {decay, horizon, saturation, param, source} }
+  // Lag's input needs to be freely backspace-able down to empty while typing,
+  // but configs[name].lag must always stay a real number for
+  // sharedToTransformation's payload — so the in-progress text lives here,
+  // separate from the committed value, and only gets parsed/committed back
+  // into configs on blur.
+  const [lagDrafts, setLagDrafts] = useState({}); // { [varName]: string }
 
   const [transformSetName, setTransformSetName] = useState('');
   const [isApplying, setIsApplying] = useState(false);
@@ -1319,16 +1363,43 @@ function DataTransformation() {
                               </td>
                               <td>
                                 <select value={cfg.horizon} onChange={(e) => updateConfig(name, { horizon: Number(e.target.value) })}>
-                                  {HORIZON_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                                  {horizonOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                                 </select>
                               </td>
                               {/* The pure shift, separate from the horizon and
                                   sent as its own `Lag` key, exactly as the
-                                  reference app sends it. */}
+                                  reference app sends it. Free-form per
+                                  feedback — a fixed 0-4 week dropdown made no
+                                  sense once the grain isn't weekly, and the
+                                  engine accepts any non-negative period
+                                  count anyway. */}
                               <td>
-                                <select value={cfg.lag ?? 0} onChange={(e) => updateConfig(name, { lag: Number(e.target.value) })}>
-                                  {PURE_LAG_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                                </select>
+                                <div className="lag-input-cell">
+                                  <input
+                                    type="number" min="0" step="1"
+                                    value={lagDrafts[name] !== undefined ? lagDrafts[name] : String(cfg.lag ?? 0)}
+                                    onChange={(e) => {
+                                      // Strips a leading zero once another digit follows it
+                                      // (05 -> 5, 007 -> 7), but leaves a lone "0" alone so
+                                      // typing a fresh zero still works normally.
+                                      const normalized = e.target.value.replace(/^0+(?=\d)/, '');
+                                      setLagDrafts((d) => ({ ...d, [name]: normalized }));
+                                    }}
+                                    onBlur={(e) => {
+                                      const parsed = Math.max(0, Number(e.target.value) || 0);
+                                      updateConfig(name, { lag: parsed });
+                                      // Draft's job is done — future renders read straight from
+                                      // configs again, so an external reset of cfg.lag (e.g.
+                                      // "Reset to suggested") isn't shadowed by a stale draft.
+                                      setLagDrafts((d) => {
+                                        const next = { ...d };
+                                        delete next[name];
+                                        return next;
+                                      });
+                                    }}
+                                  />
+                                  <span className="lag-input-unit">{granularityUnitLabel}(s)</span>
+                                </div>
                               </td>
                               <td>
                                 <select value={cfg.saturation} onChange={(e) => updateConfig(name, { saturation: e.target.value })}>
@@ -1585,7 +1656,7 @@ function DataTransformation() {
                             <div className="detail-grid">
                               <div><p className="detail-item-label">Normalization</p><p className="detail-item-value">none</p></div>
                               <div><p className="detail-item-label">Adstock Decay (α)</p><p className="detail-item-value">{inspectDetail.config.decay}</p></div>
-                              <div><p className="detail-item-label">Adstock Horizon</p><p className="detail-item-value">{inspectDetail.config.horizon} weeks</p></div>
+                              <div><p className="detail-item-label">Adstock Horizon</p><p className="detail-item-value">{pluralUnit(inspectDetail.config.horizon, granularityUnitLabel)}</p></div>
                               <div><p className="detail-item-label">Saturation Transform</p><p className="detail-item-value">{SATURATION_OPTIONS.find((o) => o.value === inspectDetail.config.saturation)?.label.split(':')[0]}</p></div>
                               <div><p className="detail-item-label">Param (k  p)</p><p className="detail-item-value">{inspectDetail.config.saturation === 'none' ? '-' : inspectDetail.config.param}</p></div>
                               <div><p className="detail-item-label">Configuration Source</p><p className="detail-item-value"><span className={`source-badge ${inspectDetail.config.source}`}>{inspectDetail.config.source === 'auto' ? 'Auto Selected' : 'Manual'}</span></p></div>

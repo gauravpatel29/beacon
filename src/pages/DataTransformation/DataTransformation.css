@@ -367,6 +367,18 @@
   min-width: 100px;
 }
 
+.lag-input-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.lag-input-cell input[type="number"] { min-width: 60px; width: 70px; flex: none; }
+.lag-input-unit {
+  font-size: 0.72rem;
+  color: var(--color-text-light);
+  white-space: nowrap;
+}
+
 .source-badge {
   font-size: 0.68rem;
   font-weight: var(--font-weight-semibold);
