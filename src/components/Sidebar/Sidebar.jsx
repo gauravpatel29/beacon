@@ -16,7 +16,7 @@ const navItems = [
   { id: 'home',  icon: home, label: 'Home', path: '/' },
   { id: 'data-ingestion', icon: cloud, label: 'Data Ingestion', path: '/data-ingestion' },
   { id: 'data-stitching', icon: chart, label: 'Data Stitching', path: '/data-stitching' },
-  { id: 'eda', icon: dots, label: 'EDA', path: '/eda' },
+  // { id: 'eda', icon: dots, label: 'EDA', path: '/eda' },
   { id: 'data-transformation', icon: graph, label: 'Data Transformation', path: '/data-transformation' },
   { id: 'model-configuration ', icon:bar_graph, label: 'Model Configuration', path: '/model-configuration' },
   { id: 'response-curves', icon:data_lifecycle, label: 'Response Curves', path: '/response-curves' },

@@ -43,23 +43,27 @@ const NORMALIZATION_OPTIONS = [
 ];
 
 // The full range the engine accepts. 0.0 is not "no adstock": with a Horizon
-// above zero the engine reads it as a pure shift by that many weeks, which is
-// why it is labelled as a lag rather than as nothing.
+// above zero the engine reads it as a pure shift by that many PERIODS (rows),
+// which is why it is labelled as a lag rather than as nothing. The engine
+// itself is grain-agnostic — it just shifts/decays over N rows — so "weeks"
+// was only ever a UI labelling assumption, not a real constraint. See
+// detectedGranularity below, which replaces that assumption with the actual
+// spacing between dates in the loaded data.
 const ADSTOCK_OPTIONS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
-const HORIZON_OPTIONS = [
-  { value: 1, label: '1 week' },
-  { value: 2, label: '2 weeks' },
-  { value: 4, label: '4 weeks (1 month)' },
-  { value: 8, label: '8 weeks' },
-];
-// A pure delay applied beside the decay, sent as its own `Lag` key.
-const PURE_LAG_OPTIONS = [
-  { value: 0, label: '0 (none)' },
-  { value: 1, label: '1 week' },
-  { value: 2, label: '2 weeks' },
-  { value: 3, label: '3 weeks' },
-  { value: 4, label: '4 weeks' },
-];
+
+// Singular unit name per detected grain, and how many periods make sense to
+// offer as Adstock Horizon presets at that grain (weekly data offering "8
+// weeks" is reasonable; monthly data offering "8 months" of decay usually
+// isn't, so each grain gets its own preset list rather than reusing one).
+const GRANULARITY_UNIT = { daily: 'day', weekly: 'week', monthly: 'month', quarterly: 'quarter', yearly: 'year' };
+const HORIZON_OPTIONS_BY_GRAIN = {
+  daily: [1, 3, 7, 14, 30],
+  weekly: [1, 2, 4, 8],
+  monthly: [1, 2, 3, 6],
+  quarterly: [1, 2, 4],
+  yearly: [1, 2],
+};
+function pluralUnit(n, unit) { return `${n} ${unit}${n === 1 ? '' : 's'}`; }
 const SATURATION_OPTIONS = [
   { value: 'none', label: 'None (Linear)' },
   { value: 'log', label: 'Log: ln(1 + k·x)' },
@@ -105,9 +109,64 @@ function DataTransformation() {
   const [outlierRaw, setOutlierRaw] = useState(null);
   const [isScanningOutliers, setIsScanningOutliers] = useState(false);
   const [outlierScanError, setOutlierScanError] = useState(null);
+  // Row indices excluded from the working dataset — indexed into the
+  // ORIGINAL, unfiltered `rows` array (not the filtered one), so exclusions
+  // stay consistent across variables and across restore/re-exclude cycles.
+  const [excludedRowKeys, setExcludedRowKeys] = useState(() => new Set());
+
+  // The actual working dataset, with excluded rows removed. This is what
+  // Steps 2-4 (live channel preview, pre/post correlation, Save & Apply) run
+  // against — exclusion here is real pre-treatment, not just a chart filter.
+  // Kept indexed against the ORIGINAL `rows` array throughout (never against
+  // this filtered one), so the outlier scan's returned indices never need
+  // re-mapping after an exclusion changes what's in the working set.
+  // Declared early (right after the state it depends on) rather than near
+  // the rest of the Step 1 outlier logic further down — several Step 2-4
+  // effects reference it in their dependency arrays, and a const referenced
+  // in a dependency array before its own declaration line executes is a
+  // temporal-dead-zone error, not just a stale-value bug.
+  const effectiveCsv = useMemo(() => {
+    if (!excludedRowKeys.size) return activeCsv;
+    const keptRows = rows.filter((_, idx) => !excludedRowKeys.has(idx));
+    return Papa.unparse(keptRows, { columns });
+  }, [activeCsv, rows, columns, excludedRowKeys]);
 
   // Step 2 (was Step 1)
   const [dateKeys, setDateKeys] = useState([]);
+
+  // Detected from the actual data, not assumed. Looks at the spacing between
+  // every distinct date in the chosen date column and takes the median gap
+  // (median rather than mean so one bad/missing date doesn't skew it), then
+  // buckets that gap into the nearest common grain. Feeds the Horizon/Lag
+  // labels below — nothing about the actual transformation math changes,
+  // only what unit the period-count numbers are described in.
+  const detectedGranularity = useMemo(() => {
+    const dateCol = dateKeys[0];
+    if (!dateCol || !rows.length) return null;
+    const uniqueDates = [...new Set(rows.map((r) => r[dateCol]).filter(Boolean))]
+      .map((d) => new Date(d))
+      .filter((d) => !Number.isNaN(d.getTime()))
+      .sort((a, b) => a - b);
+    if (uniqueDates.length < 2) return null;
+    const gaps = [];
+    for (let i = 1; i < uniqueDates.length; i++) {
+      gaps.push((uniqueDates[i] - uniqueDates[i - 1]) / 86400000);
+    }
+    gaps.sort((a, b) => a - b);
+    const medianGapDays = gaps[Math.floor(gaps.length / 2)];
+    if (medianGapDays <= 2) return 'daily';
+    if (medianGapDays <= 10) return 'weekly';
+    if (medianGapDays <= 45) return 'monthly';
+    if (medianGapDays <= 100) return 'quarterly';
+    return 'yearly';
+  }, [rows, dateKeys]);
+
+  const granularityUnitLabel = GRANULARITY_UNIT[detectedGranularity] || 'week'; // weekly fallback if detection is inconclusive
+  const horizonOptions = useMemo(
+    () => (HORIZON_OPTIONS_BY_GRAIN[detectedGranularity] || HORIZON_OPTIONS_BY_GRAIN.weekly)
+      .map((v) => ({ value: v, label: pluralUnit(v, granularityUnitLabel) })),
+    [detectedGranularity, granularityUnitLabel]
+  );
   const [geoKeys, setGeoKeys] = useState([]);
   const [dependentVars, setDependentVars] = useState([]);
   const [zipKeys, setZipKeys] = useState([]);
@@ -131,6 +190,12 @@ function DataTransformation() {
 
   // Step 3: per-variable config
   const [configs, setConfigs] = useState({}); // { [varName]: {decay, horizon, saturation, param, source} }
+  // Lag's input needs to be freely backspace-able down to empty while typing,
+  // but configs[name].lag must always stay a real number for
+  // sharedToTransformation's payload — so the in-progress text lives here,
+  // separate from the committed value, and only gets parsed/committed back
+  // into configs on blur.
+  const [lagDrafts, setLagDrafts] = useState({}); // { [varName]: string }
 
   const [transformSetName, setTransformSetName] = useState('');
   const [isApplying, setIsApplying] = useState(false);
@@ -471,7 +536,7 @@ function DataTransformation() {
       // same engine the model is fitted with, so what is previewed here is what
       // gets modelled.
       const data = await transformationApply({
-        csv_data: activeCsv,
+        csv_data: effectiveCsv,
         geo_column: geoKeys[0],
         date_column: dateKeys[0],
         dependent_variable: dependentVars[0],
@@ -601,15 +666,23 @@ function DataTransformation() {
     (async () => {
       const rawColumnsToScore = (transformResult?.transformedCols || [])
         .map((c) => c.raw).slice(0, 8);
-      if (!activeCsv || !rawColumnsToScore.length) {
+      if (!effectiveCsv || !rawColumnsToScore.length) {
         if (!cancelled) setPreCorrelation(null);
         return;
       }
       setIsScoringPreCorr(true);
       try {
         const data = await transformationCorrelation({
-          csv_data: activeCsv,
+          csv_data: effectiveCsv,
           columns: rawColumnsToScore,
+          // Without this, a derived variable (e.g. a combined column that
+          // only exists once the derivation formula runs) has no raw
+          // counterpart in effectiveCsv to score at all — it would silently
+          // be missing from this matrix while still showing correctly in
+          // the Post-Transformation one, which gets it from
+          // transformResult.csv (already computed server-side via the same
+          // parameter in the transformationApply call above).
+          derived_variables: toDerivedVariables(),
           threshold: 0,
         });
         if (!cancelled) { setPreCorrelation(data); setPreCorrError(null); }
@@ -625,7 +698,7 @@ function DataTransformation() {
     return () => { cancelled = true; };
     // Same reasoning as the post-transformation effect above: keyed on
     // transformResult (which only changes on Apply), never on corrThreshold.
-  }, [transformResult, activeCsv]);
+  }, [transformResult, effectiveCsv]);
 
   // The server returns the matrix column-major ({ colA: { colB: r } }); the
   // table renders rows, so it is pivoted once here.
@@ -671,14 +744,14 @@ function DataTransformation() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      if (!activeCsv || !activeInspectVar || !geoKeys.length || !dependentVars.length) {
+      if (!effectiveCsv || !activeInspectVar || !geoKeys.length || !dependentVars.length) {
         if (!cancelled) setPreview(null);
         return;
       }
       setIsPreviewing(true);
       try {
         const data = await transformationPreviewSingle({
-          csv_data: activeCsv,
+          csv_data: effectiveCsv,
           channel: activeInspectVar,
           geo_column: geoKeys[0],
           date_column: dateKeys[0] || '',
@@ -700,7 +773,7 @@ function DataTransformation() {
     return () => { cancelled = true; };
     // `configs` is a dependency so editing the inspected channel re-previews.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeCsv, activeInspectVar, configs, derivedVars, geoKeys, dateKeys, dependentVars, popKeys]);
+  }, [effectiveCsv, activeInspectVar, configs, derivedVars, geoKeys, dateKeys, dependentVars, popKeys]);
 
   // The server response, reshaped for the panels below. Statistics, bins and
   // curves all come from the engine, so what is shown here is what the model
@@ -753,8 +826,8 @@ function DataTransformation() {
   // eligibleColumns above — the KPI itself (e.g. trx_pso) needs outlier
   // inspection just as much as any channel.
   const numericColumnsAll = useMemo(
-    () => columns.filter((c) => isNumericColumn(rows, c)),
-    [columns, rows]
+    () => columns.filter((c) => !lockedKeys.has(c) && isNumericColumn(rows, c)),
+    [columns, rows, lockedKeys]
   );
 
   useEffect(() => {
@@ -838,13 +911,34 @@ function DataTransformation() {
 
   const outlierResult = useMemo(() => {
     if (!outlierRaw) return null;
+    const allFlagged = outlierRaw.outlier_indices || [];
     return {
       lower: Number(outlierRaw.lower_bound) || 0,
       upper: Number(outlierRaw.upper_bound) || 0,
-      flaggedIndices: outlierRaw.outlier_indices || [],
+      // Rows already excluded stop counting as "still flagged" — otherwise
+      // clicking Exclude wouldn't visibly change anything on screen.
+      flaggedIndices: allFlagged.filter((idx) => !excludedRowKeys.has(idx)),
       pct: Number(outlierRaw.outlier_pct) || 0,
     };
-  }, [outlierRaw]);
+  }, [outlierRaw, excludedRowKeys]);
+
+  const handleExcludeOutliers = () => {
+    if (!outlierResult || !outlierResult.flaggedIndices.length) return;
+    const count = outlierResult.flaggedIndices.length;
+    if (!window.confirm(
+      `${count} row(s) will be removed from the working dataset used for previews, correlation, and ` +
+      `Save & Apply. The original file on disk is not changed, and "Restore Original Dataset" puts them back.`
+    )) return;
+    setExcludedRowKeys((prev) => {
+      const next = new Set(prev);
+      outlierResult.flaggedIndices.forEach((idx) => next.add(idx));
+      return next;
+    });
+  };
+
+  const handleRestoreOriginalDataset = () => {
+    setExcludedRowKeys(new Set());
+  };
 
   return (
     <div className="transform-page">
@@ -888,7 +982,7 @@ function DataTransformation() {
             <>
               {/* ---- Step 1 (new): Outlier Diagnostics & Pre-Treatment ---- */}
               <div className="transform-card">
-                <p className="transform-section-title">Step 1: Outlier Diagnostics &amp; Pre-Treatment</p>
+                <p className="transform-section-title">Outlier Diagnostics &amp; Pre-Treatment</p>
                 <p className="transform-section-desc">
                   Inspect extreme values and outliers before applying feature engineering transforms.
                   Outlier exclusion updates the working dataset immediately.
@@ -962,6 +1056,26 @@ function DataTransformation() {
                   </div>
                 )}
 
+                <div className="outlier-exclude-row-t">
+                  {outlierResult && outlierResult.flaggedIndices.length > 0 && (
+                    <button type="button" className="exclude-outliers-btn-t" onClick={handleExcludeOutliers}>
+                      Exclude {outlierResult.flaggedIndices.length} Outliers from Dataset
+                    </button>
+                  )}
+                  {excludedRowKeys.size > 0 && (
+                    <button type="button" className="restore-dataset-btn-t" onClick={handleRestoreOriginalDataset}>
+                      &#8635; Restore Original Dataset (Undo Exclusions)
+                    </button>
+                  )}
+                </div>
+                {excludedRowKeys.size > 0 && (
+                  <p className="outlier-exclusion-note-t">
+                    {excludedRowKeys.size} row(s) currently excluded from the working dataset — this
+                    affects the live channel preview, the correlation matrices below, and Save &amp;
+                    Apply Transformation Set.
+                  </p>
+                )}
+
                 {histogramData && (
                   <div className="dist-chart-box">
                     <p className="dist-chart-title">Raw Distribution Histogram ({outlierVariable})</p>
@@ -997,7 +1111,7 @@ function DataTransformation() {
               {/* ---- Step 2: Column categorization ---- */}
               <div className="transform-card">
                 <p className="transform-section-title">
-                  Step 2: Column Categorization (from Ingestion)
+                  Column Categorization (from Ingestion)
                 </p>
                 <p className="transform-section-desc">
                   Variables are categorized according to their Ingestion roles. You can adjust
@@ -1100,7 +1214,7 @@ function DataTransformation() {
                   decision. */}
               {selectedList.length > 0 && (
                 <div className="transform-card">
-                  <p className="transform-section-title">Step 3: Transformation Configuration Table</p>
+                  <p className="transform-section-title">Transformation Configuration Table</p>
                   <p className="transform-section-desc">
                     Configure Normalization, Adstock Decay, Adstock Horizon (decay span), Lag (pure
                     shift) and Saturation curves per channel. Use the i on any row for benchmarks.
@@ -1249,16 +1363,43 @@ function DataTransformation() {
                               </td>
                               <td>
                                 <select value={cfg.horizon} onChange={(e) => updateConfig(name, { horizon: Number(e.target.value) })}>
-                                  {HORIZON_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                                  {horizonOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                                 </select>
                               </td>
                               {/* The pure shift, separate from the horizon and
                                   sent as its own `Lag` key, exactly as the
-                                  reference app sends it. */}
+                                  reference app sends it. Free-form per
+                                  feedback — a fixed 0-4 week dropdown made no
+                                  sense once the grain isn't weekly, and the
+                                  engine accepts any non-negative period
+                                  count anyway. */}
                               <td>
-                                <select value={cfg.lag ?? 0} onChange={(e) => updateConfig(name, { lag: Number(e.target.value) })}>
-                                  {PURE_LAG_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                                </select>
+                                <div className="lag-input-cell">
+                                  <input
+                                    type="number" min="0" step="1"
+                                    value={lagDrafts[name] !== undefined ? lagDrafts[name] : String(cfg.lag ?? 0)}
+                                    onChange={(e) => {
+                                      // Strips a leading zero once another digit follows it
+                                      // (05 -> 5, 007 -> 7), but leaves a lone "0" alone so
+                                      // typing a fresh zero still works normally.
+                                      const normalized = e.target.value.replace(/^0+(?=\d)/, '');
+                                      setLagDrafts((d) => ({ ...d, [name]: normalized }));
+                                    }}
+                                    onBlur={(e) => {
+                                      const parsed = Math.max(0, Number(e.target.value) || 0);
+                                      updateConfig(name, { lag: parsed });
+                                      // Draft's job is done — future renders read straight from
+                                      // configs again, so an external reset of cfg.lag (e.g.
+                                      // "Reset to suggested") isn't shadowed by a stale draft.
+                                      setLagDrafts((d) => {
+                                        const next = { ...d };
+                                        delete next[name];
+                                        return next;
+                                      });
+                                    }}
+                                  />
+                                  <span className="lag-input-unit">{granularityUnitLabel}(s)</span>
+                                </div>
                               </td>
                               <td>
                                 <select value={cfg.saturation} onChange={(e) => updateConfig(name, { saturation: e.target.value })}>
@@ -1343,8 +1484,34 @@ function DataTransformation() {
               {/* ---- Validation sections (post apply) ---- */}
               {transformResult && (
                 <>
+                  
                   <div className="transform-card">
-                    <p className="transform-section-title">Step 4: Pre vs. Post Transformation Correlation Comparison</p>
+                    <p className="transform-section-title">Transformed Dataset Preview</p>
+                    <p className="transform-section-desc">
+                      Showing first 10 rows of {transformResult.rows.length.toLocaleString()} total rows ({[...columns, ...transformResult.transformedCols.map((c) => c.transformed)].length} columns)
+                    </p>
+                    <div className="transformed-preview-scroll">
+                      <table className="transformed-preview-table">
+                        <thead>
+                          <tr>
+                            {columns.map((c) => <th key={c}>{c}</th>)}
+                            {transformResult.transformedCols.map((c) => <th key={c.transformed}>{c.transformed}</th>)}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {transformResult.rows.slice(0, 10).map((r, i) => (
+                            <tr key={i}>
+                              {columns.map((c) => <td key={c}>{typeof r[c] === 'number' ? r[c].toLocaleString(undefined, { maximumFractionDigits: 4 }) : r[c]}</td>)}
+                              {transformResult.transformedCols.map((c) => <td key={c.transformed}>{Number(r[c.transformed]).toFixed(4)}</td>)}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div className="transform-card">
+                    <p className="transform-section-title">Pre vs. Post Transformation Correlation Comparison</p>
                     <p className="transform-section-desc">
                       Compare correlation structure before and after feature engineering to ensure adstock smoothing and non-linear saturation transforms have not introduced collinearity.
                     </p>
@@ -1356,7 +1523,7 @@ function DataTransformation() {
 
                     <div className="corr-compare-row">
                       <div className="corr-compare-col">
-                        <p className="corr-compare-title">1. Pre-Transformation Matrix (Raw Features)</p>
+                        <p className="corr-compare-title">Pre-Transformation Matrix (Raw Features)</p>
                         {isScoringPreCorr && (
                           <p className="transform-section-desc" role="status">Scoring correlation…</p>
                         )}
@@ -1381,7 +1548,7 @@ function DataTransformation() {
                       </div>
 
                       <div className="corr-compare-col">
-                        <p className="corr-compare-title after-title">2. Post-Transformation Matrix (Transformed Features)</p>
+                        <p className="corr-compare-title">Post-Transformation Matrix (Transformed Features)</p>
                         {isScoringCorr && (
                           <p className="transform-section-desc" role="status">Scoring correlation…</p>
                         )}
@@ -1418,30 +1585,6 @@ function DataTransformation() {
                     )}
                   </div>
 
-                  <div className="transform-card">
-                    <p className="transform-section-title">2. Transformed Dataset Preview</p>
-                    <p className="transform-section-desc">
-                      Showing first 10 rows of {transformResult.rows.length.toLocaleString()} total rows ({[...columns, ...transformResult.transformedCols.map((c) => c.transformed)].length} columns)
-                    </p>
-                    <div className="transformed-preview-scroll">
-                      <table className="transformed-preview-table">
-                        <thead>
-                          <tr>
-                            {columns.map((c) => <th key={c}>{c}</th>)}
-                            {transformResult.transformedCols.map((c) => <th key={c.transformed}>{c.transformed}</th>)}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {transformResult.rows.slice(0, 10).map((r, i) => (
-                            <tr key={i}>
-                              {columns.map((c) => <td key={c}>{typeof r[c] === 'number' ? r[c].toLocaleString(undefined, { maximumFractionDigits: 4 }) : r[c]}</td>)}
-                              {transformResult.transformedCols.map((c) => <td key={c.transformed}>{Number(r[c.transformed]).toFixed(4)}</td>)}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
 
                   <div className="section-connector">
                    
@@ -1450,7 +1593,7 @@ function DataTransformation() {
                   <div className="transform-card">
                     <div className="transform-card-titlebar">
                       <div>
-                        <p className="transform-section-title">3. Preview &amp; Validation</p>
+                        <p className="transform-section-title">Preview &amp; Validation</p>
                         <p className="transform-section-desc">
                           Review the empirical impact of transformations, validate distribution compression, and inspect response shape against KPI before saving.
                         </p>
@@ -1513,7 +1656,7 @@ function DataTransformation() {
                             <div className="detail-grid">
                               <div><p className="detail-item-label">Normalization</p><p className="detail-item-value">none</p></div>
                               <div><p className="detail-item-label">Adstock Decay (α)</p><p className="detail-item-value">{inspectDetail.config.decay}</p></div>
-                              <div><p className="detail-item-label">Adstock Horizon</p><p className="detail-item-value">{inspectDetail.config.horizon} weeks</p></div>
+                              <div><p className="detail-item-label">Adstock Horizon</p><p className="detail-item-value">{pluralUnit(inspectDetail.config.horizon, granularityUnitLabel)}</p></div>
                               <div><p className="detail-item-label">Saturation Transform</p><p className="detail-item-value">{SATURATION_OPTIONS.find((o) => o.value === inspectDetail.config.saturation)?.label.split(':')[0]}</p></div>
                               <div><p className="detail-item-label">Param (k  p)</p><p className="detail-item-value">{inspectDetail.config.saturation === 'none' ? '-' : inspectDetail.config.param}</p></div>
                               <div><p className="detail-item-label">Configuration Source</p><p className="detail-item-value"><span className={`source-badge ${inspectDetail.config.source}`}>{inspectDetail.config.source === 'auto' ? 'Auto Selected' : 'Manual'}</span></p></div>
@@ -1549,7 +1692,7 @@ function DataTransformation() {
                           </div>
                         </div>
 
-                        <p className="transform-card-heading">Relationship with KPI (Poor Man's Curve): Before vs. After Transformation</p>
+                        {/* <p className="transform-card-heading">Relationship with KPI (Poor Man's Curve): Before vs. After Transformation</p>
                         <div className="curve-compare-row">
                           <div className="dist-chart-box">
                             <p className="dist-chart-title">Before: {activeInspectVar} vs {dependentVars[0]}</p>
@@ -1559,7 +1702,7 @@ function DataTransformation() {
                             <p className="dist-chart-title after-title">After: {activeInspectVar} (Transformed) vs {dependentVars[0]}</p>
                             <MiniLineChart points={inspectDetail.curveAfter} color="#1d4ed8" xLabel={`${activeInspectVar} (transformed)`} yLabel={`Average ${dependentVars[0] || 'KPI'}`} />
                           </div>
-                        </div>
+                        </div> */}
                       </>
                     )}
                   </div>

@@ -38,13 +38,13 @@ const pipelineCards = [
     description:
       'Join mapped source files on shared keys to build HCP or DMA-level analytic record datasets.',
   },
-  {
-    id: 'data-review',
-    title: 'Data Review',
-    icon: dot,
-    description:
-      'Inspect column profiles, detect multicollinearity, and validate data quality before modelling.',
-  },
+  // {
+  //   id: 'data-review',
+  //   title: 'Data Review',
+  //   icon: dot,
+  //   description:
+  //     'Inspect column profiles, detect multicollinearity, and validate data quality before modelling.',
+  // },
   {
     id: 'data-transformation',
     title: 'Data Transformation',
@@ -317,7 +317,7 @@ function Home() {
                 Get Started <span aria-hidden="true">→</span>
               </button>
               <button className="btn btn-secondary" onClick={openWorkflowDialog}>Continue Workflow</button>
-              <button className="btn btn-tertiary" >Interact With Workflow</button>
+              <a href="https://takedammx.vercel.app/" target="_blank"><button className="btn btn-tertiary" >Interact With Workflow</button></a>
             </div>
           </div>
 

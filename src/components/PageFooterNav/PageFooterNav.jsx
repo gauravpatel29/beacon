@@ -24,13 +24,13 @@ export const PIPELINE_STEPS = [
     completionTitle: 'ARD Generated',
     description: 'join mapped source files on shared keys to build HCP or DMA-level analytic record datasets.',
   },
-  {
-    id: 'eda',
-    label: 'eda',
-    path: '/eda',
-    completionTitle: 'Dataset Diagnostics Complete',
-    description: 'inspect column profiles, detect multicollinearity, and validate data quality before modelling.',
-  },
+  // {
+  //   id: 'eda',
+  //   label: 'eda',
+  //   path: '/eda',
+  //   completionTitle: 'Dataset Diagnostics Complete',
+  //   description: 'inspect column profiles, detect multicollinearity, and validate data quality before modelling.',
+  // },
   {
     id: 'data-transformation',
     label: 'Data Transformation',

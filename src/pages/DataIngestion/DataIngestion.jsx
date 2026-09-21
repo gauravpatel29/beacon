@@ -74,35 +74,35 @@ export const FILE_CATEGORIES = [
   },
   {
     id: 'hcp_promo',
-    label: 'HCP-level Marketing Promo File',
+    label: 'HCP Promotions',
     grain: 'HCP × Period',
     desc: 'Calls, Samples, Details, Speaker programs',
     required: false,
   },
   {
     id: 'dma_promo',
-    label: 'DMA-level Marketing Activity File',
+    label: 'DTC Promotions',
     grain: 'DMA × Period',
     desc: 'TV, Radio, Print, Digital spend impressions',
     required: false,
   },
   {
     id: 'dma_hcp_map',
-    label: 'DMA HCP Mapping File',
+    label: 'Mapping Files',
     grain: 'HCP ↔ DMA Bridge',
     desc: 'Crosswalk bridge between HCP IDs ZIPs and DMA IDs',
     required: false,
   },
-  {
-    id: 'dma_pop',
-    label: 'DMA Population File',
-    grain: 'DMA Grain',
-    desc: 'DMA target population or universe sizing',
-    required: false,
-  },
+  // {
+  //   id: 'dma_pop',
+  //   label: 'DMA Population File',
+  //   grain: 'DMA Grain',
+  //   desc: 'DMA target population or universe sizing',
+  //   required: false,
+  // },
   {
   id: 'other',
-  label: 'Other File',
+  label: 'Other Misceleneous Files',
   grain: 'Varies',
   desc: 'Supplementary or reference data that doesn\'t fit the standard categories above.',
   required: false,
@@ -113,6 +113,12 @@ export const PROMO_SUB_TIERS = [
   { id: "Personal Promotion", label: "Personal Promotion (Rep Calls, Detailing, Samples, Events)", badge: "bg-emerald-100 text-emerald-800 border-emerald-300" },
   { id: "Non Personal Promotion", label: "Non Personal Promotion (RTE, Emails, Portal, HCP Web)", badge: "bg-amber-100 text-amber-800 border-amber-300" },
   { id: "DTC Promotion", label: "DTC Promotion (TV, Digital Ads, Search, Social, Print)", badge: "bg-purple-100 text-purple-800 border-purple-300" },
+];
+
+const PLATFORM_TYPES = [
+  { id: 'databricks', label: 'Databricks', short: 'DB' },
+  { id: 'snowflake', label: 'Snowflake', short: 'SF' },
+  { id: 'fabric', label: 'Fabric', short: 'FAB' },
 ];
 
 const DATA_TYPE_OPTIONS = [
@@ -965,6 +971,68 @@ function DataIngestion() {
   const [statsVersion, setStatsVersion] = useState(0);
   const fileInputRef = useRef(null);
 
+  // ── Platform Connections (Databricks / Snowflake / Fabric) ──────────────
+  // PLACEHOLDER: no backend endpoint exists yet for creating, testing, or
+  // listing platform connections — nothing like this is in services/api.js.
+  // Kept as local-only state, same pattern as handleDetectGranularity below:
+  // the full UI flow is reviewable now, and each handler is marked with
+  // exactly what a real API call would need to replace it.
+  const [platformConnections, setPlatformConnections] = useState([]);
+  const [isPlatformModalOpen, setIsPlatformModalOpen] = useState(false);
+  const [editingConnectionId, setEditingConnectionId] = useState(null);
+  const [platformForm, setPlatformForm] = useState({ name: '', type: 'databricks', host: '', credential: '' });
+  const [testingConnectionId, setTestingConnectionId] = useState(null);
+
+  const openAddPlatformModal = () => {
+    setEditingConnectionId(null);
+    setPlatformForm({ name: '', type: 'databricks', host: '', credential: '' });
+    setIsPlatformModalOpen(true);
+  };
+
+  const openConfigurePlatformModal = (conn) => {
+    setEditingConnectionId(conn.id);
+    setPlatformForm({ name: conn.name, type: conn.type, host: conn.host, credential: conn.credential || '' });
+    setIsPlatformModalOpen(true);
+  };
+
+  const closePlatformModal = () => setIsPlatformModalOpen(false);
+
+  const handleSubmitPlatformForm = () => {
+    if (!platformForm.name.trim() || !platformForm.host.trim()) return;
+    if (editingConnectionId) {
+      setPlatformConnections((prev) => prev.map((c) => (
+        c.id === editingConnectionId
+          ? { ...c, name: platformForm.name.trim(), type: platformForm.type, host: platformForm.host.trim(), credential: platformForm.credential }
+          : c
+      )));
+    } else {
+      setPlatformConnections((prev) => [...prev, {
+        id: `conn-${Date.now()}`,
+        name: platformForm.name.trim(),
+        type: platformForm.type,
+        host: platformForm.host.trim(),
+        credential: platformForm.credential,
+        status: 'untested',
+        monitored: 'Auto',
+      }]);
+    }
+    setIsPlatformModalOpen(false);
+  };
+
+  // PLACEHOLDER: no backend endpoint yet to actually test connectivity to a
+  // platform. Rather than fabricate a fake "Connected" result, this says
+  // plainly that a real check isn't wired up, and leaves status as-is.
+  // Replace with a real call (e.g. POST /v1/platform-connections/{id}/test)
+  // once one exists, then set status to whatever it reports.
+  const handleTestConnection = (conn) => {
+    setTestingConnectionId(conn.id);
+    window.alert(
+      `Testing "${conn.name}" isn't wired to a real backend endpoint yet, so this can't ` +
+      'confirm actual connectivity. Status is left as-is until a real test endpoint exists.'
+    );
+    setTestingConnectionId(null);
+  };
+
   // ── Data Review tab: Time Trends chart state ──────────────────────────
   // Rolled up from the file's COMPLETE content, fetched through the dataset
   // /csv endpoint. This was a preview-sample rollup until that endpoint was
@@ -1611,6 +1679,111 @@ function DataIngestion() {
               Supports CSV, TSV, and Excel files
             </p>
           </div>
+
+          <div className="upload-or-divider"><span>OR</span></div>
+
+          <div className="platform-connections-section">
+            <div className="platform-connections-header">
+              <div>
+                <p className="platform-connections-title">Platform Connections</p>
+                <p className="platform-connections-subtitle">Manage data platform integrations across your estate</p>
+              </div>
+              <button type="button" className="add-platform-btn" onClick={openAddPlatformModal}>
+                <span aria-hidden="true">+</span> Add Platform
+              </button>
+            </div>
+
+            <div className="platform-cards-grid">
+              {platformConnections.map((conn) => {
+                const typeInfo = PLATFORM_TYPES.find((t) => t.id === conn.type) || PLATFORM_TYPES[0];
+                return (
+                  <div key={conn.id} className="platform-card">
+                    <div className="platform-card-top">
+                      <p className="platform-card-name">{conn.name}</p>
+                      <span className="platform-card-badge">{typeInfo.label} &bull; {typeInfo.short}</span>
+                    </div>
+                    <div className="platform-card-row">
+                      <span>Status</span>
+                      <span className={`platform-status-dot ${conn.status}`} />
+                      <span className="platform-status-label">{conn.status === 'untested' ? 'Untested' : conn.status === 'connected' ? 'Connected' : 'Failed'}</span>
+                    </div>
+                    <div className="platform-card-row"><span>Monitored</span><strong>{conn.monitored}</strong></div>
+                    <div className="platform-card-row"><span>Host</span><strong className="platform-card-host" title={conn.host}>{conn.host}</strong></div>
+                    <div className="platform-card-actions">
+                      <button type="button" className="platform-action-btn" onClick={() => handleTestConnection(conn)} disabled={testingConnectionId === conn.id}>
+                        &#8635; {testingConnectionId === conn.id ? 'Testing…' : 'Test'}
+                      </button>
+                      <button type="button" className="platform-action-btn" onClick={() => openConfigurePlatformModal(conn)}>
+                        &#9881; Configure
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+
+              <button type="button" className="platform-add-card" onClick={openAddPlatformModal}>
+                <span className="platform-add-icon" aria-hidden="true">+</span>
+                <span className="platform-add-label">Add Platform</span>
+                <span className="platform-add-caption">
+                  {PLATFORM_TYPES.map((t) => t.label.toUpperCase()).join(' \u00b7 ')}
+                </span>
+              </button>
+            </div>
+          </div>
+
+          {isPlatformModalOpen && (
+            <div className="platform-modal-overlay" onClick={closePlatformModal}>
+              <div className="platform-modal" onClick={(e) => e.stopPropagation()}>
+                <button type="button" className="platform-modal-close" onClick={closePlatformModal} aria-label="Close">&times;</button>
+                <p className="platform-modal-title">{editingConnectionId ? 'Configure Platform' : 'Add New Platform'}</p>
+                <p className="platform-modal-subtitle">
+                  {editingConnectionId ? 'Update this platform connection.' : 'Connect a new data platform to monitor.'}
+                </p>
+
+                <label className="platform-field-label">Connection Name</label>
+                <input
+                  type="text" className="platform-field-input" placeholder="e.g. Prod Snowflake"
+                  value={platformForm.name}
+                  onChange={(e) => setPlatformForm((f) => ({ ...f, name: e.target.value }))}
+                />
+
+                <label className="platform-field-label">Platform Type</label>
+                <select
+                  className="platform-field-input"
+                  value={platformForm.type}
+                  onChange={(e) => setPlatformForm((f) => ({ ...f, type: e.target.value }))}
+                >
+                  {PLATFORM_TYPES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+                </select>
+
+                <label className="platform-field-label">Workspace / Host URL</label>
+                <input
+                  type="text" className="platform-field-input" placeholder="https://..."
+                  value={platformForm.host}
+                  onChange={(e) => setPlatformForm((f) => ({ ...f, host: e.target.value }))}
+                />
+
+                <label className="platform-field-label">Access Token / Credentials</label>
+                <input
+                  type="password" className="platform-field-input" placeholder="••••••••••••"
+                  value={platformForm.credential}
+                  onChange={(e) => setPlatformForm((f) => ({ ...f, credential: e.target.value }))}
+                />
+
+                <div className="platform-modal-actions">
+                  <button type="button" className="mapping-btn secondary" onClick={closePlatformModal}>Cancel</button>
+                  <button
+                    type="button"
+                    className="platform-connect-btn"
+                    disabled={!platformForm.name.trim() || !platformForm.host.trim()}
+                    onClick={handleSubmitPlatformForm}
+                  >
+                    {editingConnectionId ? 'Save Changes' : 'Connect Platform'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         /* ============ MAPPING VIEW (files uploaded) ============ */
