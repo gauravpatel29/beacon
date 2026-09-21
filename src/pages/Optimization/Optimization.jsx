@@ -7,11 +7,16 @@ import {
   generateResponseCurves,
 } from '../../services/api.js';
 import { runOptimization } from '../../services/optimization.js';
-import { ResponsiveContainer, CartesianGrid, XAxis, YAxis, Tooltip, BarChart, Bar } from 'recharts';
+import { ResponsiveContainer, CartesianGrid, XAxis, YAxis, Tooltip, BarChart, Bar, Cell } from 'recharts';
 import { ChartTooltip } from '../../components/charts/ChartTooltip.jsx';
 import { AXIS_TICK, CHART_COLORS, GRID } from '../../components/charts/chartTheme.js';
 import PageFooterNav from '../../components/PageFooterNav/PageFooterNav.jsx';
 import './Optimization.css';
+
+// Per-channel palette for the "Optimized Spend" bars in the allocation chart —
+// kept local rather than reused from CHART_COLORS since that palette is sized/
+// ordered for other charts and we need one distinct color per channel here.
+const OPT_BAR_COLORS = ['#001E96', '#1ABC9C', '#F5A623', '#8BC34A', '#9B59B6', '#E74C3C', '#16A085', '#3498DB', '#F39C12', '#2ECC71'];
 
 // Same defensive multi-key coefficient lookup as ModelOutput.jsx — the
 // stored model run may or may not have coefficients under this exact name,
@@ -163,6 +168,9 @@ function Optimization() {
   const [targetValue, setTargetValue] = useState('');
 
   // ── Per-channel constraints, fully user-editable ─────────────────────────
+  // Step Size (K): the increment the greedy hill-climbing pass allocates on
+  // each iteration, shared across all channels.
+  const [stepSize, setStepSize] = useState(1);
   const [channelBounds, setChannelBounds] = useState([]);
   useEffect(() => {
     if (!channelRows.length) return;
@@ -170,7 +178,7 @@ function Optimization() {
       if (prev.length === channelRows.length) return prev; // preserve user edits
       return channelRows.map((r) => {
         const curSpend = Number(spendByChannel[r.variable]) || r.storedSpend || 50000;
-        return { channel: r.variable, min: 0, max: Math.round(curSpend * 2) || 150000, currentSpend: curSpend };
+        return { channel: r.variable, min: 0, max: Math.round(curSpend * 2) || 150000, currentSpend: curSpend, iter: 1 };
       });
     });
   }, [channelRows, spendByChannel]);
@@ -237,7 +245,12 @@ function Optimization() {
     setOptResult(null);
     const optimizerDict = {};
     channelBounds.forEach((b) => {
-      optimizerDict[b.channel] = { min: Number(b.min) || 0, max: Number(b.max) || 500000, currentSpend: b.currentSpend };
+      optimizerDict[b.channel] = {
+        min: Number(b.min) || 0,
+        max: Number(b.max) || 500000,
+        currentSpend: b.currentSpend,
+        iter: Number(b.iter) || 1,
+      };
     });
     try {
       const data = await runOptimization({
@@ -246,6 +259,7 @@ function Optimization() {
         target: parseFloat(targetValue),
         optType: scenarioType === 'fixed_budget' ? 'Budget Goal' : 'Sales Goal',
         scenarioName: scenarioName.trim() || 'Optimization Scenario',
+        stepSize: Number(stepSize) || 1,
       });
       setOptResult(data);
     } catch (err) {
@@ -279,6 +293,63 @@ function Optimization() {
   const salesUpliftPct = currentBaselineSummary.estimatedSales > 0
     ? Number(((salesUplift / currentBaselineSummary.estimatedSales) * 100).toFixed(1))
     : 0;
+
+  // ── Comprehensive pre vs. post table — same response-curve nearest-point
+  // lookup the rest of the page already uses (see currentBaselineSummary),
+  // just pulled per-channel and including roi/mroi from the curve so the
+  // table can show both the baseline and optimized marginal return. ──────────
+  const lookupCurvePoint = (channel, spend) => {
+    const rows = apiCurves[channel] || [];
+    if (!rows.length) return null;
+    let closest = rows[0];
+    let minDiff = Infinity;
+    rows.forEach((pt) => {
+      const diff = Math.abs(pt.spend - spend);
+      if (diff < minDiff) { minDiff = diff; closest = pt; }
+    });
+    return closest;
+  };
+
+  const fullComparisonData = useMemo(() => {
+    if (!optResult || !optResult.allocation || !channelBounds.length) return [];
+    return channelBounds.map((b) => {
+      const ch = b.channel;
+      const allocEntry = optResult.allocation[ch] || optResult.allocation[`${ch}_transformed`] || {};
+
+      const baseSpend = Number(b.currentSpend) || 0;
+      const baseCurvePt = lookupCurvePoint(ch, baseSpend);
+      const baseRevenue = baseCurvePt ? Number(baseCurvePt.impactable_nation) || 0 : baseSpend * 1.8;
+      const baseRoi = baseSpend > 0 ? baseRevenue / baseSpend : 0;
+      const baseMroi = baseCurvePt?.mroi !== undefined ? Number(baseCurvePt.mroi) || 0 : 0;
+
+      const optSpend = Math.round(Number(allocEntry.spend) || 0);
+      const optRevenue = Math.round(Number(allocEntry.impactable_nation) || 0);
+      const optCurvePt = lookupCurvePoint(ch, optSpend);
+      const optRoi = allocEntry.roi !== undefined ? Number(allocEntry.roi) : (optSpend > 0 ? optRevenue / optSpend : 0);
+      const optMroi = allocEntry.mroi !== undefined ? Number(allocEntry.mroi) : (optCurvePt?.mroi !== undefined ? Number(optCurvePt.mroi) || 0 : 0);
+
+      const spendPct = baseSpend > 0 ? Math.round(((optSpend - baseSpend) / baseSpend) * 100) : 0;
+
+      return {
+        channel: ch,
+        baseSpend, baseRevenue: Math.round(baseRevenue), baseRoi, baseMroi,
+        optSpend, optRevenue, optRoi, optMroi, spendPct,
+      };
+    });
+  }, [optResult, channelBounds, apiCurves]);
+
+  const fullTotals = useMemo(() => {
+    const totalBaseSpend = fullComparisonData.reduce((s, r) => s + r.baseSpend, 0);
+    const totalBaseRevenue = fullComparisonData.reduce((s, r) => s + r.baseRevenue, 0);
+    const totalOptSpend = fullComparisonData.reduce((s, r) => s + r.optSpend, 0);
+    const totalOptRevenue = fullComparisonData.reduce((s, r) => s + r.optRevenue, 0);
+    return {
+      totalBaseSpend, totalBaseRevenue, totalOptSpend, totalOptRevenue,
+      totalBaseRoi: totalBaseSpend > 0 ? totalBaseRevenue / totalBaseSpend : 0,
+      totalOptRoi: totalOptSpend > 0 ? totalOptRevenue / totalOptSpend : 0,
+      totalSpendPct: totalBaseSpend > 0 ? Number((((totalOptSpend - totalBaseSpend) / totalBaseSpend) * 100).toFixed(1)) : 0,
+    };
+  }, [fullComparisonData]);
 
   // ── Save / load scenarios, persisted to the workflow (not localStorage) ──
   const [isSavingScenario, setIsSavingScenario] = useState(false);
@@ -332,6 +403,21 @@ function Optimization() {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `${(scenarioName || 'optimization').replace(/\s+/g, '_')}_plan.csv`;
+    a.click();
+  };
+
+  const handleExportComprehensiveCsv = () => {
+    const csvRows = [
+      'channel,base_spend,base_revenue,base_roi,base_mroi,opt_spend,opt_revenue,opt_roi,opt_mroi,spend_%',
+      ...fullComparisonData.map((r) =>
+        `${r.channel},${r.baseSpend},${r.baseRevenue},${r.baseRoi.toFixed(2)},${r.baseMroi.toFixed(2)},${r.optSpend},${r.optRevenue},${r.optRoi.toFixed(2)},${r.optMroi.toFixed(2)},${r.spendPct}%`
+      ),
+      `TOTAL PORTFOLIO,${fullTotals.totalBaseSpend},${fullTotals.totalBaseRevenue},${fullTotals.totalBaseRoi.toFixed(2)},—,${fullTotals.totalOptSpend},${fullTotals.totalOptRevenue},${fullTotals.totalOptRoi.toFixed(2)},—,${fullTotals.totalSpendPct}%`,
+    ].join('\n');
+    const blob = new Blob([csvRows], { type: 'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${(scenarioName || 'optimization').replace(/\s+/g, '_')}_optimization_table.csv`;
     a.click();
   };
 
@@ -398,29 +484,35 @@ function Optimization() {
             </div>
           </div>
 
-          {/* ---- 3. Channel Constraints & Bounds ---- */}
+          {/* ---- 3. Channel Constraints & Starting Iteration ---- */}
           <div className="opt-card">
-            <p className="opt-section-title">3. Channel Constraints &amp; Bounds</p>
+            <p className="opt-section-title">3. Optimization Configuration (Greedy Algorithm)</p>
             <p className="opt-section-desc">
-              Edit the Min ($) and Max ($) constraints freely for any channel. Setting Min to $0 allows the optimizer to cut underperforming channels completely.
+              Set the step size for the discrete greedy marginal-ROI search, then edit each channel's Min/Max spend bounds and starting iteration. Setting Min to $0 allows the optimizer to cut underperforming channels completely.
             </p>
+
+            <div className="opt-field">
+              <label>Step Size (K)</label>
+              <input type="number" min="1" step="1" value={stepSize} onChange={(e) => setStepSize(e.target.value)} placeholder="1" />
+            </div>
+
             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.8rem' }}>
               <button className="constraint-preset-btn" onClick={setAllMinToZero}>Set All Min to $0</button>
               <button className="constraint-preset-btn" onClick={() => applyConstraintPreset(0.8, 1.2)}>±20% Bounds</button>
               <button className="constraint-preset-btn" onClick={() => applyConstraintPreset(0.5, 2.0)}>±50% Bounds</button>
             </div>
 
+            <p className="opt-section-title" style={{ fontSize: '0.85rem' }}>Channel Constraints &amp; Starting Iteration</p>
             <div className="constraints-table-wrapper">
               <table className="constraints-table">
-                <thead><tr><th>Channel</th><th>Current Spend</th><th>Min ($)</th><th>Max ($)</th><th>Allowed Range</th></tr></thead>
+                <thead><tr><th>Channel</th><th>Min Spend ($)</th><th>Max Spend ($)</th><th>Starting Iteration (iter)</th></tr></thead>
                 <tbody>
                   {channelBounds.map((b, idx) => (
                     <tr key={b.channel}>
                       <td><strong>{b.channel}</strong></td>
-                      <td>${Number(b.currentSpend || 0).toLocaleString()}</td>
                       <td><input type="number" step="1000" min="0" value={b.min} onChange={(e) => updateBound(idx, 'min', e.target.value)} placeholder="0" /></td>
-                      <td><input type="number" step="1000" min="0" value={b.max} onChange={(e) => updateBound(idx, 'max', e.target.value)} placeholder="500000" /></td>
-                      <td>${Number(b.min || 0).toLocaleString()} → ${Number(b.max || 0).toLocaleString()}</td>
+                      <td><input type="number" step="1000" min="0" value={b.max} onChange={(e) => updateBound(idx, 'max', e.target.value)} placeholder="150000" /></td>
+                      <td><input type="number" step="1" min="1" value={b.iter ?? 1} onChange={(e) => updateBound(idx, 'iter', e.target.value)} placeholder="1" /></td>
                     </tr>
                   ))}
                 </tbody>
@@ -429,7 +521,7 @@ function Optimization() {
 
             {runError && <div className="opt-error">{runError}</div>}
             <button className="run-optimizer-btn" onClick={handleRunOptimizer} disabled={isRunning || !channelRows.length}>
-              {isRunning ? 'Running Optimizer Engine...' : '▶ Run Optimizer'}
+              {isRunning ? 'Running Optimizer Engine...' : '▶ Run Optimization'}
             </button>
           </div>
 
@@ -453,15 +545,13 @@ function Optimization() {
                 )}
 
                 <div className="opt-stat-row">
-                  <div className="opt-stat-card"><p className="opt-stat-value">{optResult.feasible === false ? '⚠️ Infeasible' : optResult.converged === false ? 'At Boundary' : 'Optimal'}</p><p className="opt-stat-label">Scenario Status</p></div>
-                  <div className="opt-stat-card"><p className="opt-stat-value">${totalOptimizedSpend.toLocaleString()}</p><p className="opt-stat-label">{scenarioType === 'fixed_budget' ? 'Total Allocated Budget' : 'Required Investment'}</p></div>
-                  <div className="opt-stat-card"><p className="opt-stat-value">{Math.round(totalOptimizedSales).toLocaleString()}</p><p className="opt-stat-label">Projected Sales (Units)</p></div>
-                  <div className="opt-stat-card">
-                    <p className="opt-stat-value">{salesUplift >= 0 ? `+${salesUplift.toLocaleString()}` : salesUplift.toLocaleString()}</p>
-                    <p className="opt-stat-label">Sales Lift ({salesUpliftPct >= 0 ? `+${salesUpliftPct}` : salesUpliftPct}%)</p>
-                  </div>
+                  <div className="opt-stat-card"><p className="opt-stat-value">{optResult.feasible === false ? '⚠️ Infeasible' : optResult.converged === false ? 'At Boundary' : '✅ Converged'}</p><p className="opt-stat-label">Status</p></div>
+                  <div className="opt-stat-card"><p className="opt-stat-value">{Number(targetValue || 0).toLocaleString()}</p><p className="opt-stat-label">Total Budget Allocated</p></div>
+                  <div className="opt-stat-card"><p className="opt-stat-value">${totalOptimizedSpend.toLocaleString()}</p><p className="opt-stat-label">Optimized Spend</p></div>
+                  <div className="opt-stat-card"><p className="opt-stat-value">${Math.round(totalOptimizedSales).toLocaleString()}</p><p className="opt-stat-label">Optimized Revenue / Lift</p></div>
                 </div>
 
+                <p className="opt-section-title" style={{ fontSize: '0.85rem' }}>Optimized Budget Allocation by Channel</p>
                 <div className="compare-chart-wrapper">
                   <ResponsiveContainer width="100%" height={340}>
                     <BarChart data={comparisonData} margin={{ top: 10, right: 20, bottom: 70, left: 8 }}>
@@ -471,45 +561,66 @@ function Optimization() {
                       <YAxis tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
                              tickFormatter={(v) => (Math.abs(v) >= 1000 ? `$${Math.round(v / 1000)}k` : `$${v}`)} />
                       <Tooltip content={<ChartTooltip />} cursor={{ fill: 'rgba(0,0,0,0.03)' }} />
-                      <Bar dataKey="currentSpend" name="Current Plan Spend ($)" fill="#001E96" />
-                      <Bar dataKey="optimizedSpend" name="Optimized Spend ($)" fill="#1ABC9C" />
+                      <Bar dataKey="currentSpend" name="Base Spend ($)" fill="#adb5bd" />
+                      <Bar dataKey="optimizedSpend" name="Optimized Spend ($)">
+                        {comparisonData.map((r, i) => (
+                          <Cell key={r.channel} fill={OPT_BAR_COLORS[i % OPT_BAR_COLORS.length]} />
+                        ))}
+                      </Bar>
                     </BarChart>
                   </ResponsiveContainer>
                   <div className="compare-legend">
-                    <div className="compare-legend-item"><span className="compare-legend-swatch" style={{ backgroundColor: '#001E96' }} />Current Plan Spend</div>
-                    <div className="compare-legend-item"><span className="compare-legend-swatch" style={{ backgroundColor: '#1ABC9C' }} />Optimized Spend</div>
+                    <div className="compare-legend-item"><span className="compare-legend-swatch" style={{ backgroundColor: '#adb5bd' }} />Base Spend ($)</div>
+                    <div className="compare-legend-item"><span className="compare-legend-swatch" style={{ backgroundColor: '#1ABC9C' }} />Optimized Spend ($)</div>
                   </div>
                 </div>
 
-                <p className="opt-section-title" style={{ fontSize: '0.85rem', marginTop: 'var(--spacing-md)' }}>Channel Recommendations &amp; Spend Shift</p>
+                <p className="opt-section-title" style={{ fontSize: '0.85rem', marginTop: 'var(--spacing-md)' }}>Comprehensive Pre vs. Post Optimization Performance Table</p>
+                <p className="opt-section-desc">Full channel comparison of baseline investment versus optimized allocation with marginal returns and percentage shifts.</p>
                 <div className="alloc-table-wrapper">
                   <table className="alloc-table">
-                    <thead><tr><th>Channel</th><th>Current Spend</th><th>Optimized Spend</th><th>Δ Spend</th><th>Projected Impact</th><th>ROI</th><th>Budget Share</th></tr></thead>
+                    <thead>
+                      <tr>
+                        <th>Channel</th><th>base_spend</th><th>base_revenue</th><th>base_roi</th><th>base_mroi</th>
+                        <th>opt_spend</th><th>opt_revenue</th><th>opt_roi</th><th>opt_mroi</th><th>spend_%</th>
+                      </tr>
+                    </thead>
                     <tbody>
-                      {comparisonData.map((r) => (
+                      {fullComparisonData.map((r) => (
                         <tr key={r.channel}>
                           <td><strong>{r.channel}</strong></td>
-                          <td>${r.currentSpend.toLocaleString()}</td>
-                          <td>${r.optimizedSpend.toLocaleString()}</td>
-                          <td className={r.deltaSpend >= 0 ? 'delta-positive' : 'delta-negative'}>
-                            {r.deltaSpend >= 0 ? '+' : ''}${r.deltaSpend.toLocaleString()} ({r.deltaSpend >= 0 ? '+' : ''}{r.deltaPct}%)
+                          <td>${r.baseSpend.toLocaleString()}</td>
+                          <td>${r.baseRevenue.toLocaleString()}</td>
+                          <td>{r.baseRoi.toFixed(2)}x</td>
+                          <td>{r.baseMroi.toFixed(2)}x</td>
+                          <td><strong>${r.optSpend.toLocaleString()}</strong></td>
+                          <td><strong>${r.optRevenue.toLocaleString()}</strong></td>
+                          <td>{r.optRoi.toFixed(2)}x</td>
+                          <td>{r.optMroi.toFixed(2)}x</td>
+                          <td>
+                            <span className={`spend-pct-badge ${r.spendPct < 0 ? 'negative' : 'positive'}`}>
+                              {r.spendPct >= 0 ? '+' : ''}{r.spendPct}%
+                            </span>
                           </td>
-                          <td>{r.optimizedImpact.toLocaleString()} Units</td>
-                          <td>{r.optimizedRoi.toFixed(2)}x</td>
-                          <td>{totalOptimizedSpend > 0 ? `${((r.optimizedSpend / totalOptimizedSpend) * 100).toFixed(1)}%` : '0%'}</td>
                         </tr>
                       ))}
                       <tr className="total-row">
-                        <td>Total</td>
-                        <td>${totalCurrentSpend.toLocaleString()}</td>
-                        <td>${totalOptimizedSpend.toLocaleString()}</td>
-                        <td></td>
-                        <td>{Math.round(totalOptimizedSales).toLocaleString()} Units</td>
-                        <td>{totalOptimizedSpend > 0 ? (totalOptimizedSales / totalOptimizedSpend).toFixed(2) : '0.00'}x</td>
-                        <td>100%</td>
+                        <td>TOTAL PORTFOLIO</td>
+                        <td>${fullTotals.totalBaseSpend.toLocaleString()}</td>
+                        <td>${fullTotals.totalBaseRevenue.toLocaleString()}</td>
+                        <td>{fullTotals.totalBaseRoi.toFixed(2)}x</td>
+                        <td>NA</td>
+                        <td>${fullTotals.totalOptSpend.toLocaleString()}</td>
+                        <td>${fullTotals.totalOptRevenue.toLocaleString()}</td>
+                        <td>{fullTotals.totalOptRoi.toFixed(2)}x</td>
+                        <td>NA</td>
+                        <td>{fullTotals.totalSpendPct >= 0 ? '+' : ''}{fullTotals.totalSpendPct}%</td>
                       </tr>
                     </tbody>
                   </table>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 'var(--spacing-md)' }}>
+                  {/* <button className="download-csv-btn" onClick={handleExportComprehensiveCsv}>📥 Download Optimization Table CSV</button> */}
                 </div>
 
                 {saveError && <div className="opt-error">{saveError}</div>}
