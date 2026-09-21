@@ -314,10 +314,10 @@ function Home() {
             {/* CTAs */}
             <div className="hero-cta-group">
               <button className="btn btn-primary" onClick={startNewWorkflowFlow}>
-                Get Started <span aria-hidden="true">→</span>
+                Get Started
               </button>
-              <button className="btn btn-secondary" onClick={openWorkflowDialog}>Continue Workflow</button>
-              <a href="https://takedammx.vercel.app/" target="_blank"><button className="btn btn-tertiary" >Interact With Workflow</button></a>
+              <button className="btn btn-primary" onClick={openWorkflowDialog}>Continue Workflow</button>
+              <a href="https://takedammx.vercel.app/" target="_blank"><button className="btn btn-primary" >Interact With Beacon</button></a>
             </div>
           </div>
 

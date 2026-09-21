@@ -42,27 +42,19 @@ const NORMALIZATION_OPTIONS = [
   { value: 'iqr', label: 'Robust / IQR Scaling' },
 ];
 
-// The full range the engine accepts. 0.0 is not "no adstock": with a Horizon
-// above zero the engine reads it as a pure shift by that many PERIODS (rows),
-// which is why it is labelled as a lag rather than as nothing. The engine
-// itself is grain-agnostic — it just shifts/decays over N rows — so "weeks"
-// was only ever a UI labelling assumption, not a real constraint. See
-// detectedGranularity below, which replaces that assumption with the actual
-// spacing between dates in the loaded data.
-const ADSTOCK_OPTIONS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
+// Both Adstock Decay and Adstock Horizon are free-typed now (see
+// decayDrafts/horizonDrafts below) rather than picked from a fixed list -
+// ADSTOCK_OPTIONS and a per-grain Horizon preset list used to live here, but
+// a channel needing a value outside those presets (or a grain the lists
+// didn't anticipate) could never reach it. The engine itself is
+// grain-agnostic — it just shifts/decays over N rows — so "weeks" was only
+// ever a UI labelling assumption, not a real constraint. See
+// detectedGranularity below, which reads the actual spacing between dates in
+// the loaded data and drives the unit label shown next to Horizon and Lag.
 
-// Singular unit name per detected grain, and how many periods make sense to
-// offer as Adstock Horizon presets at that grain (weekly data offering "8
-// weeks" is reasonable; monthly data offering "8 months" of decay usually
-// isn't, so each grain gets its own preset list rather than reusing one).
+// Singular unit name per detected grain, shown next to the Horizon and Lag
+// inputs (e.g. "2 months" for monthly data, "8 weeks" for weekly data).
 const GRANULARITY_UNIT = { daily: 'day', weekly: 'week', monthly: 'month', quarterly: 'quarter', yearly: 'year' };
-const HORIZON_OPTIONS_BY_GRAIN = {
-  daily: [1, 3, 7, 14, 30],
-  weekly: [1, 2, 4, 8],
-  monthly: [1, 2, 3, 6],
-  quarterly: [1, 2, 4],
-  yearly: [1, 2],
-};
 function pluralUnit(n, unit) { return `${n} ${unit}${n === 1 ? '' : 's'}`; }
 const SATURATION_OPTIONS = [
   { value: 'none', label: 'None (Linear)' },
@@ -162,11 +154,6 @@ function DataTransformation() {
   }, [rows, dateKeys]);
 
   const granularityUnitLabel = GRANULARITY_UNIT[detectedGranularity] || 'week'; // weekly fallback if detection is inconclusive
-  const horizonOptions = useMemo(
-    () => (HORIZON_OPTIONS_BY_GRAIN[detectedGranularity] || HORIZON_OPTIONS_BY_GRAIN.weekly)
-      .map((v) => ({ value: v, label: pluralUnit(v, granularityUnitLabel) })),
-    [detectedGranularity, granularityUnitLabel]
-  );
   const [geoKeys, setGeoKeys] = useState([]);
   const [dependentVars, setDependentVars] = useState([]);
   const [zipKeys, setZipKeys] = useState([]);
@@ -196,6 +183,14 @@ function DataTransformation() {
   // separate from the committed value, and only gets parsed/committed back
   // into configs on blur.
   const [lagDrafts, setLagDrafts] = useState({}); // { [varName]: string }
+  // Same free-typing pattern as lag, for Adstock Decay and Adstock Horizon -
+  // both used to be fixed dropdowns (ADSTOCK_OPTIONS / a horizon preset list
+  // per grain); channels that need a value outside those presets, or a grain
+  // the preset lists didn't anticipate, could never reach it. Horizon is
+  // still shown in whatever unit detectedGranularity found in the data
+  // (same as Lag), it just isn't limited to that grain's preset numbers now.
+  const [decayDrafts, setDecayDrafts] = useState({}); // { [varName]: string }
+  const [horizonDrafts, setHorizonDrafts] = useState({}); // { [varName]: string }
 
   const [transformSetName, setTransformSetName] = useState('');
   const [isApplying, setIsApplying] = useState(false);
@@ -1353,18 +1348,47 @@ function DataTransformation() {
                                 </select>
                               </td>
                               <td>
-                                <select value={cfg.decay} onChange={(e) => updateConfig(name, { decay: Number(e.target.value) })}>
-                                  {ADSTOCK_OPTIONS.map((v) => (
-                                    <option key={v} value={v}>
-                                      {v === 0 ? '0.0 (pure lag)' : v.toFixed(1)}
-                                    </option>
-                                  ))}
-                                </select>
+                                <div className="lag-input-cell">
+                                  <input
+                                    type="number" min="0" max="0.99" step="0.01"
+                                    value={decayDrafts[name] !== undefined ? decayDrafts[name] : String(cfg.decay ?? 0)}
+                                    onChange={(e) => {
+                                      const normalized = e.target.value.replace(/^0+(?=\d)/, '');
+                                      setDecayDrafts((d) => ({ ...d, [name]: normalized }));
+                                    }}
+                                    onBlur={(e) => {
+                                      const parsed = Math.min(0.99, Math.max(0, Number(e.target.value) || 0));
+                                      updateConfig(name, { decay: parsed });
+                                      setDecayDrafts((d) => {
+                                        const next = { ...d };
+                                        delete next[name];
+                                        return next;
+                                      });
+                                    }}
+                                  />
+                                </div>
                               </td>
                               <td>
-                                <select value={cfg.horizon} onChange={(e) => updateConfig(name, { horizon: Number(e.target.value) })}>
-                                  {horizonOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                                </select>
+                                <div className="lag-input-cell">
+                                  <input
+                                    type="number" min="1" step="1"
+                                    value={horizonDrafts[name] !== undefined ? horizonDrafts[name] : String(cfg.horizon ?? 1)}
+                                    onChange={(e) => {
+                                      const normalized = e.target.value.replace(/^0+(?=\d)/, '');
+                                      setHorizonDrafts((d) => ({ ...d, [name]: normalized }));
+                                    }}
+                                    onBlur={(e) => {
+                                      const parsed = Math.max(1, Number(e.target.value) || 1);
+                                      updateConfig(name, { horizon: parsed });
+                                      setHorizonDrafts((d) => {
+                                        const next = { ...d };
+                                        delete next[name];
+                                        return next;
+                                      });
+                                    }}
+                                  />
+                                  <span className="lag-input-unit">{granularityUnitLabel}(s)</span>
+                                </div>
                               </td>
                               {/* The pure shift, separate from the horizon and
                                   sent as its own `Lag` key, exactly as the
@@ -1486,10 +1510,17 @@ function DataTransformation() {
                 <>
                   
                   <div className="transform-card">
-                    <p className="transform-section-title">Transformed Dataset Preview</p>
-                    <p className="transform-section-desc">
-                      Showing first 10 rows of {transformResult.rows.length.toLocaleString()} total rows ({[...columns, ...transformResult.transformedCols.map((c) => c.transformed)].length} columns)
-                    </p>
+                    <div className="transform-card-titlebar">
+                      <div>
+                        <p className="transform-section-title">Transformed Dataset Preview</p>
+                        <p className="transform-section-desc">
+                          Showing first 10 rows of {transformResult.rows.length.toLocaleString()} total rows ({[...columns, ...transformResult.transformedCols.map((c) => c.transformed)].length} columns)
+                        </p>
+                      </div>
+                      <button type="button" className="download-csv-btn save-apply-btn " onClick={downloadTransformed}>
+                      Download CSV
+                      </button>
+                    </div>
                     <div className="transformed-preview-scroll">
                       <table className="transformed-preview-table">
                         <thead>
