@@ -840,7 +840,7 @@ function ModelConfiguration() {
                     ) : (
                       <div style={{ marginTop: 'var(--spacing-sm)' }}>
                         <div className="cv-slider-head">
-                          <span>CV folds: <strong>{cvSplits}</strong></span>
+                          {/* <span>CV folds: <strong>{cvSplits}</strong></span> */}
                           {/* The grid the server searches, so the alpha that
                               comes back is a value from a known set rather
                               than a number out of nowhere. */}
