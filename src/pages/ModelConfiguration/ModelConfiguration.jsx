@@ -844,13 +844,13 @@ function ModelConfiguration() {
                           {/* The grid the server searches, so the alpha that
                               comes back is a value from a known set rather
                               than a number out of nowhere. */}
-                          <span className="alpha-grid">Grid: {ALPHA_GRID}</span>
+                          {/* <span className="alpha-grid">Grid: {ALPHA_GRID}</span> */}
                         </div>
-                        <input
+                        {/* <input
                           type="range" min="2" max="10" value={cvSplits}
                           onChange={(e) => setCvSplits(Number(e.target.value))}
                           className="cv-slider"
-                        />
+                        /> */}
                       </div>
                     )}
                   </div>
