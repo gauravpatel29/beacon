@@ -938,7 +938,7 @@ function DataTransformation() {
             <>
               {/* ---- Step 1 (new): Outlier Diagnostics & Pre-Treatment ---- */}
               <div className="transform-card">
-                <p className="transform-section-title">Step 1: Outlier Diagnostics &amp; Pre-Treatment</p>
+                <p className="transform-section-title">Outlier Diagnostics &amp; Pre-Treatment</p>
                 <p className="transform-section-desc">
                   Inspect extreme values and outliers before applying feature engineering transforms.
                   Outlier exclusion updates the working dataset immediately.
@@ -1067,7 +1067,7 @@ function DataTransformation() {
               {/* ---- Step 2: Column categorization ---- */}
               <div className="transform-card">
                 <p className="transform-section-title">
-                  Step 2: Column Categorization (from Ingestion)
+                  Column Categorization (from Ingestion)
                 </p>
                 <p className="transform-section-desc">
                   Variables are categorized according to their Ingestion roles. You can adjust
@@ -1170,7 +1170,7 @@ function DataTransformation() {
                   decision. */}
               {selectedList.length > 0 && (
                 <div className="transform-card">
-                  <p className="transform-section-title">Step 3: Transformation Configuration Table</p>
+                  <p className="transform-section-title">Transformation Configuration Table</p>
                   <p className="transform-section-desc">
                     Configure Normalization, Adstock Decay, Adstock Horizon (decay span), Lag (pure
                     shift) and Saturation curves per channel. Use the i on any row for benchmarks.
@@ -1413,8 +1413,34 @@ function DataTransformation() {
               {/* ---- Validation sections (post apply) ---- */}
               {transformResult && (
                 <>
+                  
                   <div className="transform-card">
-                    <p className="transform-section-title">Step 4: Pre vs. Post Transformation Correlation Comparison</p>
+                    <p className="transform-section-title">Transformed Dataset Preview</p>
+                    <p className="transform-section-desc">
+                      Showing first 10 rows of {transformResult.rows.length.toLocaleString()} total rows ({[...columns, ...transformResult.transformedCols.map((c) => c.transformed)].length} columns)
+                    </p>
+                    <div className="transformed-preview-scroll">
+                      <table className="transformed-preview-table">
+                        <thead>
+                          <tr>
+                            {columns.map((c) => <th key={c}>{c}</th>)}
+                            {transformResult.transformedCols.map((c) => <th key={c.transformed}>{c.transformed}</th>)}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {transformResult.rows.slice(0, 10).map((r, i) => (
+                            <tr key={i}>
+                              {columns.map((c) => <td key={c}>{typeof r[c] === 'number' ? r[c].toLocaleString(undefined, { maximumFractionDigits: 4 }) : r[c]}</td>)}
+                              {transformResult.transformedCols.map((c) => <td key={c.transformed}>{Number(r[c.transformed]).toFixed(4)}</td>)}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div className="transform-card">
+                    <p className="transform-section-title">Pre vs. Post Transformation Correlation Comparison</p>
                     <p className="transform-section-desc">
                       Compare correlation structure before and after feature engineering to ensure adstock smoothing and non-linear saturation transforms have not introduced collinearity.
                     </p>
@@ -1426,7 +1452,7 @@ function DataTransformation() {
 
                     <div className="corr-compare-row">
                       <div className="corr-compare-col">
-                        <p className="corr-compare-title">1. Pre-Transformation Matrix (Raw Features)</p>
+                        <p className="corr-compare-title">Pre-Transformation Matrix (Raw Features)</p>
                         {isScoringPreCorr && (
                           <p className="transform-section-desc" role="status">Scoring correlation…</p>
                         )}
@@ -1451,7 +1477,7 @@ function DataTransformation() {
                       </div>
 
                       <div className="corr-compare-col">
-                        <p className="corr-compare-title after-title">2. Post-Transformation Matrix (Transformed Features)</p>
+                        <p className="corr-compare-title">Post-Transformation Matrix (Transformed Features)</p>
                         {isScoringCorr && (
                           <p className="transform-section-desc" role="status">Scoring correlation…</p>
                         )}
@@ -1488,30 +1514,6 @@ function DataTransformation() {
                     )}
                   </div>
 
-                  <div className="transform-card">
-                    <p className="transform-section-title">2. Transformed Dataset Preview</p>
-                    <p className="transform-section-desc">
-                      Showing first 10 rows of {transformResult.rows.length.toLocaleString()} total rows ({[...columns, ...transformResult.transformedCols.map((c) => c.transformed)].length} columns)
-                    </p>
-                    <div className="transformed-preview-scroll">
-                      <table className="transformed-preview-table">
-                        <thead>
-                          <tr>
-                            {columns.map((c) => <th key={c}>{c}</th>)}
-                            {transformResult.transformedCols.map((c) => <th key={c.transformed}>{c.transformed}</th>)}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {transformResult.rows.slice(0, 10).map((r, i) => (
-                            <tr key={i}>
-                              {columns.map((c) => <td key={c}>{typeof r[c] === 'number' ? r[c].toLocaleString(undefined, { maximumFractionDigits: 4 }) : r[c]}</td>)}
-                              {transformResult.transformedCols.map((c) => <td key={c.transformed}>{Number(r[c.transformed]).toFixed(4)}</td>)}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
 
                   <div className="section-connector">
                    
@@ -1520,7 +1522,7 @@ function DataTransformation() {
                   <div className="transform-card">
                     <div className="transform-card-titlebar">
                       <div>
-                        <p className="transform-section-title">3. Preview &amp; Validation</p>
+                        <p className="transform-section-title">Preview &amp; Validation</p>
                         <p className="transform-section-desc">
                           Review the empirical impact of transformations, validate distribution compression, and inspect response shape against KPI before saving.
                         </p>
@@ -1619,7 +1621,7 @@ function DataTransformation() {
                           </div>
                         </div>
 
-                        <p className="transform-card-heading">Relationship with KPI (Poor Man's Curve): Before vs. After Transformation</p>
+                        {/* <p className="transform-card-heading">Relationship with KPI (Poor Man's Curve): Before vs. After Transformation</p>
                         <div className="curve-compare-row">
                           <div className="dist-chart-box">
                             <p className="dist-chart-title">Before: {activeInspectVar} vs {dependentVars[0]}</p>
@@ -1629,7 +1631,7 @@ function DataTransformation() {
                             <p className="dist-chart-title after-title">After: {activeInspectVar} (Transformed) vs {dependentVars[0]}</p>
                             <MiniLineChart points={inspectDetail.curveAfter} color="#1d4ed8" xLabel={`${activeInspectVar} (transformed)`} yLabel={`Average ${dependentVars[0] || 'KPI'}`} />
                           </div>
-                        </div>
+                        </div> */}
                       </>
                     )}
                   </div>
