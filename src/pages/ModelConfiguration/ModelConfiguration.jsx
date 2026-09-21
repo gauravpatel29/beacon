@@ -571,7 +571,7 @@ function ModelConfiguration() {
         <>
           {/* ---- Step 1: dataset ---- */}
           <div className="mc-card">
-            <p className="mc-section-title">Step 1 - Select Dataset (ARD / Transformed Table)</p>
+            <p className="mc-section-title">Select Dataset (ARD / Transformed Table)</p>
             {allArds.length === 0 ? (
               <div className="mc-source-note">
                 No ARDs found. Build one on the Data Stitching page, then save a
@@ -597,7 +597,7 @@ function ModelConfiguration() {
                 {/* Real detection, not a guess: activeArdMeta.grain is the same
                     field Data Stitching set when the ARD was built, based on
                     whether an NPI or a DMA key was actually present in it. */}
-                <div className="grain-detection-banner">
+                {/* <div className="grain-detection-banner">
                   <span className="grain-detection-text">
                     Column Key Detection:{' '}
                     {detectedGrain === 'hcp' && <strong>NPI Doctor Key detected. Recommended for HCP-level modeling.</strong>}
@@ -612,7 +612,7 @@ function ModelConfiguration() {
                       DMA Grain {detectedGrain === 'dma' ? '\u2713' : '\u2717'}
                     </span>
                   </span>
-                </div>
+                </div> */}
 
                 {/* What the model will actually be built on, read off the
                     frame rather than assumed. */}
@@ -659,7 +659,7 @@ function ModelConfiguration() {
           </div>
 
           {/* ---- Step 2: model level ---- */}
-          <div className="mc-card">
+          {/* <div className="mc-card">
             <p className="mc-section-title">Step 2 - Model Level</p>
             <p className="mc-hint" style={{ marginTop: 0, marginBottom: 'var(--spacing-sm)' }}>
               Choose the aggregation level for this regression model based on detected dataset capabilities.
@@ -695,14 +695,14 @@ function ModelConfiguration() {
             </div>
           </div>
 
-          {prepareError && <div className="mc-error-banner">{prepareError}</div>}
+          {prepareError && <div className="mc-error-banner">{prepareError}</div>} */}
 
           {/* Everything downstream needs a frame. Dimmed rather than hidden, so
               the shape of the screen does not change while it loads. */}
           <div className={transformedColumns.length ? '' : 'mc-disabled'}>
             {/* ---- Step 3: model setup ---- */}
             <div className="mc-card">
-              <p className="mc-section-title">Step 3 - Model Setup</p>
+              <p className="mc-section-title">Model Setup</p>
               <div className="mc-field-row three">
                 <div className="mc-field required">
                   <label>Model Name</label>
@@ -815,12 +815,12 @@ function ModelConfiguration() {
                   <div className="mc-field">
                     <label>Alpha Selection Strategy</label>
                     <div className="model-type-row">
-                      <button
+                      {/* <button
                         className={`model-type-btn${alphaMode === 'auto' ? ' selected' : ''}`}
                         onClick={() => setAlphaMode('auto')}
                       >
                         Auto (time-series CV)
-                      </button>
+                      </button> */}
                       <button
                         className={`model-type-btn${alphaMode === 'manual' ? ' selected' : ''}`}
                         onClick={() => setAlphaMode('manual')}
@@ -899,7 +899,7 @@ function ModelConfiguration() {
 
             {/* ---- Step 4: variables ---- */}
             <div className="mc-card">
-              <p className="mc-section-title">Step 4 - Variable Selection (From Transformed Set)</p>
+              <p className="mc-section-title">Variable Selection (From Transformed Set)</p>
               {channelsError && <div className="mc-error-banner">{channelsError}</div>}
 
               {/* Date and geography are not chosen here: they come from the
@@ -988,7 +988,7 @@ function ModelConfiguration() {
               <>
                 <div className="mc-card">
                   <p className="mc-section-title">
-                    Stage 1 Results{modelName.trim() ? `: ${modelName.trim()}` : ''}
+                    Results{modelName.trim() ? `: ${modelName.trim()}` : ''}
                   </p>
                   <p className="mc-hint" style={{ marginTop: 0, marginBottom: 'var(--spacing-sm)' }}>
                     {modelLabel()} · {selectedChannels.length} channels · {startDate} to {endDate}
@@ -1008,7 +1008,7 @@ function ModelConfiguration() {
                     </div>
                     {/* Ridge returns the alpha it settled on; OLS has none, so
                         that slot shows the window instead. */}
-                    {stage1.alpha != null ? (
+                    {/* {stage1.alpha != null ? (
                       <div className="result-stat-card">
                         <p className="result-stat-value">{String(stage1.alpha)}</p>
                         <p className="result-stat-label">Best Alpha</p>
@@ -1020,7 +1020,7 @@ function ModelConfiguration() {
                         </p>
                         <p className="result-stat-label">Modelling Period</p>
                       </div>
-                    )}
+                    )} */}
                   </div>
 
                   <p className="mc-card-heading" style={{ marginTop: 'var(--spacing-md)' }}>
