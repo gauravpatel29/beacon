@@ -265,7 +265,8 @@ export default function DataIngestion() {
           const g = spec.granularity || null;
           next[item.filename] = {
             ...emptyDraft(),
-            category: spec.config_metadata?.category || guessCategory(item.filename),
+            // REQUIRE USER TO MAP: Never auto-map categories for newly uploaded files
+            category: spec.config_metadata?.category || "",
             columnRoles: colRoles,
             columnPromoTiers: colPromoTiers,
             keep,

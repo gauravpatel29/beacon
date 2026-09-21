@@ -39,17 +39,42 @@ def _csv_response(df: pd.DataFrame) -> dict:
     }
 
 
+# In python/routers/correlation.py
+
 @router.post("/matrix")
 async def correlation_matrix(payload: dict):
     try:
         df = _parse_csv_to_df(payload["csv_data"])
+        
+        # Calculate in-memory derived variables if provided in the payload
+        derived_variables = payload.get("derived_variables", [])
+        if derived_variables:
+            for d in derived_variables:
+                out_name = d.get("name")
+                op = d.get("operator", "+")
+                vars_list = [v for v in d.get("variables", []) if v in df.columns]
+                if out_name and len(vars_list) >= 2:
+                    weights = d.get("weights", {})
+                    res_s = pd.to_numeric(df[vars_list[0]], errors="coerce").fillna(0.0) * float(weights.get(vars_list[0], 1.0))
+                    for next_v in vars_list[1:]:
+                        w = float(weights.get(next_v, 1.0))
+                        s_next = pd.to_numeric(df[next_v], errors="coerce").fillna(0.0) * w
+                        if op == "+":
+                            res_s = res_s + s_next
+                        elif op == "-":
+                            res_s = res_s - s_next
+                        elif op == "*":
+                            res_s = res_s * s_next
+                        elif op == "/":
+                            res_s = (res_s / (s_next.replace(0, pd.NA))).fillna(0.0)
+                    df[out_name] = res_s
+
         cols = payload.get("columns") or df.select_dtypes(include="number").columns.tolist()
         cols = [c for c in list(dict.fromkeys(cols)) if c in df.columns]
         matrix = compute_correlation_matrix(df, cols, method=payload.get("method", "pearson"))
         return {"matrix": matrix, "columns": cols}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-
 
 @router.post("/vif")
 async def compute_vif(payload: dict):

@@ -141,6 +141,8 @@ def parse_date_series_polars(df: pl.DataFrame, date_column: str) -> pl.DataFrame
     )
 
 
+# In python/core/processing.py
+
 def detect_date_granularity(df: pl.DataFrame, date_column: str) -> Optional[str]:
     if date_column not in df.columns:
         return None
@@ -177,10 +179,14 @@ def detect_date_granularity(df: pl.DataFrame, date_column: str) -> Optional[str]
     if len(monthly_gaps) / len(gaps) >= 0.4 or (25 <= min_gap <= 35):
         return "Monthly"
 
+    quarterly_gaps = [g for g in gaps if 80 <= g <= 105]
+    if len(quarterly_gaps) / len(gaps) >= 0.4 or (80 <= min_gap <= 105):
+        return "Quarterly"
+
     if min_gap >= 350:
         return "Yearly"
 
-    return "Weekly" if min_gap <= 14 else ("Monthly" if min_gap <= 60 else "Yearly")
+    return "Weekly" if min_gap <= 14 else ("Monthly" if min_gap <= 60 else ("Quarterly" if min_gap <= 120 else "Yearly"))
 
 
 def detect_date_columns_by_sampling(
@@ -1329,6 +1335,7 @@ def apply_full_transformations_pipeline(
 ) -> pd.DataFrame:
     df_out = df.copy()
 
+    # Derived variables computation
     if derived_variables:
         for d in derived_variables:
             out_name = d.get("name")
@@ -1359,17 +1366,21 @@ def apply_full_transformations_pipeline(
 
             df_out[out_name] = res_series
 
+    # Apply transformations per channel with per-channel population weight resolution
     for t in transformations:
         channel = t.get("Channel Name")
         if not channel or channel not in df_out.columns:
             continue
+
+        # Resolve channel-specific population column or fallback to global pop_column
+        ch_pop = t.get("pop_column") or t.get("Population Column") or pop_column
 
         transformed_s = transform_single_channel(
             df=df_out,
             channel=channel,
             geo_column=geo_column,
             normalization=t.get("Normalization", "none"),
-            pop_column=pop_column,
+            pop_column=ch_pop,
             adstock_coeff=float(t["Adstock"]) if pd.notna(t.get("Adstock")) else 0.0,
             lags=int(t["Lags"]) if pd.notna(t.get("Lags")) else 0,
             sat_function=t.get("Saturation Function"),
@@ -1386,7 +1397,6 @@ def apply_full_transformations_pipeline(
             df_out["Carryover"] = df_out[dependent_variable].shift(1, fill_value=0.0)
 
     return df_out
-
 
 def transform_edited_df(df: pd.DataFrame, edited_df: pd.DataFrame, geo_column: str, dependent_variable: str) -> pd.DataFrame:
     transformed_df = df.copy()

@@ -1,196 +1,216 @@
 from fastapi import APIRouter, HTTPException
 import numpy as np
-import pandas as pd
 from typing import Dict, Any, List, Optional
 
 router = APIRouter()
 
 
-def evaluate_curve_at_spend(channel: str, spend: float, merged_rc: dict) -> float:
-    """
-    Interpolates or evaluates the response curve saturation value for a given spend.
-    """
-    spend_key = f"{channel}_spend"
-    impact_key = f"{channel}_impactable_nation"
-
-    if spend_key not in merged_rc or impact_key not in merged_rc:
-        return 0.0
-
-    sp_arr = np.array(merged_rc[spend_key], dtype=float)
-    imp_arr = np.array(merged_rc[impact_key], dtype=float)
-
-    if len(sp_arr) == 0:
-        return 0.0
-
-    if spend <= sp_arr[0]:
-        return float(imp_arr[0] * (spend / sp_arr[0])) if sp_arr[0] > 0 else 0.0
-
-    if spend >= sp_arr[-1]:
-        # Logarithmic saturation continuation beyond curve max
-        last_sp = sp_arr[-1]
-        last_imp = imp_arr[-1]
-        if last_sp > 0 and spend > last_sp:
-            return float(last_imp * (1.0 + 0.15 * np.log(1.0 + (spend - last_sp) / last_sp)))
-        return float(last_imp)
-
-    # Linear interpolation between nearest curve points
-    return float(np.interp(spend, sp_arr, imp_arr))
-
-
 @router.post("/run")
 async def run_optimization(payload: dict):
-    """
-    Non-Linear Budget & Scenario Optimization Engine.
-    - Fixed Budget: Maximizes total sales lift subject to sum(spend) <= budget target and custom channel min/max bounds.
-    - Fixed Goal: Minimizes required investment subject to sum(sales) >= target outcome and custom channel min/max bounds.
-    - Full Support for completely user-defined Min ($) and Max ($) constraints.
-    """
     try:
         merged_rc = payload.get("merged_rc", {})
-        optimizer_dict = {ch: dict(info) for ch, info in payload.get("optimizer_dict", {}).items()}
+        optimizer_dict = payload.get("optimizer_dict", {})
         target = float(payload.get("target", 0.0))
-        opt_type = payload.get("opt_type", "Budget Goal")
-        is_fixed_budget = opt_type in ("Budget Goal", "Fixed Budget")
+        opt_type = str(payload.get("opt_type", "Budget Goal")).strip()
+        k_step = max(1, int(payload.get("k", 1)))
+        is_budget_goal = opt_type in ("Budget Goal", "Fixed Budget")
 
+        if not merged_rc:
+            raise HTTPException(status_code=400, detail="No response curves provided in merged_rc.")
         if not optimizer_dict:
-            raise HTTPException(status_code=400, detail="No channel constraints or response curves provided.")
+            raise HTTPException(status_code=400, detail="No channel constraints or optimizer dictionary provided.")
 
         channels = list(optimizer_dict.keys())
+        parsed_curves = {}
 
-        # 1. Read User's Exact Min and Max Constraints
-        current_spends = {}
-        min_constraints = {}
-        max_constraints = {}
-
+        # 1. Parse and validate response curves per channel
         for ch in channels:
-            info = optimizer_dict[ch]
-            min_constraints[ch] = max(0.0, float(info.get("min", 0.0)))
-            max_constraints[ch] = max(min_constraints[ch], float(info.get("max", 500000.0)))
-            current_spends[ch] = min_constraints[ch] # Start at user's Min Constraint
+            spend_key = f"{ch}_spend"
+            impact_key = f"{ch}_impactable_nation"
 
-        min_possible_budget = sum(min_constraints.values())
-        max_possible_budget = sum(max_constraints.values())
+            # Fallback if un-suffixed key used
+            if spend_key not in merged_rc and ch in merged_rc:
+                # Array of records shape
+                records = merged_rc[ch]
+                sp_arr = [r.get("spend", 0.0) for r in records]
+                imp_arr = [r.get("impactable_nation", 0.0) for r in records]
+            elif spend_key in merged_rc and impact_key in merged_rc:
+                sp_arr = merged_rc[spend_key]
+                imp_arr = merged_rc[impact_key]
+            else:
+                # Find matching channel prefix in merged_rc
+                sp_key_match = next((k for k in merged_rc if k.startswith(ch) and k.endswith("_spend")), None)
+                imp_key_match = next((k for k in merged_rc if k.startswith(ch) and k.endswith("_impactable_nation")), None)
+                if sp_key_match and imp_key_match:
+                    sp_arr = merged_rc[sp_key_match]
+                    imp_arr = merged_rc[imp_key_match]
+                else:
+                    continue
 
-        # Compute max possible sales outcome at all max constraints
-        max_possible_sales = sum(evaluate_curve_at_spend(ch, max_constraints[ch], merged_rc) for ch in channels)
+            parsed_curves[ch] = {
+                "spend": np.array(sp_arr, dtype=float),
+                "impactable": np.array(imp_arr, dtype=float),
+            }
 
-        # 2. Feasibility Validation
-        feasible = True
-        feasibility_message = ""
+        if not parsed_curves:
+            raise HTTPException(status_code=400, detail="Could not resolve response curves for specified channels.")
 
-        if not is_fixed_budget: # Fixed Goal mode
-            if target > max_possible_sales:
-                feasible = False
-                feasibility_message = f"Target goal of {target:,.0f} units exceeds maximum possible outcome of {max_possible_sales:,.0f} units achievable with current Max Spend constraints."
+        # 2. Initialize Starting Indices based on bounds and starting iteration (iter)
+        current_idx = {}
+        max_idx = {}
+        active_channels = list(parsed_curves.keys())
 
-        # 3. Dynamic Optimization Step Loop
-        # Step increment per allocation
-        total_budget_span = target if is_fixed_budget else (min_possible_budget * 2.0 or 200000.0)
-        step_size = max(500.0, total_budget_span / 200.0)
+        for ch in active_channels:
+            curve = parsed_curves[ch]
+            sp_arr = curve["spend"]
+            n_points = len(sp_arr)
+            cfg = optimizer_dict.get(ch, {})
 
-        max_iterations = 20000
+            min_spend = float(cfg.get("min", 0.0))
+            max_spend = float(cfg.get("max", 1e9))
+            start_iter = max(1, int(cfg.get("iter", 1))) - 1
+
+            # Find starting index satisfying min_spend and starting iteration
+            idx_start = max(0, min(start_iter, n_points - 1))
+            while idx_start < n_points - 1 and sp_arr[idx_start] < min_spend:
+                idx_start += 1
+
+            # Find max allowable index satisfying max_spend
+            idx_max = n_points - 1
+            while idx_max > 0 and sp_arr[idx_max] > max_spend:
+                idx_max -= 1
+
+            current_idx[ch] = idx_start
+            max_idx[ch] = max(idx_start, idx_max)
+
+        # 3. Discrete Greedy Marginal-ROI Hill-Climbing Algorithm
+        max_iterations = 25000
         iteration = 0
         history = []
 
-        if is_fixed_budget:
-            # ─── CASE 1: FIXED BUDGET (Maximize Sales s.t. Spend == Budget) ───
-            allocated_spend = sum(current_spends.values())
+        def get_total_spend():
+            return sum(parsed_curves[c]["spend"][current_idx[c]] for c in active_channels)
 
-            while allocated_spend < target and iteration < max_iterations:
-                iteration += 1
-                best_channel = None
-                best_marginal_gain = -1.0
-                actual_step = min(step_size, target - allocated_spend)
+        def get_total_sales():
+            return sum(parsed_curves[c]["impactable"][current_idx[c]] for c in active_channels)
 
-                for ch in channels:
-                    cur_s = current_spends[ch]
-                    if cur_s + actual_step > max_constraints[ch]:
-                        continue # Cannot exceed user's Max constraint
+        cur_spend = get_total_spend()
+        cur_sales = get_total_sales()
+        history.append({
+            "step": 0,
+            "value": round(cur_spend if is_budget_goal else cur_sales, 2),
+            "spend": round(cur_spend, 2),
+            "sales": round(cur_sales, 2),
+        })
 
-                    cur_impact = evaluate_curve_at_spend(ch, cur_s, merged_rc)
-                    next_impact = evaluate_curve_at_spend(ch, cur_s + actual_step, merged_rc)
-                    marginal_gain = (next_impact - cur_impact) / actual_step
+        converged = False
 
-                    if marginal_gain > best_marginal_gain:
-                        best_marginal_gain = marginal_gain
-                        best_channel = ch
+        while iteration < max_iterations:
+            iteration += 1
 
-                # If no channel can take more budget or marginal return is zero
-                if best_channel is None or best_marginal_gain <= 0:
+            # Check stopping conditions
+            if is_budget_goal:
+                if cur_spend >= target:
+                    converged = True
+                    break
+            else:
+                if cur_sales >= target:
+                    converged = True
                     break
 
-                current_spends[best_channel] += actual_step
-                allocated_spend = sum(current_spends.values())
+            best_channel = None
+            best_marginal_roi = -1e9
 
-                if iteration % 20 == 0:
-                    tot_sales = sum(evaluate_curve_at_spend(c, current_spends[c], merged_rc) for c in channels)
-                    history.append({"step": iteration, "spend": allocated_spend, "sales": tot_sales})
+            # Evaluate each channel by looking ahead k index steps
+            for ch in active_channels:
+                idx_now = current_idx[ch]
+                idx_limit = max_idx[ch]
+                if idx_now >= idx_limit:
+                    continue
 
+                idx_next = min(idx_limit, idx_now + k_step)
+                if idx_next == idx_now:
+                    continue
+
+                sp_now = parsed_curves[ch]["spend"][idx_now]
+                sp_next = parsed_curves[ch]["spend"][idx_next]
+                imp_now = parsed_curves[ch]["impactable"][idx_now]
+                imp_next = parsed_curves[ch]["impactable"][idx_next]
+
+                delta_spend = sp_next - sp_now
+                delta_sales = imp_next - imp_now
+
+                if delta_spend > 0:
+                    marginal_roi = delta_sales / delta_spend
+                else:
+                    marginal_roi = delta_sales if delta_sales > 0 else 0.0
+
+                if marginal_roi > best_marginal_roi:
+                    best_marginal_roi = marginal_roi
+                    best_channel = ch
+
+            if best_channel is None or best_marginal_roi <= 0:
+                # No channel can take more spend or marginal return is non-positive
+                break
+
+            # Advance best channel by k steps
+            current_idx[best_channel] = min(max_idx[best_channel], current_idx[best_channel] + k_step)
+            cur_spend = get_total_spend()
+            cur_sales = get_total_sales()
+
+            if iteration % 5 == 0 or cur_spend >= target or cur_sales >= target:
+                history.append({
+                    "step": iteration,
+                    "value": round(cur_spend if is_budget_goal else cur_sales, 2),
+                    "spend": round(cur_spend, 2),
+                    "sales": round(cur_sales, 2),
+                })
+
+        # Final check if target condition satisfied
+        if is_budget_goal:
+            if cur_spend >= (target - 1.0):
+                converged = True
         else:
-            # ─── CASE 2: FIXED GOAL (Minimize Spend s.t. Sales >= Target) ─────
-            current_sales = sum(evaluate_curve_at_spend(c, current_spends[c], merged_rc) for c in channels)
+            if cur_sales >= (target - 0.5):
+                converged = True
 
-            while current_sales < target and iteration < max_iterations:
-                iteration += 1
-                best_channel = None
-                best_marginal_gain = -1.0
-
-                for ch in channels:
-                    cur_s = current_spends[ch]
-                    if cur_s + step_size > max_constraints[ch]:
-                        continue
-
-                    cur_impact = evaluate_curve_at_spend(ch, cur_s, merged_rc)
-                    next_impact = evaluate_curve_at_spend(ch, cur_s + step_size, merged_rc)
-                    marginal_gain = (next_impact - cur_impact) / step_size
-
-                    if marginal_gain > best_marginal_gain:
-                        best_marginal_gain = marginal_gain
-                        best_channel = ch
-
-                if best_channel is None or best_marginal_gain <= 0:
-                    break
-
-                current_spends[best_channel] += step_size
-                current_sales = sum(evaluate_curve_at_spend(c, current_spends[c], merged_rc) for c in channels)
-
-                if iteration % 20 == 0:
-                    tot_sp = sum(current_spends.values())
-                    history.append({"step": iteration, "spend": tot_sp, "sales": current_sales})
-
-        # 4. Compile Final Channel Allocation
+        # 4. Compile Final Channel Allocations
         final_allocation = {}
-        total_final_spend = 0.0
-        total_final_sales = 0.0
+        for ch in active_channels:
+            fin_idx = current_idx[ch]
+            fin_spend = round(float(parsed_curves[ch]["spend"][fin_idx]), 2)
+            fin_sales = round(float(parsed_curves[ch]["impactable"][fin_idx]), 2)
+            fin_roi = round(fin_sales / fin_spend, 3) if fin_spend > 0 else 0.0
 
-        for ch in channels:
-            ch_sp = round(current_spends[ch], 2)
-            ch_imp = round(evaluate_curve_at_spend(ch, ch_sp, merged_rc), 2)
-            ch_roi = round(ch_imp / ch_sp, 3) if ch_sp > 0 else 0.0
-
-            total_final_spend += ch_sp
-            total_final_sales += ch_imp
+            # Calculate point marginal ROI
+            if fin_idx > 0:
+                prev_sp = float(parsed_curves[ch]["spend"][fin_idx - 1])
+                prev_imp = float(parsed_curves[ch]["impactable"][fin_idx - 1])
+                dsp = fin_spend - prev_sp
+                fin_mroi = round((fin_sales - prev_imp) / dsp, 3) if dsp > 0 else fin_roi
+            else:
+                fin_mroi = fin_roi
 
             final_allocation[ch] = {
-                "spend": ch_sp,
-                "impactable_nation": ch_imp,
-                "roi": ch_roi,
+                "spend": fin_spend,
+                "impactable_nation": fin_sales,
+                "roi": fin_roi,
+                "mroi": fin_mroi,
             }
 
-        converged = (total_final_spend >= (target - step_size)) if is_fixed_budget else (total_final_sales >= (target - 1.0))
+        final_total_spend = round(get_total_spend(), 2)
+        final_total_sales = round(get_total_sales(), 2)
+        final_val = final_total_spend if is_budget_goal else final_total_sales
 
         return {
-            "converged": bool(converged and feasible),
-            "feasible": feasible,
-            "message": feasibility_message,
-            "final_value": round(total_final_spend if is_fixed_budget else total_final_sales, 2),
-            "total_spend": round(total_final_spend, 2),
-            "total_sales": round(total_final_sales, 2),
-            "optimized_roi": round(total_final_sales / total_final_spend, 3) if total_final_spend > 0 else 0.0,
-            "min_possible_spend": min_possible_budget,
-            "max_possible_sales": max_possible_sales,
+            "converged": bool(converged),
+            "final_value": final_val,
+            "total_spend": final_total_spend,
+            "total_sales": final_total_sales,
             "allocation": final_allocation,
-            "history": history[-30:],
+            "history": history[-40:],
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Optimization failed: {str(e)}")

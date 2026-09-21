@@ -3,6 +3,8 @@ import { v1PatchWorkflow } from "../services/api";
 
 const AppContext = createContext(null);
 
+// In client/src/context/AppContext.jsx
+
 const initialState = {
   // Workflow Entity Tracking
   workflowId: null,
@@ -18,13 +20,17 @@ const initialState = {
   stitchingSourceFiles: null,
 
   // Column Configuration & Ingestion Roles
-  columnRoles: {}, // { [columnName]: "Cross-sectional Variable" | "Dependent Variable" | "Time Variable" | "Independent Promotions" | "Baseline Variables" }
-  columnPromoTiers: {}, // { [columnName]: "Personal Promotion" | "Non Personal Promotion" | "DTC Promotion" }
+  columnRoles: {},
+  columnPromoTiers: {},
   dateColumn: null,
   geoColumn: null,
   zipColumn: null,
   dmaColumn: null,
   dependentVariable: null,
+
+  // Economic Unit Value Configuration (Default: $100 / TRx)
+  unitValue: 100,
+  unitValueLabel: "Revenue Per TRx ($)",
 
   // CSV payloads
   mergedCsvData: null,

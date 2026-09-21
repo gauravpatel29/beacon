@@ -20,27 +20,6 @@ import {
 import { useAppState } from "../context/AppContext";
 import { PageHeader, Card, Btn, Alert, Spinner, DataTable, Select } from "../components/UI";
 
-const ADSTOCK_HORIZON_OPTIONS = [
-  { value: 0, label: "0 weeks (No Adstock Decay)" },
-  { value: 1, label: "1 week" },
-  { value: 2, label: "2 weeks" },
-  { value: 3, label: "3 weeks" },
-  { value: 4, label: "4 weeks (1 month)" },
-  { value: 6, label: "6 weeks" },
-  { value: 8, label: "8 weeks (2 months)" },
-  { value: 12, label: "12 weeks (1 quarter)" },
-];
-
-const PURE_LAG_OPTIONS = [
-  { value: 0, label: "Lag 0 (Immediate Effect)" },
-  { value: 1, label: "Lag 1 (Shift 1 wk)" },
-  { value: 2, label: "Lag 2 (Shift 2 wks)" },
-  { value: 3, label: "Lag 3 (Shift 3 wks)" },
-  { value: 4, label: "Lag 4 (Shift 4 wks)" },
-  { value: 6, label: "Lag 6 (Shift 6 wks)" },
-  { value: 8, label: "Lag 8 (Shift 8 wks)" },
-];
-
 const NORMALIZATION_OPTIONS = [
   { value: "none", label: "None (Raw Volume)" },
   { value: "population", label: "Population Based (÷ Universe)" },
@@ -49,94 +28,90 @@ const NORMALIZATION_OPTIONS = [
   { value: "iqr", label: "Robust / IQR Scaling" },
 ];
 
-// Realistic Pharmaceutical & Commercial MMM Benchmark Guidance
-function getChannelGuidance(channelName) {
-  const l = channelName.toLowerCase();
+function detectGrainUnit(dates = []) {
+  if (!dates || dates.length < 2) return { grain: "Weekly", unit: "Weeks", singular: "Week" };
+  const d0 = new Date(dates[0]);
+  const d1 = new Date(dates[1]);
+  if (isNaN(d0.getTime()) || isNaN(d1.getTime())) {
+    return { grain: "Weekly", unit: "Weeks", singular: "Week" };
+  }
+  const gapDays = Math.abs((d1 - d0) / (1000 * 60 * 60 * 24));
 
-  // 1. Personal Promotion: High Decay, Multi-week memory
+  if (gapDays <= 2) return { grain: "Daily", unit: "Days", singular: "Day" };
+  if (gapDays <= 12) return { grain: "Weekly", unit: "Weeks", singular: "Week" };
+  if (gapDays <= 45) return { grain: "Monthly", unit: "Months", singular: "Month" };
+  if (gapDays <= 110) return { grain: "Quarterly", unit: "Quarters", singular: "Quarter" };
+  return { grain: "Monthly", unit: "Months", singular: "Month" };
+}
+
+function getChannelGuidance(channelName, grainUnit = "Weeks") {
+  const l = channelName.toLowerCase();
+  const unit = grainUnit.toLowerCase();
+
   if (l.includes("call") || l.includes("det") || l.includes("rep") || l.includes("f2f")) {
     return {
       tacticType: "Personal Promotion: Sales Rep In-Person Detailing",
       adstockDecay: "0.50 – 0.70 (High Relationship Memory)",
-      adstockHorizon: "3 to 6 weeks",
-      pureLag: "0 to 1 week",
+      adstockHorizon: `3 to 6 ${unit}`,
+      pureLag: `0 to 1 ${unit}`,
       saturation: "Power (p ≈ 0.50) or Log (k ≈ 1.0)",
-      rationale: "In-person clinical discussions build lasting physician prescribing habits with a 3–6 week carryover half-life. Physician responsiveness saturates after ~3–4 detailing calls per month.",
-      actionItem: "Set Adstock Decay to 0.60, Adstock Horizon to 4 weeks, Lag to 0, and Saturation to Log (k = 1.0)."
+      rationale: "In-person clinical discussions build lasting physician prescribing habits with carryover decay. Responsiveness saturates after repeated detailing calls.",
+      actionItem: `Set Adstock Decay to 0.60, Adstock Horizon to 4 ${unit}, Lag to 0, and Saturation to Log (k = 1.0).`
     };
   }
   if (l.includes("speak") || l.includes("symp") || l.includes("conf") || l.includes("event") || l.includes("dinner")) {
     return {
       tacticType: "Personal Promotion: Peer-to-Peer Speaker Programs",
       adstockDecay: "0.60 – 0.75 (Long Clinical Half-Life)",
-      adstockHorizon: "6 to 8 weeks",
-      pureLag: "1 to 2 weeks",
+      adstockHorizon: `6 to 8 ${unit}`,
+      pureLag: `1 to 2 ${unit}`,
       saturation: "Logarithmic: ln(1 + k·x) (k ≈ 1.0)",
-      rationale: "Key opinion leader (KOL) symposia alter physician treatment protocol across multiple subsequent therapy cycles.",
-      actionItem: "Set Adstock Decay to 0.70, Adstock Horizon to 6 weeks, Lag to 1 week, and Saturation to Log."
+      rationale: "Key opinion leader symposia alter treatment protocol across subsequent patient visits.",
+      actionItem: `Set Adstock Decay to 0.70, Adstock Horizon to 6 ${unit}, Lag to 1 ${unit}, and Saturation to Log.`
     };
   }
-
-  // 2. Physical Samples & Vouchers: Fast trial generation
   if (l.includes("samp") || l.includes("voucher") || l.includes("copay")) {
     return {
       tacticType: "Personal Promotion: Physical Samples & Co-Pay Cards",
       adstockDecay: "0.20 – 0.35 (Fast In-Clinic Trial)",
-      adstockHorizon: "1 to 2 weeks",
-      pureLag: "0 weeks (Immediate)",
+      adstockHorizon: `1 to 2 ${unit}`,
+      pureLag: `0 ${unit} (Immediate)`,
       saturation: "Power: x^p (p ≈ 0.60)",
-      rationale: "Samples generate immediate trial prescriptions (TRx) upon patient presentation with lower residual memory carryover than detailing.",
-      actionItem: "Set Adstock Decay to 0.25, Adstock Horizon to 1–2 weeks, Lag to 0, and Saturation to Power (p = 0.60)."
+      rationale: "Samples generate immediate trial prescriptions with lower residual carryover than detailing.",
+      actionItem: `Set Adstock Decay to 0.25, Adstock Horizon to 2 ${unit}, Lag to 0, and Saturation to Power (p = 0.60).`
     };
   }
-
-  // 3. Non-Personal Promotion (NPP): Very fast decay
   if (l.includes("rte") || l.includes("email") || l.includes("npp") || l.includes("portal") || l.includes("hcp_web")) {
     return {
       tacticType: "Non-Personal Promotion (NPP): Rep-Triggered Emails & Portals",
       adstockDecay: "0.10 – 0.25 (Fast Transient Decay)",
-      adstockHorizon: "1 to 2 weeks",
-      pureLag: "0 weeks (Immediate Action)",
+      adstockHorizon: `1 to 2 ${unit}`,
+      pureLag: `0 ${unit} (Immediate Action)`,
       saturation: "Logarithmic (k ≈ 1.5 – 2.0)",
-      rationale: "Digital emails have short half-lives; emails are opened and acted on within 48 hours. High frequency causes unsubscribe fatigue.",
-      actionItem: "Set Adstock Decay to 0.15, Adstock Horizon to 1 week, Lag to 0, and Saturation to Log (k = 1.5)."
+      rationale: "Digital communications have short half-lives. High frequency causes unsubscribe fatigue.",
+      actionItem: `Set Adstock Decay to 0.15, Adstock Horizon to 1 ${unit}, Lag to 0, and Saturation to Log (k = 1.5).`
     };
   }
-
-  // 4. DTC Mass Media / TV
   if (l.includes("tv") || l.includes("broad") || l.includes("video") || l.includes("ctv")) {
     return {
       tacticType: "DTC Media: Broadcast TV & Connected TV",
       adstockDecay: "0.65 – 0.80 (Highest Awareness Carryover)",
-      adstockHorizon: "6 to 10 weeks",
-      pureLag: "1 to 2 weeks (Doctor Appointment Delay)",
+      adstockHorizon: `6 to 10 ${unit}`,
+      pureLag: `1 to 2 ${unit} (Appointment Lag)`,
       saturation: "Logarithmic: ln(1 + k·x) (k ≈ 1.0)",
-      rationale: "Consumer TV builds long-term brand equity. Time delay exists between consumer viewing and visiting their physician for a prescription.",
-      actionItem: "Set Adstock Decay to 0.70, Adstock Horizon to 6 weeks, Lag to 1 week, and Saturation to Log."
-    };
-  }
-
-  // 5. Digital Search & Social
-  if (l.includes("dig") || l.includes("sear") || l.includes("disp") || l.includes("soci")) {
-    return {
-      tacticType: "DTC / Digital: Paid Search & Programmatic Display",
-      adstockDecay: "0.10 – 0.20 (Low Carryover)",
-      adstockHorizon: "1 week",
-      pureLag: "0 weeks",
-      saturation: "Logarithmic (k ≈ 2.0)",
-      rationale: "Search ads capture existing high-intent demand immediately with minimal residual brand carryover.",
-      actionItem: "Set Adstock Decay to 0.10, Adstock Horizon to 1 week, Lag to 0, and Saturation to Log."
+      rationale: "Consumer TV builds long-term brand equity with lag between consumer viewing and visiting physician.",
+      actionItem: `Set Adstock Decay to 0.70, Adstock Horizon to 6 ${unit}, Lag to 1 ${unit}, and Saturation to Log.`
     };
   }
 
   return {
     tacticType: "General Marketing & Promotion Channel",
     adstockDecay: "0.40 – 0.50 (Standard Benchmark)",
-    adstockHorizon: "2 to 4 weeks",
-    pureLag: "0 to 1 week",
+    adstockHorizon: `2 to 4 ${unit}`,
+    pureLag: `0 to 1 ${unit}`,
     saturation: "Logarithmic: ln(1 + k·x) or Power (p = 0.50)",
-    rationale: "Standard promotional channel balancing in-period impact with moderate multi-week memory decay.",
-    actionItem: "Set Adstock Decay to 0.50, Adstock Horizon to 2 weeks, Lag to 0, and Saturation to Log."
+    rationale: "Standard promotional channel balancing in-period impact with moderate memory decay.",
+    actionItem: `Set Adstock Decay to 0.50, Adstock Horizon to 2 ${unit}, Lag to 0, and Saturation to Log.`
   };
 }
 
@@ -256,6 +231,10 @@ export default function DataTransformation() {
   const [savedSets, setSavedSets] = useState(() => state.savedTransformationSets || []);
   const [activeSetIndex, setActiveSetIndex] = useState(0);
 
+  // Dynamic Time Grain State
+  const [detectedGrain, setDetectedGrain] = useState("Weekly");
+  const [grainUnit, setGrainUnit] = useState("Weeks");
+
   useEffect(() => {
     if (!workflowId) return;
     v2ListArds(workflowId)
@@ -292,7 +271,7 @@ export default function DataTransformation() {
       .catch(() => {});
   }, [workflowId, selectedArdId]);
 
-  // ─── Step 1: Outlier Diagnostics & Removal (Pre-Transformation) ──────
+  // Outlier Diagnostics State
   const [distCol, setDistCol] = useState("");
   const [histData, setHistData] = useState(null);
   const [customBinWidth, setCustomBinWidth] = useState("");
@@ -311,7 +290,19 @@ export default function DataTransformation() {
     }
   }, [activeCsv, selectedArdId]);
 
-  // ─── Step 2: Parse Columns & Group by 5 Ingestion Categories ───────────────
+  // Detect time grain automatically from active CSV
+  useEffect(() => {
+    if (!activeCsv) return;
+    try {
+      const lines = activeCsv.trim().split("\n").slice(1, 15);
+      const dates = lines.map((l) => l.split(",")[0]?.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
+      const res = detectGrainUnit(dates);
+      setDetectedGrain(res.grain);
+      setGrainUnit(res.unit);
+    } catch (e) {}
+  }, [activeCsv]);
+
+  // Column Categorization & State
   const [allCols, setAllCols] = useState([]);
   const [columnRolesMap, setColumnRolesMap] = useState(() => state.columnRoles || {});
 
@@ -320,8 +311,6 @@ export default function DataTransformation() {
   const [selTime, setSelTime] = useState([]);
   const [selPromotions, setSelPromotions] = useState([]);
   const [selBaseline, setSelBaseline] = useState([]);
-
-  // Simple KPI Lock Control
   const [lockDepVar, setLockDepVar] = useState(true);
 
   useEffect(() => {
@@ -341,7 +330,7 @@ export default function DataTransformation() {
             roles[c] = "Time Variable";
           } else if (l.includes("npi") || l.includes("geo") || l.includes("id") || l.includes("dma") || l.includes("zip")) {
             roles[c] = "Cross-sectional Variable";
-          } else if (l.includes("pop") || l.includes("universe") || l.includes("macro") || l.includes("base") || l.includes("trend")) {
+          } else if (l.includes("pop") || l.includes("universe") || l.includes("macro") || l.includes("base") || l.includes("trend") || l.includes("weight")) {
             roles[c] = "Baseline Variables";
           } else {
             roles[c] = "Independent Promotions";
@@ -363,7 +352,6 @@ export default function DataTransformation() {
     } catch (e) {}
   }, [activeCsv]);
 
-  // Load Outlier Diagnostics
   const loadDistAndOutliers = (binWidthOverride = null) => {
     if (!activeCsv || !distCol) return;
     setDistLoading(true);
@@ -456,7 +444,6 @@ export default function DataTransformation() {
     setter(list.includes(col) ? list.filter((x) => x !== col) : [...list, col]);
   };
 
-  // ─── Step 3: Transformable Channels Table (Respecting KPI Lock) ───────────
   const activeTransformableList = useMemo(() => {
     const list = [...selPromotions, ...selBaseline];
     if (!lockDepVar) {
@@ -479,9 +466,11 @@ export default function DataTransformation() {
 
   const [transformConfig, setTransformConfig] = useState(() => state.transformationConfig || []);
 
+  // Initialize and synchronize Transformation Table
   useEffect(() => {
     setTransformConfig((prev) => {
       const existingMap = new Map(prev.map((r) => [r["Channel Name"], r]));
+      const defaultPopCol = baseCols[0] || allCols.find((c) => /pop|weight|universe/i.test(c)) || "";
 
       const standardRows = activeTransformableList.map((v) => {
         if (existingMap.has(v)) return existingMap.get(v);
@@ -490,6 +479,7 @@ export default function DataTransformation() {
           "Channel Name": v,
           "Grain": isDep ? "KPI" : "Promo",
           "Normalization": "none",
+          "Population Column": defaultPopCol,
           "Adstock": 0.5,
           "Adstock Horizon": 2,
           "Lag": 0,
@@ -507,6 +497,7 @@ export default function DataTransformation() {
           "Channel Name": dv.name,
           "Grain": "Derived",
           "Normalization": "none",
+          "Population Column": defaultPopCol,
           "Adstock": 0.5,
           "Adstock Horizon": 2,
           "Lag": 0,
@@ -520,7 +511,7 @@ export default function DataTransformation() {
 
       return [...standardRows, ...derivedRows];
     });
-  }, [activeTransformableList, derivedVars, selDependent]);
+  }, [activeTransformableList, derivedVars, selDependent, baseCols, allCols]);
 
   const updateConfigRow = (channelName, field, value) => {
     setTransformConfig((prev) =>
@@ -566,25 +557,33 @@ export default function DataTransformation() {
     toast.success(`Removed derived channel "${channelName}"`);
   };
 
-  // ─── Step 4: Pre-Transformation Correlation Matrix ────────────────────────
+  // Pre-Transformation Correlation Matrix (Explicitly including Derived Variables)
   const [preCorrMatrix, setPreCorrMatrix] = useState(null);
   const [preCorrColumns, setPreCorrColumns] = useState([]);
 
   useEffect(() => {
-    if (!activeCsv || activeTransformableList.length < 2) return;
-    const rawColsToCorrelate = [...activeTransformableList];
+    if (!activeCsv || (activeTransformableList.length + derivedVars.length) < 2) return;
+    
+    const rawColsToCorrelate = Array.from(new Set([
+      ...activeTransformableList,
+      ...derivedVars.map((d) => d.name)
+    ]));
+    
     correlationMatrix({
       csv_data: activeCsv,
       columns: rawColsToCorrelate,
+      derived_variables: derivedVars,
     })
       .then((cRes) => {
         setPreCorrMatrix(cRes.matrix);
         setPreCorrColumns(cRes.columns);
       })
-      .catch(() => {});
-  }, [activeCsv, activeTransformableList]);
+      .catch((err) => {
+        console.error("Pre-transformation correlation error:", err);
+      });
+  }, [activeCsv, activeTransformableList, derivedVars]);
 
-  // ─── Step 5: Execution & Post-Transformation Matrix ────────────────────────
+  // Execution & Post-Transformation Matrix
   const [setNameInput, setSetNameInput] = useState("HCP FINAL ARD");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
@@ -609,6 +608,7 @@ export default function DataTransformation() {
         ...c,
         Lags: c["Adstock Horizon"] ?? 2,
         Lag: c["Lag"] ?? 0,
+        pop_column: c["Population Column"] || primaryPop || undefined,
       }));
 
       const data = await applyTransformations({
@@ -634,12 +634,12 @@ export default function DataTransformation() {
       const isDma = (activeArd?.grain || "").toLowerCase().includes("dma") ||
                     (selectedArdId || "").toLowerCase().includes("dma") ||
                     setNameInput.toLowerCase().includes("dma");
-      const detectedGrain = isDma ? "DMA" : "HCP";
+      const detectedModelGrain = isDma ? "DMA" : "HCP";
 
       const newVersion = {
         id: `trans_${Date.now()}`,
         name: setNameInput.trim() || `Transform Set v${savedSets.length + 1}`,
-        grain: detectedGrain,
+        grain: detectedModelGrain,
         createdAt: new Date().toISOString(),
         configs: [...transformConfig],
         derivedVars: [...derivedVars],
@@ -698,7 +698,7 @@ export default function DataTransformation() {
     toast.success(`Switched to "${targetSet.name}"`);
   };
 
-  // ─── Preview & Single Channel Validation ──────────────────────────────────
+  // Preview & Single Channel Validation
   const [selectedValidationVar, setSelectedValidationVar] = useState("");
   const [validationData, setValidationData] = useState(null);
   const [validationLoading, setValidationLoading] = useState(false);
@@ -717,7 +717,7 @@ export default function DataTransformation() {
     const primaryDate = selTime[0] || "";
     const primaryGeo = selCrossSectional[0] || "";
     const primaryDep = selDependent[0] || "";
-    const primaryPop = selBaseline[0] || "";
+    const primaryPop = cfg["Population Column"] || selBaseline[0] || "";
 
     setValidationLoading(true);
     transformationPreviewSingle({
@@ -726,9 +726,13 @@ export default function DataTransformation() {
       geo_column: primaryGeo,
       date_column: primaryDate,
       dependent_variable: primaryDep,
-      config: { ...cfg, Lags: cfg["Adstock Horizon"] ?? 2 },
+      config: { 
+        ...cfg, 
+        Lags: cfg["Adstock Horizon"] ?? 2,
+        pop_column: cfg["Population Column"] || primaryPop || undefined,
+      },
       derived_variables: derivedVars,
-      pop_column: primaryPop || undefined,
+      pop_column: cfg["Population Column"] || primaryPop || undefined,
     })
       .then((res) => {
         setValidationData(res);
@@ -751,16 +755,15 @@ export default function DataTransformation() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Module 5: Data Transformation &amp; Feature Engineering"
-        subtitle="Detect and clean outliers, configure adstock decay, adstock horizon, pure lags, saturation curves, and compare pre/post correlation matrices"
+        title="Module 5: Data Transformation & Feature Engineering"
+        subtitle="Detect outliers, customize adstock decay, adstock horizon, and pure lags dynamically aligned with your dataset's time grain"
         icon="⚙️"
       />
 
       {!activeCsv && <Alert type="warning">No dataset available. Complete Data Ingestion and Stitching first.</Alert>}
 
-      {/* ARD Table & Version Selector */}
-      <Card title="Active ARD Dataset &amp; Transformation Set Version">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <Card title="Active ARD Dataset & Time Grain Calibration">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div>
             <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
               Select ARD Table:
@@ -775,10 +778,31 @@ export default function DataTransformation() {
               ) : (
                 ardList.map((ard) => (
                   <option key={ard.id} value={ard.id}>
-                    📄 {ard.name} ({ard.grain?.toUpperCase()} Grain • {ard.rows?.toLocaleString()} rows • {ard.cols} cols)
+                    📄 {ard.name} ({ard.grain?.toUpperCase()} Grain • {(ard.rows || 0).toLocaleString()} rows)
                   </option>
                 ))
               )}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
+              Dataset Time Grain (Detected):
+            </label>
+            <select
+              value={detectedGrain}
+              onChange={(e) => {
+                const val = e.target.value;
+                setDetectedGrain(val);
+                setGrainUnit(val === "Daily" ? "Days" : val === "Weekly" ? "Weeks" : val === "Monthly" ? "Months" : val === "Quarterly" ? "Quarters" : "Years");
+              }}
+              className="w-full text-xs font-bold border-2 border-slate-300 rounded-xl px-3.5 py-2.5 bg-white text-slate-800 focus:outline-none"
+            >
+              <option value="Daily">Daily (Units: Days)</option>
+              <option value="Weekly">Weekly (Units: Weeks)</option>
+              <option value="Monthly">Monthly (Units: Months)</option>
+              <option value="Quarterly">Quarterly (Units: Quarters)</option>
+              <option value="Yearly">Yearly (Units: Years)</option>
             </select>
           </div>
 
@@ -806,8 +830,8 @@ export default function DataTransformation() {
         </div>
       </Card>
 
-      {/* ─── STEP 1: Outlier Diagnostics & Removal (Pre-Transformation) ────── */}
-      <Card title="Step 1: Outlier Diagnostics &amp; Pre-Treatment">
+      {/* Step 1: Outliers */}
+      <Card title="Step 1: Outlier Diagnostics & Pre-Treatment">
         <p className="text-xs text-slate-500 mb-4">
           Inspect extreme values and outliers before applying feature engineering transforms. Outlier exclusion updates the working dataset immediately.
         </p>
@@ -833,7 +857,7 @@ export default function DataTransformation() {
             <>
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Bottom Tail Cutoff % (Flags lower values):
+                  Bottom Tail Cutoff %:
                 </label>
                 <input
                   type="number"
@@ -842,13 +866,12 @@ export default function DataTransformation() {
                   max="49.0"
                   value={lowerPercentile}
                   onChange={(e) => setLowerPercentile(e.target.value)}
-                  placeholder="e.g. 0.5 (lowest 0.5%)"
                   className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white"
                 />
               </div>
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Top Tail Cutoff % (Flags higher values):
+                  Top Tail Cutoff %:
                 </label>
                 <input
                   type="number"
@@ -857,7 +880,6 @@ export default function DataTransformation() {
                   max="100.0"
                   value={upperPercentile}
                   onChange={(e) => setUpperPercentile(e.target.value)}
-                  placeholder="e.g. 99.5 (highest 0.5%)"
                   className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white"
                 />
               </div>
@@ -889,7 +911,7 @@ export default function DataTransformation() {
               type="number"
               step="any"
               min="0.001"
-              placeholder="Bucket width (e.g. 5)"
+              placeholder="Bucket width"
               value={customBinWidth}
               onChange={(e) => setCustomBinWidth(e.target.value)}
               className="text-xs font-bold border border-slate-200 rounded-xl px-3 py-1.5 bg-white w-36"
@@ -927,7 +949,6 @@ export default function DataTransformation() {
               </div>
             </div>
 
-            {/* Distribution Bar Chart */}
             {histData && (
               <div className="bg-white p-3 rounded-xl border border-slate-200">
                 <span className="text-[11px] font-bold text-slate-600 block mb-2">Raw Distribution Histogram ({distCol})</span>
@@ -957,20 +978,16 @@ export default function DataTransformation() {
                 </div>
               </>
             ) : (
-              <div className="flex items-center justify-between bg-emerald-50 border border-emerald-200 p-3 rounded-xl">
-                <span className="text-xs font-bold text-emerald-800">✅ No extreme outliers detected in {distCol} with current parameters.</span>
+              <div className="bg-emerald-50 border border-emerald-200 p-3 rounded-xl text-xs font-bold text-emerald-800">
+                ✅ No extreme outliers detected in {distCol} with current parameters.
               </div>
             )}
           </div>
         )}
       </Card>
 
-      {/* ─── STEP 2: Column Categorization & Simple KPI Lock ───────────────── */}
-      <Card title="Step 2: Column Categorization &amp; Variable Roles">
-        <p className="text-xs text-slate-500 mb-4">
-          Variables are categorized according to their Ingestion roles. Locked sales KPIs are kept linear and excluded from promotional transformations.
-        </p>
-
+      {/* Step 2: Roles */}
+      <Card title="Step 2: Column Categorization & Variable Roles">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-4">
           <IngestionCategoryBox
             title="1. Time Variable"
@@ -1017,13 +1034,11 @@ export default function DataTransformation() {
             colorBadge="bg-amber-100 text-amber-800"
           />
 
-          {/* Simple Clean KPI Lock / Unlock Toggle */}
           <div className="bg-slate-50 rounded-2xl border border-slate-200 p-4 flex flex-col justify-between">
             <div>
               <span className="text-xs font-bold text-slate-800 uppercase tracking-wider block mb-2">
                 Sales KPI Lock Control
               </span>
-              
               <label className="flex items-start gap-2.5 text-xs font-bold text-slate-700 cursor-pointer p-3 bg-white rounded-xl border border-slate-200">
                 <input
                   type="checkbox"
@@ -1035,8 +1050,8 @@ export default function DataTransformation() {
                   <span>Unlock Dependent Variable (Sales KPI)</span>
                   <span className="block text-[10px] font-normal text-slate-500 mt-0.5">
                     {lockDepVar
-                      ? "🔒 Locked: Sales KPI is protected from transformation and excluded from the table."
-                      : "🔓 Unlocked: Sales KPI is included in the table for transformation &amp; correlation."}
+                      ? "🔒 Locked: Sales KPI is protected from transformation."
+                      : "🔓 Unlocked: Sales KPI is included in the table for transformation & correlation."}
                   </span>
                 </div>
               </label>
@@ -1045,12 +1060,12 @@ export default function DataTransformation() {
         </div>
       </Card>
 
-      {/* ─── STEP 3: Transformation Configuration Table ────────────────────── */}
+      {/* Step 3: Transformation Table with Dynamic Population Weight Column Selector */}
       {transformConfig.length > 0 && (
-        <Card title="Step 3: Transformation Configuration Table">
+        <Card title={`Step 3: Transformation Configuration Table (Units: ${grainUnit})`}>
           <div className="flex justify-between items-center mb-4 flex-wrap gap-3">
             <p className="text-xs text-slate-500">
-              Configure Normalization, Adstock Decay, Adstock Horizon, Pure Lag, and Saturation Curves. Click <strong>ℹ️</strong> for tailored benchmark guidance per tactic.
+              Configure Normalization, Adstock Decay, Adstock Horizon, and Pure Lags (aligned with <strong>{detectedGrain}</strong> grain).
             </p>
 
             <Btn
@@ -1062,19 +1077,19 @@ export default function DataTransformation() {
             </Btn>
           </div>
 
-          <div className="overflow-x-auto rounded-xl border border-slate-200 max-h-[500px]">
+          <div className="overflow-x-auto rounded-xl border border-slate-200 max-h-[520px]">
             <table className="w-full text-xs text-left bg-white">
               <thead className="bg-slate-50 border-b border-slate-200 text-slate-700 sticky top-0 z-10 font-bold">
                 <tr>
                   <th className="px-3 py-3">Channel Name</th>
                   <th className="px-3 py-3">Category</th>
-                  <th className="px-3 py-3">Normalization</th>
-                  <th className="px-3 py-3">Adstock (Decay)</th>
-                  <th className="px-3 py-3">Adstock Horizon</th>
-                  <th className="px-3 py-3">Lag (Shift)</th>
+                  <th className="px-3 py-3">Normalization &amp; Population Weight</th>
+                  <th className="px-3 py-3">Adstock Decay (λ)</th>
+                  <th className="px-3 py-3">Adstock Horizon ({grainUnit})</th>
+                  <th className="px-3 py-3">Lag Shift ({grainUnit})</th>
                   <th className="px-3 py-3">Saturation Curve</th>
                   <th className="px-3 py-3">Param (k / p)</th>
-                  <th className="px-3 py-3 text-right">Guidance &amp; Actions</th>
+                  <th className="px-3 py-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -1111,67 +1126,93 @@ export default function DataTransformation() {
                         </span>
                       </td>
 
-                      {/* Normalization */}
-                      <td className="px-3 py-2">
-                        <select
-                          value={row["Normalization"] || "none"}
-                          onChange={(e) => updateConfigRow(row["Channel Name"], "Normalization", e.target.value)}
-                          className="border border-slate-200 rounded-lg px-2 py-1 text-xs bg-white focus:outline-none"
-                        >
-                          {NORMALIZATION_OPTIONS.map((opt) => (
-                            <option key={opt.value} value={opt.value}>
-                              {opt.label}
-                            </option>
-                          ))}
-                        </select>
+                      {/* Normalization & Population Weight Dropdown */}
+                      <td className="px-3 py-2 min-w-[210px]">
+                        <div className="space-y-1.5">
+                          <select
+                            value={row["Normalization"] || "none"}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              updateConfigRow(row["Channel Name"], "Normalization", val);
+                              if (val === "population" && !row["Population Column"]) {
+                                const defaultPop = baseCols[0] || allCols.find((c) => /pop|weight|universe/i.test(c)) || allCols[0] || "";
+                                updateConfigRow(row["Channel Name"], "Population Column", defaultPop);
+                              }
+                            }}
+                            className="border border-slate-200 rounded-lg px-2 py-1 text-xs bg-white focus:outline-none w-full"
+                          >
+                            {NORMALIZATION_OPTIONS.map((opt) => (
+                              <option key={opt.value} value={opt.value}>
+                                {opt.label}
+                              </option>
+                            ))}
+                          </select>
+
+                          {/* Dynamic Population Weight Column Dropdown from ARD */}
+                          {row["Normalization"] === "population" && (
+                            <div className="flex items-center gap-1.5 bg-amber-50/80 p-1.5 rounded-lg border border-amber-200">
+                              <span className="text-[10px] font-bold text-amber-900 whitespace-nowrap">
+                                ÷ Weight:
+                              </span>
+                              <select
+                                value={row["Population Column"] || baseCols[0] || ""}
+                                onChange={(e) => updateConfigRow(row["Channel Name"], "Population Column", e.target.value)}
+                                className="border border-amber-300 rounded px-1.5 py-0.5 text-[11px] font-bold bg-white text-amber-900 focus:outline-none w-full"
+                              >
+                                <option value="">Select ARD Column…</option>
+                                {allCols.filter((c) => c !== row["Channel Name"]).map((col) => (
+                                  <option key={col} value={col}>
+                                    {col} {baseCols.includes(col) ? "★" : ""}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
+                        </div>
                       </td>
 
-                      {/* Adstock Decay */}
                       <td className="px-3 py-2">
-                        <select
+                        <input
+                          type="number"
+                          step="0.05"
+                          min="0.0"
+                          max="0.99"
                           value={row["Adstock"] ?? 0.5}
-                          onChange={(e) => updateConfigRow(row["Channel Name"], "Adstock", parseFloat(e.target.value))}
-                          className="border border-slate-200 rounded-lg px-2 py-1 text-xs bg-white font-mono"
-                        >
-                          {[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9].map((d) => (
-                            <option key={d} value={d}>
-                              {d === 0 ? "0.0 (No decay)" : d.toFixed(1)}
-                            </option>
-                          ))}
-                        </select>
+                          onChange={(e) => updateConfigRow(row["Channel Name"], "Adstock", parseFloat(e.target.value) || 0)}
+                          className="w-20 border border-slate-200 rounded-lg px-2 py-1 text-xs font-mono"
+                        />
                       </td>
 
-                      {/* Adstock Horizon */}
                       <td className="px-3 py-2">
-                        <select
-                          value={row["Adstock Horizon"] ?? 2}
-                          onChange={(e) => updateConfigRow(row["Channel Name"], "Adstock Horizon", parseInt(e.target.value))}
-                          className="border border-slate-200 rounded-lg px-2 py-1 text-xs bg-white font-semibold"
-                        >
-                          {ADSTOCK_HORIZON_OPTIONS.map((h) => (
-                            <option key={h.value} value={h.value}>
-                              {h.label}
-                            </option>
-                          ))}
-                        </select>
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="number"
+                            step="1"
+                            min="0"
+                            max="100"
+                            value={row["Adstock Horizon"] ?? 2}
+                            onChange={(e) => updateConfigRow(row["Channel Name"], "Adstock Horizon", parseInt(e.target.value, 10) || 0)}
+                            className="w-16 border-2 border-slate-200 rounded-lg px-2 py-1 text-xs font-bold text-brand-700 bg-white"
+                          />
+                          <span className="text-[11px] font-semibold text-slate-500">{grainUnit}</span>
+                        </div>
                       </td>
 
-                      {/* Pure Lag */}
                       <td className="px-3 py-2">
-                        <select
-                          value={row["Lag"] ?? 0}
-                          onChange={(e) => updateConfigRow(row["Channel Name"], "Lag", parseInt(e.target.value))}
-                          className="border border-slate-200 rounded-lg px-2 py-1 text-xs bg-white font-semibold"
-                        >
-                          {PURE_LAG_OPTIONS.map((l) => (
-                            <option key={l.value} value={l.value}>
-                              {l.label}
-                            </option>
-                          ))}
-                        </select>
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="number"
+                            step="1"
+                            min="0"
+                            max="50"
+                            value={row["Lag"] ?? 0}
+                            onChange={(e) => updateConfigRow(row["Channel Name"], "Lag", parseInt(e.target.value, 10) || 0)}
+                            className="w-16 border-2 border-slate-200 rounded-lg px-2 py-1 text-xs font-bold text-slate-800 bg-white"
+                          />
+                          <span className="text-[11px] font-semibold text-slate-500">{grainUnit}</span>
+                        </div>
                       </td>
 
-                      {/* Saturation Function */}
                       <td className="px-3 py-2">
                         <select
                           value={row["Saturation Function"] || "None"}
@@ -1184,7 +1225,6 @@ export default function DataTransformation() {
                         </select>
                       </td>
 
-                      {/* Parameter k / p */}
                       <td className="px-3 py-2">
                         {isPower ? (
                           <div className="flex items-center gap-1">
@@ -1195,7 +1235,7 @@ export default function DataTransformation() {
                               min="0.1"
                               max="1.0"
                               value={row["Power (k)"] ?? 0.5}
-                              onChange={(e) => updateConfigRow(row["Channel Name"], "Power (k)", parseFloat(e.target.value))}
+                              onChange={(e) => updateConfigRow(row["Channel Name"], "Power (k)", parseFloat(e.target.value) || 0.5)}
                               className="w-14 border border-slate-200 rounded-lg px-2 py-1 text-xs font-mono"
                             />
                           </div>
@@ -1208,7 +1248,7 @@ export default function DataTransformation() {
                               min="0.1"
                               max="10.0"
                               value={row["Log (k)"] ?? 1.0}
-                              onChange={(e) => updateConfigRow(row["Channel Name"], "Log (k)", parseFloat(e.target.value))}
+                              onChange={(e) => updateConfigRow(row["Channel Name"], "Log (k)", parseFloat(e.target.value) || 1.0)}
                               className="w-14 border border-slate-200 rounded-lg px-2 py-1 text-xs font-mono"
                             />
                           </div>
@@ -1217,7 +1257,6 @@ export default function DataTransformation() {
                         )}
                       </td>
 
-                      {/* Actions with "i" info button */}
                       <td className="px-3 py-2 text-right whitespace-nowrap">
                         <div className="flex items-center justify-end gap-1.5">
                           <button
@@ -1272,11 +1311,11 @@ export default function DataTransformation() {
 
       {loading && <Spinner label="Applying transformations and computing diagnostics…" />}
 
-      {/* ─── STEP 4: Pre vs. Post Transformation Correlation Comparison ────── */}
+      {/* Step 4: Correlation */}
       {(preCorrMatrix || transCorrMatrix) && (
         <Card title="Step 4: Pre vs. Post Transformation Correlation Comparison">
           <p className="text-xs text-slate-500 mb-4">
-            Compare correlation structure before and after feature engineering to ensure adstock smoothing and non-linear saturation transforms have not introduced collinearity.
+            Compare correlation structure before and after feature engineering (including derived arithmetic variables).
           </p>
 
           <div className="mb-4">
@@ -1295,7 +1334,6 @@ export default function DataTransformation() {
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Pre-Transformation Matrix */}
             <div>
               <HeatmapGrid
                 matrix={preCorrMatrix}
@@ -1305,7 +1343,6 @@ export default function DataTransformation() {
               />
             </div>
 
-            {/* Post-Transformation Matrix */}
             <div>
               {transCorrMatrix ? (
                 <HeatmapGrid
@@ -1316,7 +1353,7 @@ export default function DataTransformation() {
                 />
               ) : (
                 <div className="h-[280px] rounded-xl border border-dashed border-slate-200 flex items-center justify-center text-xs text-slate-400">
-                  Click "Save &amp; Apply Transformation Set" above to generate post-transformation matrix.
+                  Click "Save & Apply Transformation Set" above to generate post-transformation matrix.
                 </div>
               )}
             </div>
@@ -1324,25 +1361,21 @@ export default function DataTransformation() {
         </Card>
       )}
 
-      {/* ─── STEP 5: Transformed Dataset Preview ────────────────────────────── */}
+      {/* Step 5: Dataset Preview */}
       {result && (
         <Card title="Step 5: Transformed Dataset Preview">
           <div className="flex items-center justify-between mb-3">
             <span className="text-xs text-slate-500">
-              Showing first 10 rows of {result.rows?.toLocaleString()} total rows ({result.cols} columns)
+              Showing first 10 rows of {(result.rows || 0).toLocaleString()} total rows ({result.cols} columns)
             </span>
           </div>
           <DataTable data={result.preview} maxRows={10} />
         </Card>
       )}
 
-      {/* ─── STEP 6: Single Variable Preview & Validation ──────────────────── */}
+      {/* Step 6: Single Validation */}
       {transformConfig.length > 0 && (
-        <Card title="Step 6: Single Channel Validation &amp; Response Shape">
-          <p className="text-xs text-slate-500 mb-5">
-            Review the empirical impact of transformations, validate distribution compression, and inspect response shape against KPI before saving.
-          </p>
-
+        <Card title="Step 6: Single Channel Validation & Response Shape">
           <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 mb-6 flex items-center justify-between gap-4 flex-wrap">
             <div className="flex-1 min-w-[280px]">
               <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
@@ -1374,7 +1407,11 @@ export default function DataTransformation() {
                   <div className="grid grid-cols-2 gap-2 text-xs">
                     <div>
                       <span className="text-slate-400 block text-[10px] uppercase font-bold">Normalization</span>
-                      <strong className="text-slate-800">{validationData.config?.Normalization || "None"}</strong>
+                      <strong className="text-slate-800">
+                        {validationData.config?.Normalization === "population"
+                          ? `Population (÷ ${validationData.config?.pop_column || validationData.config?.["Population Column"] || "Weight"})`
+                          : (validationData.config?.Normalization || "None")}
+                      </strong>
                     </div>
                     <div>
                       <span className="text-slate-400 block text-[10px] uppercase font-bold">Adstock Decay</span>
@@ -1382,7 +1419,7 @@ export default function DataTransformation() {
                     </div>
                     <div>
                       <span className="text-slate-400 block text-[10px] uppercase font-bold">Adstock Horizon</span>
-                      <strong className="text-slate-800">{validationData.config?.Lags ?? 2} weeks</strong>
+                      <strong className="text-slate-800">{validationData.config?.Lags ?? 2} {grainUnit}</strong>
                     </div>
                     <div>
                       <span className="text-slate-400 block text-[10px] uppercase font-bold">Saturation Transform</span>
@@ -1454,7 +1491,7 @@ export default function DataTransformation() {
               {validationData.raw_curve?.binned_curve?.length > 0 && validationData.trans_curve?.binned_curve?.length > 0 && (
                 <div>
                   <span className="text-xs font-bold text-slate-700 uppercase tracking-wider block mb-2">
-                    Relationship with KPI (Poor Man's Curve): Before vs. After Transformation
+                    Relationship with KPI: Before vs. After Transformation
                   </span>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="bg-white p-3 rounded-2xl border border-slate-200">
@@ -1494,7 +1531,7 @@ export default function DataTransformation() {
         </Card>
       )}
 
-      {/* Bottom Actions Bar */}
+      {/* Bottom Bar */}
       <div className="bg-slate-900 text-white rounded-2xl p-5 flex items-center justify-between flex-wrap gap-4 shadow-xl">
         <div className="flex items-center gap-2">
           <label className="text-xs font-bold text-slate-300">Set Name:</label>
@@ -1526,7 +1563,7 @@ export default function DataTransformation() {
         </div>
       </div>
 
-      {/* Outlier Exclusion Confirmation Modal */}
+      {/* Outlier Modal */}
       {outlierModalOpen && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4">
@@ -1536,7 +1573,7 @@ export default function DataTransformation() {
             </p>
             <div className="flex justify-end gap-2 pt-2">
               <Btn variant="secondary" onClick={() => setOutlierModalOpen(false)}>Cancel</Btn>
-              <Btn variant="danger" onClick={handleConfirmRemoveOutliers}>Confirm &amp; Exclude Rows</Btn>
+              <Btn variant="danger" onClick={handleConfirmRemoveOutliers}>Confirm & Exclude Rows</Btn>
             </div>
           </div>
         </div>
@@ -1544,7 +1581,7 @@ export default function DataTransformation() {
 
       {/* Guidance Modal */}
       {infoModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-150">
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl max-w-xl w-full p-6 shadow-2xl space-y-4">
             <div className="flex justify-between items-center border-b border-slate-100 pb-3">
               <div className="flex items-center gap-2">
@@ -1553,7 +1590,7 @@ export default function DataTransformation() {
                   <h3 className="text-base font-black text-slate-800">
                     Transformation Guidance: {infoChannelName}
                   </h3>
-                  <p className="text-xs text-slate-400">Benchmark Parameter Recommendations &amp; Methodology</p>
+                  <p className="text-xs text-slate-400">Benchmark Parameter Recommendations ({grainUnit})</p>
                 </div>
               </div>
               <button
@@ -1566,7 +1603,7 @@ export default function DataTransformation() {
             </div>
 
             {(() => {
-              const guide = getChannelGuidance(infoChannelName);
+              const guide = getChannelGuidance(infoChannelName, grainUnit);
               return (
                 <div className="space-y-4 text-xs">
                   <div className="p-3 bg-brand-50 border border-brand-100 rounded-xl space-y-1">
@@ -1693,7 +1730,7 @@ export default function DataTransformation() {
                 Cancel
               </Btn>
               <Btn onClick={handleAddDerivedVariable}>
-                Save &amp; Add to Table
+                Save & Add to Table
               </Btn>
             </div>
           </div>

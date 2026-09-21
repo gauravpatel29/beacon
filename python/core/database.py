@@ -6,16 +6,17 @@ import os
 import json
 import logging
 import asyncpg
-from datetime import datetime
+from pathlib import Path
 from typing import Optional, Dict, Any, List
 from dotenv import load_dotenv
 
-# Load .env file
-load_dotenv()
+from core.config import get_settings
+
+# Explicitly load python/.env regardless of current working directory
+ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(ENV_PATH)
 
 logger = logging.getLogger("proctimize.db")
-
-DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("NEON_DATABASE_URL") or ""
 
 _pool: Optional[asyncpg.Pool] = None
 
@@ -23,25 +24,39 @@ _pool: Optional[asyncpg.Pool] = None
 async def get_db_pool() -> Optional[asyncpg.Pool]:
     """Creates and returns an asyncpg connection pool to Neon DB."""
     global _pool
-    if _pool is None and DATABASE_URL:
-        try:
-            dsn = DATABASE_URL
-            # Ensure sslmode=require for Neon Cloud PostgreSQL
-            if "sslmode=" not in dsn:
-                dsn += "?sslmode=require" if "?" not in dsn else "&sslmode=require"
+    if _pool is not None:
+        return _pool
 
-            _pool = await asyncpg.create_pool(
-                dsn=dsn,
-                min_size=1,
-                max_size=10,
-                timeout=30.0,
-                command_timeout=60.0,
-            )
-            print(" Connected successfully to Neon DB (PostgreSQL)!")
-            await init_tables()
-        except Exception as e:
-            print(f"⚠️ Could not connect to Neon DB: {e}")
-            _pool = None
+    settings = get_settings()
+    dsn = (
+        settings.database_url
+        or os.getenv("DATABASE_URL")
+        or os.getenv("NEON_DATABASE_URL")
+        or ""
+    )
+
+    if not dsn:
+        print("❌ DATABASE_URL is not set in python/.env")
+        return None
+
+    try:
+        # Ensure sslmode=require for Neon Cloud PostgreSQL
+        if "sslmode=" not in dsn:
+            dsn += "?sslmode=require" if "?" not in dsn else "&sslmode=require"
+
+        _pool = await asyncpg.create_pool(
+            dsn=dsn,
+            min_size=1,
+            max_size=10,
+            timeout=30.0,
+            command_timeout=60.0,
+        )
+        print("✅ Connected successfully to Neon DB (PostgreSQL)!")
+        await init_tables()
+    except Exception as e:
+        print(f"⚠️ Could not connect to Neon DB: {e}")
+        _pool = None
+
     return _pool
 
 
@@ -87,25 +102,18 @@ _CREATE_TABLES_SQL = """
         updated_at TIMESTAMPTZ DEFAULT NOW(),
         PRIMARY KEY(workflow_id, filename)
     );
-    """
+"""
 
 
 def init_tables_sql() -> str:
-    """The base schema, as one idempotent DDL script.
-
-    Exposed separately so scripts/migrate.py can apply it over an unpooled
-    connection without booting the app.
-    """
     return _CREATE_TABLES_SQL
 
 
 async def init_tables():
-    """Automatically creates all necessary tables in your Neon DB."""
     pool = await get_db_pool()
     if not pool:
         return
 
-    create_tables_sql = _CREATE_TABLES_SQL
     async with pool.acquire() as conn:
-        await conn.execute(create_tables_sql)
-        print(" Neon DB Tables Verified & Initialized!")
+        await conn.execute(_CREATE_TABLES_SQL)
+        print("✅ Neon DB Tables Verified & Initialized!")
