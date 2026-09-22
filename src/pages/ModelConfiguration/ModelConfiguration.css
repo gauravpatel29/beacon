@@ -276,6 +276,18 @@
 .run-model-btn:hover { opacity: 0.92; }
 .run-model-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+.hide-const-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.hide-const-toggle input { cursor: pointer; }
+
 .run-status-badge {
   font-size: 0.78rem;
   font-weight: var(--font-weight-semibold);

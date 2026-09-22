@@ -23,7 +23,10 @@
   width: 110px;
   height: 34px;
 }
-
+.beacon-logo-placeholder {
+  width: 110px;
+  height: 50px;
+}
 .navbar-logo-placeholder img {
   width: 100%;
   height: 100%;

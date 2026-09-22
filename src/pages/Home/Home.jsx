@@ -21,7 +21,7 @@ import data from "../../assets/data.png";
 import data_lifecycle from "../../assets/data_lifecycle.png";
 import bar_graph from "../../assets/bar_graph.png";
 import aim from "../../assets/aim.png";
-import beacon_logo from "../../assets/beacon_logo.png";
+import Beaconlogo from "../../assets/Beaconlogo.svg"
 
 const pipelineCards = [
   {
@@ -294,11 +294,10 @@ function Home() {
                 </div>
             <div className="logo-divider" />
               <span className="logo-wordmark">
-                Beacon
                 {/* --add beacon logo */}
-                {/* <div className="logo-placeholder">
-                    <img src={beacon_logo} alt="Beacon Logo" />
-                </div> */}
+                <div className="logo-placeholder">
+                    <img src={Beaconlogo} alt="Beacon Logo" className="beacon-logo-blend" />
+                </div>
               </span>
             </div>
 
