@@ -500,6 +500,10 @@ function DataTransformation() {
    * since been chosen as the date or geography key drops out rather than being
    * configured as a channel.
    */
+  // The promotions card's own selection, as an array. selectedVars is a Set,
+  // and CategoryCard needs .includes/.filter.
+  const selectedVarList = useMemo(() => [...selectedVars], [selectedVars]);
+
   const selectedList = useMemo(() => {
     const chosen = [...selectedVars, ...popKeys];
     if (modelSpec === 'log_log') chosen.push(...dependentVars);
@@ -1124,6 +1128,9 @@ function DataTransformation() {
                       color="#1d2a6b"
                       xLabel={outlierVariable}
                       yLabel="Records"
+                      // The tick was a bin ordinal, not a value - it told the
+                      // reader nothing the tooltip does not say properly.
+                      showXTicks={false}
                     />
                   </div>
                 )}
@@ -1188,7 +1195,13 @@ function DataTransformation() {
                     index={4} title="Independent Promotions" hint="Calls, Details, Spend, Emails, Media"
                     role="Independent Promotions"
                     columns={columns} columnRoles={columnRoles}
-                    selected={selectedList}
+                    // Its OWN selection, not selectedList. selectedList is the
+                    // merged Step 2 channel list - promotions plus baselines
+                    // plus the KPI under log-log - and CategoryCard renders any
+                    // selected column that is out of its role as an extra pill.
+                    // Handed the merged list, this card grew a pill for every
+                    // baseline variable the Baseline card selected.
+                    selected={selectedVarList}
                     onToggle={toggleVarSelect}
                   />
                   <CategoryCard
@@ -1922,11 +1935,13 @@ function CategoryCard({ index, title, hint, role, columns, columnRoles, selected
   );
 }
 
-function MiniBarChart({ bins, color, xLabel = '', yLabel = 'Records', binLabels = [] }) {
+function MiniBarChart({ bins, color, xLabel = '', yLabel = 'Records', binLabels = [], showXTicks = true }) {
   if (!bins.length) return null;
   const total = bins.reduce((a, b) => a + b, 0);
-  // The bin's own range as the category, so the axis and the tooltip both
-  // report the values rather than a bin index.
+  // The bin's own range as the category, so the tooltip reports the values
+  // rather than a bin index. Where no label is supplied the index is the only
+  // thing left to key on - it identifies the bar to recharts but means
+  // nothing to the reader, which is why showXTicks exists.
   const data = bins.map((count, i) => ({ bin: binLabels[i] ?? String(i + 1), count }));
 
   return (
@@ -1934,7 +1949,7 @@ function MiniBarChart({ bins, color, xLabel = '', yLabel = 'Records', binLabels 
       <BarChart data={data} margin={CHART_MARGIN}>
         <CartesianGrid stroke={GRID} vertical={false} />
         <XAxis
-          dataKey="bin" tick={{ fontSize: 8, fill: '#8a94a3' }} tickLine={false}
+          dataKey="bin" tick={showXTicks ? { fontSize: 8, fill: '#8a94a3' } : false} tickLine={false}
           axisLine={{ stroke: GRID }} minTickGap={14}
           label={{ value: xLabel, ...X_LABEL }}
         />

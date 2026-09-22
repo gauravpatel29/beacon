@@ -252,41 +252,21 @@ t('and a non-numeric cell is never touched',
   /:\s*\(r\[c\] \?\? '-'\)\)\}/.test(page), 'text cells rewritten');
 
 console.log('\n11c. the impactable share column totals exactly 100');
-// Two things stop the engine's shares adding up on their own: flooring the
-// negatives removes weight without giving it back, and the raw shares only
-// sum to 100 when the fit reconstructs the dependent variable exactly, which
-// ridge and a two-stage split do not.
-const colFn = new Function(
-  'return ' + page.match(/function percentColumn\(rows, column\) \{[\s\S]*?\n\}/)[0]
-)();
+// The calculation itself moved to services/impactShare.js when the shares
+// became weighted, and is exercised there against the reference figures -
+// see impactshare.check.mjs sections 1 to 5. What belongs here is that this
+// screen still routes through it rather than keeping a second copy.
 const COL = 'Impactable (%)';
-const shareTotal = (vals) => {
-  const out = colFn(vals.map((v) => ({ [COL]: v })), COL);
-  return { out, sum: Number(out.reduce((s, v) => s + (v === null ? 0 : parseFloat(v)), 0).toFixed(1)) };
-};
-for (const [label, vals] of [
-  ['already 100', [50, 30, 20]],
-  ['a floored negative', [60, 50, -10]],
-  ['under 100 (ridge)', [40, 30, 20]],
-  ['over 100', [70, 60, 30]],
-  ['percent strings', ['36.9276%', '-12.40%', '75.6%']],
-  ['a blank row', [50, null, 50]],
-  ['one row only', [42]],
-]) {
-  eq(`${label}: totals 100.0`, shareTotal(vals).sum, 100);
-}
-// Rounding each share independently to 1dp leaves a column reading 99.9% or
-// 100.1%, which is what a reader with a calculator finds.
-eq('three equal thirds still total 100.0', shareTotal([1, 1, 1]).sum, 100);
-eq('and seven equal rows do too', shareTotal([1, 1, 1, 1, 1, 1, 1]).sum, 100);
-eq('the drift lands on one row, not all',
-   shareTotal([1, 1, 1]).out, ['33.4%', '33.3%', '33.3%']);
-// Nothing to divide by; inventing a total would be worse than showing zeroes.
-eq('an all-negative column shows zeroes', shareTotal([-5, -3]).out, ['0.0%', '0.0%']);
-eq('a non-numeric cell is left alone', colFn([{ [COL]: 'n/a' }], COL), [null]);
+t('the share calculation is the shared one',
+  /import { weightedShareColumn, weightFor } from '../../services/impactShare.js';/.test(page),
+  'a local copy would drift from Model Output');
+t('and no local percentColumn survives',
+  !/^function percentColumn(/m.test(page), 'two copies of the same rule');
+t('each share is multiplied by its prior weight',
+  /weightedShareColumn(visibleRows, c, (r) => weightFor(weights, r.Variable))/.test(page),
+  'unweighted');
 t('the column is resolved once for every row, not per cell',
-  /const shares = Object\.fromEntries\(/.test(page), 'a cell cannot make a column total 100');
-
+  /const shares = Object.fromEntries(/.test(page), 'a cell cannot make a column total 100');
 console.log('\n11d. a floored row reads zero across the board');
 // A share floored from negative to 0% leaves the rest of the row describing
 // the same contribution in other units. A row saying 0.0% next to -18,400

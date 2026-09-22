@@ -27,11 +27,29 @@ const eq = (label, got, want) =>
 
 const page = readFileSync(new URL('../pages/ModelOutput/ModelOutput.jsx', import.meta.url), 'utf8');
 
+console.log('\n0. baseline tiers are not offered a response curve');
+// A saturation curve answers "what would more spend buy". Unpromoted demand
+// has no spend to vary, so the question does not apply to it.
+t('the channel pills come from spendableChannels',
+  /\{spendableChannels\.map\(\(d\) => \(\s*<span key=\{d\.variable\} className=\{`channel-pill/.test(page),
+  'baseline still selectable');
+t('which excludes the baseline tier',
+  /deepDive\.filter\(\(d\) => d\.bucket !== 'baseline'\)/.test(page), 'baseline included');
+t('the request is narrowed from that same list, not from deepDive',
+  /spendableChannels\.filter\(\(d\) => Number\(d\.spend\) > 0\)/.test(page),
+  'a baseline row with spend would still be sent');
+t('the first selected channel is a spendable one',
+  /if \(spendableChannels\.length\) setResponseChannel\(spendableChannels\[0\]\.variable\);/.test(page),
+  'defaults to a baseline row');
+t('and the empty state counts spendable channels',
+  /if \(!spendableChannels\.length\) return 'Response curves generate automatically/.test(page),
+  'counts rows it will not show');
+
 console.log('\n1. channels with no spend are left out of the request');
 t('the request is built from pricedChannels, not deepDive',
   /const channels = pricedChannels\.map\(/.test(page), 'still sends every channel');
 t('and pricedChannels requires a positive spend',
-  /deepDive\.filter\(\(d\) => Number\(d\.spend\) > 0\)/.test(page), 'zero spend still included');
+  /\.filter\(\(d\) => Number\(d\.spend\) > 0\)/.test(page), 'zero spend still included');
 t('nothing is requested when no channel has spend',
   /if \(!pricedChannels\.length\) return;/.test(page), 'a doomed request is still sent');
 t('and the auto-generate effect counts priced channels only',
@@ -65,7 +83,37 @@ t('it names the selected channel when only that one lacks spend',
 t('and still reports generation in progress',
   /if \(isGeneratingCurves\) return 'Generating response curves\.\.\.';/.test(page), 'no progress text');
 
-console.log('\n4. the no-spend case is not reported as an error');
+console.log('\n4. a changed input actually regenerates the curve');
+// The effect fired once per (model, channel-set) and never again. Value Per
+// Unit tried to force a refresh by emptying apiCurves and relying on the
+// effect's "already generated" guard - but apiCurves was not a dependency of
+// that effect, so clearing it re-ran nothing.
+t('the regeneration is keyed on the curve inputs',
+  /\}, \[isViewingFinalized, channelCount, viewingModel\?\.id, curveInputs\]\);/.test(page),
+  'still keyed on the model alone');
+t('and the dead "already generated" guard is gone',
+  !/if \(Object\.keys\(apiCurves\)\.length\) return;/.test(page), 'the guard would block reruns');
+for (const [label, key] of [
+  ['the price', /price: Number\(unitValue\) \|\| 1,/],
+  ['the saturation function', /saturation: saturationFunction,/],
+  ['the power value', /power: Number\(powerValue\) \|\| 0\.5,/],
+  ['the time periods', /numTime: Number\(numTime\) \|\| 0,/],
+  ['the geo units', /numGeo: Number\(numGeo\) \|\| 0,/],
+  ['each channel and its spend', /channels: pricedChannels\.map\(\(d\) => \[d\.variable, Number\(d\.spend\) \|\| 0\]\),/],
+]) {
+  t(`${label} is part of that key`, key.test(page), 'a change to it would go unnoticed');
+}
+// Typed fields would otherwise send one request per keystroke.
+t('the run is debounced',
+  /const timer = setTimeout\(\(\) => handleGenerateCurves\(\), 600\);/.test(page), 'no debounce');
+t('and a pending run is cancelled when the input changes again',
+  /return \(\) => clearTimeout\(timer\);/.test(page), 'bursts would all fire');
+// apiCurves must stay OUT of the dependency list: an empty result would
+// re-trigger the effect that produced it, forever.
+t('apiCurves is not a dependency',
+  !/viewingModel\?\.id, curveInputs, apiCurves\]/.test(page), 'a empty response would loop');
+
+console.log('\n5. the no-spend case is not reported as an error');
 // A channel awaiting its spend is an ordinary state, not a failure, so it
 // must not raise the red banner that carries real API errors.
 const guard = page.match(/if \(!pricedChannels\.length\) return;[^\n]*/)[0];

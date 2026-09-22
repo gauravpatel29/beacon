@@ -11,6 +11,7 @@ import { ResponsiveContainer, CartesianGrid, XAxis, YAxis, Tooltip, BarChart, Ba
 import { ChartTooltip } from '../../components/charts/ChartTooltip.jsx';
 import { AXIS_TICK, CHART_COLORS, GRID } from '../../components/charts/chartTheme.js';
 import PageFooterNav from '../../components/PageFooterNav/PageFooterNav.jsx';
+import { formatRoi } from '../../services/formatRoi.js';
 import './Optimization.css';
 
 // Per-channel palette for the "Optimized Spend" bars in the allocation chart —
@@ -484,11 +485,11 @@ function Optimization() {
             </div>
           </div>
 
-          {/* ---- 3. Channel Constraints & Starting Iteration ---- */}
+          {/* ---- 3. Channel Constraints ---- */}
           <div className="opt-card">
             <p className="opt-section-title">3. Optimization Configuration (Greedy Algorithm)</p>
             <p className="opt-section-desc">
-              Set the step size for the discrete greedy marginal-ROI search, then edit each channel's Min/Max spend bounds and starting iteration. Setting Min to $0 allows the optimizer to cut underperforming channels completely.
+              Set the step size for the discrete greedy marginal-ROI search, then edit each channel's Min/Max spend bounds. Setting Min to $0 allows the optimizer to cut underperforming channels completely.
             </p>
 
             <div className="opt-field">
@@ -502,17 +503,20 @@ function Optimization() {
               <button className="constraint-preset-btn" onClick={() => applyConstraintPreset(0.5, 2.0)}>±50% Bounds</button>
             </div>
 
-            <p className="opt-section-title" style={{ fontSize: '0.85rem' }}>Channel Constraints &amp; Starting Iteration</p>
+            <p className="opt-section-title" style={{ fontSize: '0.85rem' }}>Channel Constraints</p>
+            {/* Starting Iteration removed per instruction. Every channel still
+                starts at iteration 1 and the payload still carries it, so the
+                optimizer's contract is unchanged - it is just no longer set by
+                hand. */}
             <div className="constraints-table-wrapper">
               <table className="constraints-table">
-                <thead><tr><th>Channel</th><th>Min Spend ($)</th><th>Max Spend ($)</th><th>Starting Iteration (iter)</th></tr></thead>
+                <thead><tr><th>Channel</th><th>Min Spend ($)</th><th>Max Spend ($)</th></tr></thead>
                 <tbody>
                   {channelBounds.map((b, idx) => (
                     <tr key={b.channel}>
                       <td><strong>{b.channel}</strong></td>
                       <td><input type="number" step="1000" min="0" value={b.min} onChange={(e) => updateBound(idx, 'min', e.target.value)} placeholder="0" /></td>
                       <td><input type="number" step="1000" min="0" value={b.max} onChange={(e) => updateBound(idx, 'max', e.target.value)} placeholder="150000" /></td>
-                      <td><input type="number" step="1" min="1" value={b.iter ?? 1} onChange={(e) => updateBound(idx, 'iter', e.target.value)} placeholder="1" /></td>
                     </tr>
                   ))}
                 </tbody>
@@ -591,12 +595,12 @@ function Optimization() {
                           <td><strong>{r.channel}</strong></td>
                           <td>${r.baseSpend.toLocaleString()}</td>
                           <td>${r.baseRevenue.toLocaleString()}</td>
-                          <td>{r.baseRoi.toFixed(2)}x</td>
-                          <td>{r.baseMroi.toFixed(2)}x</td>
+                          <td>{formatRoi(r.baseRoi)}</td>
+                          <td>{formatRoi(r.baseMroi)}</td>
                           <td><strong>${r.optSpend.toLocaleString()}</strong></td>
                           <td><strong>${r.optRevenue.toLocaleString()}</strong></td>
-                          <td>{r.optRoi.toFixed(2)}x</td>
-                          <td>{r.optMroi.toFixed(2)}x</td>
+                          <td>{formatRoi(r.optRoi)}</td>
+                          <td>{formatRoi(r.optMroi)}</td>
                           <td>
                             <span className={`spend-pct-badge ${r.spendPct < 0 ? 'negative' : 'positive'}`}>
                               {r.spendPct >= 0 ? '+' : ''}{r.spendPct}%
@@ -608,11 +612,11 @@ function Optimization() {
                         <td>TOTAL PORTFOLIO</td>
                         <td>${fullTotals.totalBaseSpend.toLocaleString()}</td>
                         <td>${fullTotals.totalBaseRevenue.toLocaleString()}</td>
-                        <td>{fullTotals.totalBaseRoi.toFixed(2)}x</td>
+                        <td>{formatRoi(fullTotals.totalBaseRoi)}</td>
                         <td>NA</td>
                         <td>${fullTotals.totalOptSpend.toLocaleString()}</td>
                         <td>${fullTotals.totalOptRevenue.toLocaleString()}</td>
-                        <td>{fullTotals.totalOptRoi.toFixed(2)}x</td>
+                        <td>{formatRoi(fullTotals.totalOptRoi)}</td>
                         <td>NA</td>
                         <td>{fullTotals.totalSpendPct >= 0 ? '+' : ''}{fullTotals.totalSpendPct}%</td>
                       </tr>

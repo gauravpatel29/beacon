@@ -12,6 +12,8 @@ import { ResponsiveContainer, CartesianGrid, XAxis, YAxis, Tooltip, Legend, Line
 import { ChartTooltip } from '../../components/charts/ChartTooltip.jsx';
 import { AXIS_TICK, CHART_COLORS, GRID, LINE_TYPE, X_LABEL, Y_LABEL } from '../../components/charts/chartTheme.js';
 import PageFooterNav from '../../components/PageFooterNav/PageFooterNav.jsx';
+import { formatRoi } from '../../services/formatRoi.js';
+import { weightedSharePercents, weightFor } from '../../services/impactShare.js';
 import './ModelOutput.css';
 
 // ─── Tier / bucket classification (exact rules from the integration spec) ───
@@ -567,8 +569,34 @@ function ModelOutput() {
   const [isGeneratingCurves, setIsGeneratingCurves] = useState(false);
   const [curvesError, setCurvesError] = useState(null);
 
+  // Impact Share (%), computed the same way as the coefficient table on Model
+  // Configuration: each variable's impactable share multiplied by the prior
+  // weight it was modelled under, then renormalised so the column totals
+  // exactly 100. It used to be impactableSales / salesTotal, which ignored the
+  // weights entirely and so disagreed with the previous screen.
+  const impactShares = useMemo(() => {
+    const weights = viewingModel?.priorWeights || null;
+    const pct = weightedSharePercents(
+      deepDive.map((d) => ({ Variable: d.variable, pct: d.impactablePct })),
+      'pct',
+      (r) => weightFor(weights, r.Variable)
+    );
+    return Object.fromEntries(
+      deepDive.map((d, i) => [d.variable, pct[i] === null ? null : `${pct[i].toFixed(1)}%`])
+    );
+  }, [deepDive, viewingModel]);
+
+  // Channels a budget can actually be bought with. Baseline demand is not
+  // bought, so it has no spend to enter, no ROI, and no response curve: a
+  // saturation curve answers "what would more spend buy", which is not a
+  // question unpromoted demand has an answer to.
+  const spendableChannels = useMemo(
+    () => deepDive.filter((d) => d.bucket !== 'baseline'),
+    [deepDive]
+  );
+
   useEffect(() => {
-    if (deepDive.length) setResponseChannel(deepDive[0].variable);
+    if (spendableChannels.length) setResponseChannel(spendableChannels[0].variable);
   }, [viewingModel?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // A channel with no spend recorded has nothing to calibrate a curve
@@ -578,8 +606,8 @@ function ModelOutput() {
   // backend did not respond" rather than as an error anyone could read. The
   // engine now refuses them outright; this keeps them out of the request.
   const pricedChannels = useMemo(
-    () => deepDive.filter((d) => Number(d.spend) > 0),
-    [deepDive]
+    () => spendableChannels.filter((d) => Number(d.spend) > 0),
+    [spendableChannels]
   );
 
   const handleGenerateCurves = async () => {
@@ -628,12 +656,24 @@ function ModelOutput() {
 
   const currentCurve = apiCurves[responseChannel] || null;
 
+  // The ROI chart drops the zero-spend point. There is no return on no
+  // investment: the engine cannot divide by zero there, so it substitutes the
+  // FIRST STEP's marginal ROI - which is, by construction, the very number it
+  // then computes as the ROI at that first step. Two points carrying one
+  // value drew a flat shoulder before the decay, which is the kink at the top
+  // left. The x-axis is anchored at 0 in its own right, so the curve still
+  // starts from zero spend.
+  const roiCurve = useMemo(
+    () => (currentCurve || []).filter((p) => Number(p.spend) > 0),
+    [currentCurve]
+  );
+
   // Why the curve area is empty, in terms the reader can act on. The old
   // text said "generate automatically once a model is finalized" to someone
   // looking at a finalized model, which explained nothing.
   const curvesEmptyMessage = useMemo(() => {
     if (isGeneratingCurves) return 'Generating response curves...';
-    if (!deepDive.length) return 'Response curves generate automatically once a model is finalized.';
+    if (!spendableChannels.length) return 'Response curves generate automatically once a model is finalized.';
     if (!pricedChannels.length) {
       return 'No spend recorded yet. Enter spend under Channel Spend Management above '
         + 'to generate response curves - a channel with no spend has no return to plot.';
@@ -643,25 +683,42 @@ function ModelOutput() {
         + 'Management above to plot its curve.';
     }
     return 'Response curves generate automatically once a model is finalized.';
-  }, [isGeneratingCurves, deepDive, pricedChannels, responseChannel]);
+  }, [isGeneratingCurves, spendableChannels, pricedChannels, responseChannel]);
 
   // Auto-generate response curves once finalized, instead of requiring a
-  // manual click. Fires once per finalized-model view (guarded so it doesn't
-  // refire on every render), and again whenever the underlying channel list
-  // changes size (e.g. a different model gets finalized). Deliberately NOT
-  // re-triggered on every spend edit — spend changes affect the curve INPUT
-  // (spend_nation/stop/step), so re-running per keystroke would spam the
-  // endpoint; a debounce would help but the button removal request was about
-  // eliminating the manual click, not adding a new implicit trigger surface,
-  // so this fires once per (model, channel-set) and stays put until a fresh
-  // finalize event changes what's being modeled.
+  // manual click, and regenerate whenever an input to the curve changes.
+  //
+  // This used to fire once per (model, channel-set) and then never again.
+  // Value Per Unit tried to force a refresh by emptying apiCurves and leaning
+  // on the effect's "already generated" guard - but apiCurves was not one of
+  // the effect's dependencies, so clearing it re-ran nothing. The price
+  // changed and the curve did not. The saturation function, the power value
+  // and the period counts were all stale for the same reason.
+  // Everything the engine bakes into a generated curve. Any change here makes
+  // the curves on screen stale, so this - not the presence or absence of a
+  // previous result - is what decides when to regenerate.
+  const curveInputs = JSON.stringify({
+    price: Number(unitValue) || 1,
+    saturation: saturationFunction,
+    power: Number(powerValue) || 0.5,
+    numTime: Number(numTime) || 0,
+    numGeo: Number(numGeo) || 0,
+    // Spend sets spend_nation, stop and step, so it belongs here too. The
+    // note above said a debounce would be needed before spend could trigger
+    // this; the debounce below is that debounce.
+    channels: pricedChannels.map((d) => [d.variable, Number(d.spend) || 0]),
+  });
+
   const channelCount = pricedChannels.length;
   useEffect(() => {
     if (!isViewingFinalized || !channelCount || !numTime || !numGeo) return;
-    if (Object.keys(apiCurves).length) return; // already generated for this view
-    handleGenerateCurves();
+    // Debounced: price and spend are typed, and every keystroke would
+    // otherwise be its own request. The cleanup cancels the pending run, so
+    // a burst of typing sends exactly one.
+    const timer = setTimeout(() => handleGenerateCurves(), 600);
+    return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isViewingFinalized, channelCount, viewingModel?.id]);
+  }, [isViewingFinalized, channelCount, viewingModel?.id, curveInputs]);
 
   const responseCurveDerived = useMemo(() => {
     if (!currentCurve || !currentCurve.length) return null;
@@ -724,7 +781,7 @@ function ModelOutput() {
         return {
           channel: d.variable,
           // yours: `${d.roi.toFixed(2)}x`,
-          benchmark: `${benchVal.toFixed(2)}x`,
+          benchmark: formatRoi(benchVal),
           status: delta >= 0.2 ? '🟢 Above Benchmark' : delta >= -0.2 ? '🟡 Near Benchmark' : '🔴 Below Benchmark',
         };
       }),
@@ -759,7 +816,7 @@ function ModelOutput() {
   // other placeholder metric falls back to "—" rather than guessing.
   const resolveYours = (metric, yours) => {
     if (yours !== 'Calculated from Model') return yours;
-    if (/average portfolio roi/i.test(metric)) return avgPortfolioRoi !== null ? `${avgPortfolioRoi.toFixed(2)}x` : '';
+    if (/average portfolio roi/i.test(metric)) return avgPortfolioRoi !== null ? formatRoi(avgPortfolioRoi) : '';
     return '';
   };
 
@@ -877,10 +934,11 @@ function ModelOutput() {
                             setUnitValue(parsed);
                             setUnitValueDraft(null);
                             // Curves bake `price` in at generation time, so a
-                            // changed Unit Value needs a real regeneration —
-                            // clearing apiCurves lets the existing auto-generate
-                            // effect (guarded on it being empty) pick this up,
-                            // rather than duplicating that fetch logic here.
+                            // changed Unit Value needs a real regeneration.
+                            // The effect above does that, keyed on the price
+                            // itself; clearing here only empties the chart so
+                            // the reader sees "Generating..." rather than the
+                            // old curve sitting there looking current.
                             if (parsed !== unitValue) setApiCurves({});
                           }}
                         />
@@ -969,18 +1027,25 @@ function ModelOutput() {
                     <p className="mo-section-title">Channel Spend Management &amp; ROI Engine</p>
                     <p className="mo-section-desc">Enter or adjust actual budget spend per promotional channel. Spend inputs immediately update channel ROIs, Long-Term ROIs, and downstream response curves.</p>
                     {spendSaveError && <div className="mo-error">{spendSaveError}</div>}
+                    {/* Baseline tiers are dropped here per instruction: a
+                        baseline variable is unpromoted demand, so there is no
+                        budget to enter against it and no ROI to compute. They
+                        remain in the deep-dive table and the tier summary. */}
                     <div className="spend-cards-row">
-                      {deepDive.map((d) => (
+                      {spendableChannels.map((d) => (
                         <div key={d.variable} className="spend-card">
                           <p className="spend-card-name">{d.variable}</p>
                           <p className="spend-card-label">Actual Spend ($):</p>
                           <input type="number" min="0" value={spendByChannel[d.variable] ?? ''} onChange={(e) => updateSpend(d.variable, e.target.value)} />
                           <div className="spend-card-roi-row">
                             <span>Current ROI:</span>
-                            <span className="spend-card-roi-value">{d.roi !== null ? `${d.roi.toFixed(2)}x` : 'Na'}</span>
+                            <span className="spend-card-roi-value">{formatRoi(d.roi, { fallback: 'Na' })}</span>
                           </div>
                         </div>
                       ))}
+                      {!spendableChannels.length && (
+                        <p className="mo-empty">No promotional channels in this model.</p>
+                      )}
                     </div>
                   </div>
 
@@ -989,17 +1054,19 @@ function ModelOutput() {
                     <p className="mo-section-title">Channel Performance Deep-Dive Table</p>
                     <div className="deep-dive-table-wrapper">
                       <table className="deep-dive-table">
-                        <thead><tr><th>Channel / Tactic</th><th>Tier Role</th><th>Impact (Sales Volume)</th><th>Impact Share (%)</th><th>Spend ($)</th><th>ROI</th><th>Long-Term ROI</th></tr></thead>
+                        {/* Long-Term ROI removed per instruction. It is still
+                            returned by the engine and still read elsewhere;
+                            only this column is gone. */}
+                        <thead><tr><th>Channel / Tactic</th><th>Tier Role</th><th>Impact (Sales Volume)</th><th>Impact Share (%)</th><th>Spend ($)</th><th>ROI</th></tr></thead>
                         <tbody>
                           {deepDive.map((d) => (
                             <tr key={d.variable}>
                               <td><strong>{d.variable}</strong></td>
                               <td><span className="tier-badge" style={{ backgroundColor: `${BUCKET_COLORS[d.bucket]}22`, color: BUCKET_COLORS[d.bucket] }}>{BUCKET_LABELS[d.bucket]}</span></td>
                               <td>{Math.round(d.impactableSales).toLocaleString()}</td>
-                              <td>{highLevelImpact ? ((d.impactableSales / highLevelImpact.salesTotal) * 100).toFixed(2) : 'NA'}%</td>
+                              <td>{impactShares[d.variable] ?? 'NA'}</td>
                               <td>${d.spend.toLocaleString()}</td>
-                              <td>{d.roi !== null ? <span className={`roi-value ${d.roi >= 1 ? 'good' : 'bad'}`}>{d.roi.toFixed(2)}x</span> : <span className="roi-value neutral">NA</span>}</td>
-                              <td>{d.longTermRoi !== undefined ? <span className={`roi-value ${d.longTermRoi >= 1 ? 'good' : 'bad'}`}>{Number(d.longTermRoi).toFixed(2)}x</span> : <span className="roi-value neutral">—</span>}</td>
+                              <td>{d.roi !== null ? <span className={`roi-value ${d.roi >= 1 ? 'good' : 'bad'}`}>{formatRoi(d.roi)}</span> : <span className="roi-value neutral">NA</span>}</td>
                             </tr>
                           ))}
                         </tbody>
@@ -1022,7 +1089,10 @@ function ModelOutput() {
 
                         <div className="channel-pill-row">
                           <span className="channel-pill-row-label">SELECT CHANNEL:</span>
-                          {deepDive.map((d) => (
+                          {/* Baseline tiers are not offered here per
+                              instruction: there is no spend to vary, so there
+                              is no curve. */}
+                          {spendableChannels.map((d) => (
                             <span key={d.variable} className={`channel-pill${responseChannel === d.variable ? ' selected' : ''}`} onClick={() => setResponseChannel(d.variable)}>{d.variable}</span>
                           ))}
                         </div>
@@ -1035,7 +1105,7 @@ function ModelOutput() {
                               <div className="rc-stat-card grey"><p className="rc-stat-value">${Math.round(responseCurveDerived.currentSpend).toLocaleString()}</p><p className="rc-stat-label">Current Spend</p></div>
                               <div className="rc-stat-card green"><p className="rc-stat-value">${Math.round(responseCurveDerived.optimalSpend).toLocaleString()}</p><p className="rc-stat-label">Optimal Target Spend</p></div>
                               <div className="rc-stat-card blue"><p className="rc-stat-value">{responseCurveDerived.saturationPct.toFixed(0)}%</p><p className="rc-stat-label">Current Saturation</p></div>
-                              <div className="rc-stat-card purple"><p className="rc-stat-value">{responseCurveDerived.currentMroi?.toFixed(2)}x</p><p className="rc-stat-label">Marginal ROI (mROI)</p></div>
+                              <div className="rc-stat-card purple"><p className="rc-stat-value">{formatRoi(responseCurveDerived.currentMroi)}</p><p className="rc-stat-label">Marginal ROI (mROI)</p></div>
                             </div>
                             <div className="rc-chart-row">
                               <div className="rc-chart-box">
@@ -1057,9 +1127,15 @@ function ModelOutput() {
                               <div className="rc-chart-box">
                                 <p className="rc-chart-title">Average ROI vs. Marginal ROI (mROI) Curve</p>
                                 <ResponsiveContainer width="100%" height={260}>
-                                  <LineChart data={currentCurve} margin={{ top: 10, right: 20, bottom: 22, left: 8 }}>
+                                  <LineChart data={roiCurve} margin={{ top: 10, right: 20, bottom: 22, left: 8 }}>
                                     <CartesianGrid stroke={GRID} vertical={false} />
-                                    <XAxis dataKey="spend" tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
+                                    {/* Numeric, anchored at zero. As a category
+                                        axis it spaced points by index and took
+                                        its first tick from the first row, so
+                                        the scale neither started at 0 nor used
+                                        round numbers. */}
+                                    <XAxis type="number" dataKey="spend" domain={[0, 'dataMax']}
+                                           tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
                                            tickFormatter={formatSpendTick} minTickGap={24}
                                            label={{ value: 'Spend', ...X_LABEL }} />
                                     <YAxis tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}

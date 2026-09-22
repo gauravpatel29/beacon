@@ -15,6 +15,7 @@ import { loadScreenState, recordStage } from '../../services/workflowState.js';
 import { useScreenState } from '../../services/useScreenState.js';
 import { buildApplyPayload, dependentNames } from '../../services/transformationSet.js';
 import { rolesFor, rolesFromDatasets } from '../../services/columnRoles.js';
+import { weightedShareColumn, weightFor } from '../../services/impactShare.js';
 import { fmt } from '../../components/charts/chartTheme.js';
 import PageFooterNav from '../../components/PageFooterNav/PageFooterNav.jsx';
 import './ModelConfiguration.css';
@@ -113,6 +114,11 @@ function ModelConfiguration() {
   const [positiveCoef, setPositiveCoef] = useState(false);
   const [useCustomPenalties, setUseCustomPenalties] = useState(false);
   const [priorWeights, setPriorWeights] = useState({});
+
+  // The weights the DISPLAYED result was produced under, not the ones
+  // currently in the form. Editing a weight after a run must not silently
+  // restate that run's shares under numbers it was never fitted with.
+  const [viewedWeights, setViewedWeights] = useState(null);
 
   const [runStatus, setRunStatus] = useState('idle'); // idle | running | complete | failed
   const [hideConstRow, setHideConstRow] = useState(false);
@@ -325,12 +331,12 @@ function ModelConfiguration() {
         if (cancelled) return;
         const list = data.channels || [];
         setChannels(list);
-        setSelectedChannels((prev) => {
-          const kept = prev.filter((c) => list.includes(c));
-          // First load: everything the engine offers, which is the set the
-          // Transformation screen just produced.
-          return kept.length ? kept : list;
-        });
+        // Keep whatever is still offered, and select nothing on a first load.
+        // Pre-selecting every channel made the default model an all-in
+        // regression that nobody chose, and the difference between "I accepted
+        // the default" and "I picked these" was invisible afterwards. Select
+        // all is one click away.
+        setSelectedChannels((prev) => prev.filter((c) => list.includes(c)));
         const range = data.date_range || {};
         setDateBounds({ start: range.start || '', end: range.end || '' });
         setStartDate((prev) => (prev && prev >= range.start && prev <= range.end ? prev : range.start || ''));
@@ -435,6 +441,10 @@ function ModelConfiguration() {
     selected_channels: selectedChannels,
     start_date: startDate,
     end_date: endDate,
+    // Excluding the const is a modelling decision, not a display one: the
+    // engine fits through the origin rather than estimating an intercept and
+    // hiding it. Every other coefficient changes as a result.
+    include_const: !hideConstRow,
   });
 
   const ridgeBody = (stage) => ({
@@ -464,11 +474,23 @@ function ModelConfiguration() {
         ? await runRidge(ridgeBody(1))
         : await runRegression(baseBody());
       setStage1(s1);
-
+      // Weights only exist as a modelling concept when custom penalties are
+      // on. Without them every variable weighs 1, and the share column is
+      // plain renormalisation.
+      const runWeights = useCustomPenalties ? { ...priorWeights } : null;
+      setViewedWeights(runWeights);
 
       setRunStatus('complete');
-      setModelHistory((prev) => [{
-        id: `model-${Date.now()}`,
+      setModelHistory((prev) => {
+        // A re-run under an existing name replaces that row rather than
+        // adding a second one: the registry is how a model is identified, and
+        // two rows sharing a name cannot be told apart. The id is kept so
+        // anything pointing at this model - a finalized selection, a saved
+        // scenario - still resolves after the overwrite.
+        const key = modelName.trim().toLowerCase();
+        const existing = prev.find((m) => (m.name || '').trim().toLowerCase() === key);
+        const row = {
+        id: existing?.id || `model-${Date.now()}`,
         name: modelName.trim(),
         level: modelLevel,
         type: modelType,
@@ -486,8 +508,17 @@ function ModelConfiguration() {
         summary: s1.summary,
         alpha: s1.alpha,
         startDate, endDate,
+        // Carried so Model Output's Impact Share (%) is computed under the
+        // same weights this run used, rather than recomputing unweighted and
+        // disagreeing with the table on this screen.
+        priorWeights: runWeights,
         createdAt: new Date().toISOString(),
-      }, ...prev].slice(0, 30));
+        };
+        if (existing) {
+          return prev.map((m) => (m.id === existing.id ? row : m));
+        }
+        return [row, ...prev].slice(0, 30);
+      });
     } catch (err) {
       setRunStatus('failed');
       setRunError(problemMessage(err, 'The model run failed. Check the channel selection and the training window.'));
@@ -511,8 +542,9 @@ function ModelConfiguration() {
   const isBusy = runStatus === 'running';
   const canRun = Boolean(transformedCsv && granularCsv && channels.length) && !isBusy;
 
-  // Two models with the same name are two rows in the history that cannot be
-  // told apart, which is the one thing that registry is for.
+  // Not an error any more: running under an existing name overwrites that
+  // row. It is still worth saying so before the run, because the previous
+  // result for that name is what gets replaced.
   const isDuplicateName = modelHistory.some(
     (m) => m.name.trim().toLowerCase() === modelName.trim().toLowerCase()
   );
@@ -547,6 +579,12 @@ function ModelConfiguration() {
     if (m.endDate) setEndDate(m.endDate);
     if (m.dmaMode) setDmaMode(m.dmaMode);
     if (m.residualSourceId) setResidualSourceId(m.residualSourceId);
+    // Restore the weights too, so re-running this row reproduces it rather
+    // than silently refitting under whatever weights were last typed.
+    if (m.priorWeights && typeof m.priorWeights === 'object') {
+      setPriorWeights(m.priorWeights);
+      setUseCustomPenalties(true);
+    }
     // The fit itself is not stored - it is reproducible from this - so the
     // results panel clears rather than showing numbers from another run.
     setStage1(null);
@@ -714,7 +752,7 @@ function ModelConfiguration() {
                     placeholder="e.g. HCP OLS Baseline Model"
                   />
                   {isDuplicateName && (
-                    <p className="mc-warn">A model with this name is already in the history.</p>
+                    <p className="mc-warn">This name is already in the history. Running will overwrite that model.</p>
                   )}
                 </div>
                 <div className="mc-field required">
@@ -975,9 +1013,12 @@ function ModelConfiguration() {
                 <button className="run-model-btn" onClick={handleRunModel} disabled={!canRun}>
                   {isBusy ? 'Running Regression…' : 'Run Regression'}
                 </button>
-                <label className="hide-const-toggle">
+                {/* Named for what it now does. It used to hide the intercept
+                    from the table while the fit still estimated one, which
+                    told the reader the model had no constant when it had. */}
+                <label className="hide-const-toggle" title="Fit through the origin: no intercept is estimated, and every channel coefficient changes as a result.">
                   <input type="checkbox" checked={hideConstRow} onChange={(e) => setHideConstRow(e.target.checked)} />
-                  Hide const row
+                  Exclude const from model
                 </label>
                 {runStatus !== 'idle' && (
                   <span className={`run-status-badge ${runStatus}`}>
@@ -1032,7 +1073,7 @@ function ModelConfiguration() {
                   <p className="mc-card-heading" style={{ marginTop: 'var(--spacing-md)' }}>
                     Estimated Coefficients &amp; Impactable Attribution
                   </p>
-                  <CoefficientTable rows={stage1.coefficients} hideConst={hideConstRow} />
+                  <CoefficientTable rows={stage1.coefficients} hideConst={hideConstRow} weights={viewedWeights} />
                 </div>
 
                 {/* Which alpha won, and by how much. */}
@@ -1141,57 +1182,6 @@ function formatPercentCell(raw) {
 }
 
 /**
- * One percentage column, floored at zero and rescaled to total exactly 100.0.
- *
- * Two things stop the raw shares adding up on their own. Flooring the
- * negatives removes weight without giving it back, so what is left over-counts
- * the total; and the engine's own shares only sum to 100 when the fit
- * reconstructs the dependent variable exactly, which ridge and a two-stage
- * split do not.
- *
- * Rounding is done by largest remainder rather than per cell: rounding each
- * share independently to one decimal leaves a column reading 99.9% or 100.1%,
- * which is exactly the kind of total somebody checks with a calculator. The
- * leftover tenths go to the rows with the largest fractional parts, so the
- * numbers on screen add to 100.0 as written.
- *
- * Returns one entry per row: a formatted string, or null for a cell that was
- * not a number and should be rendered as it arrived.
- */
-function percentColumn(rows, column) {
-  const values = rows.map((r) => {
-    const raw = r[column];
-    if (raw === null || raw === undefined || raw === '') return null;
-    const num = Number(String(raw).replace('%', ''));
-    return Number.isFinite(num) ? Math.max(0, num) : null;
-  });
-
-  const total = values.reduce((sum, v) => sum + (v || 0), 0);
-  // Every share floored away, or a column of blanks: there is no total to
-  // divide by, and inventing one would be worse than showing zeroes.
-  if (!(total > 0)) return values.map((v) => (v === null ? null : '0.0%'));
-
-  // Work in tenths of a percent so the rounding is exact integer arithmetic.
-  const exact = values.map((v) => (v === null ? null : (v / total) * 1000));
-  const floors = exact.map((v) => (v === null ? null : Math.floor(v)));
-  const assigned = floors.reduce((sum, v) => sum + (v || 0), 0);
-
-  // Hand the remaining tenths to the largest fractional parts.
-  const order = exact
-    .map((v, i) => ({ i, frac: v === null ? -1 : v - Math.floor(v) }))
-    .filter((e) => e.frac >= 0)
-    .sort((a, b) => b.frac - a.frac);
-
-  const tenths = [...floors];
-  let left = 1000 - assigned;
-  for (let n = 0; n < order.length && left > 0; n += 1, left -= 1) {
-    tenths[order[n].i] += 1;
-  }
-
-  return tenths.map((v) => (v === null ? null : `${(v / 10).toFixed(1)}%`));
-}
-
-/**
  * The rows whose share was negative before the percentage column floored it
  * to zero. Their remaining figures describe the same contribution in other
  * units, so a row reading "0.0%" beside a negative number would be
@@ -1208,7 +1198,7 @@ function flooredRows(rows, column) {
   return out;
 }
 
-function CoefficientTable({ rows, hideConst = false }) {
+function CoefficientTable({ rows, hideConst = false, weights = null }) {
   const list = Array.isArray(rows) ? rows : [];
   if (!list.length) return <p className="mc-empty">No coefficients returned.</p>;
 
@@ -1236,9 +1226,15 @@ function CoefficientTable({ rows, hideConst = false }) {
 
   // Each percentage column is resolved once, across every row, because making
   // a column total 100 is not a decision a single cell can take.
+  // Each share is multiplied by the variable's prior weight, then the column
+  // is renormalised so it totals exactly 100.0. A model with no weights uses
+  // 1 throughout, which reduces to plain renormalisation.
   const percentColumns = columns.filter(isPercentColumn);
   const shares = Object.fromEntries(
-    percentColumns.map((c) => [c, percentColumn(visibleRows, c)])
+    percentColumns.map((c) => [
+      c,
+      weightedShareColumn(visibleRows, c, (r) => weightFor(weights, r.Variable)),
+    ])
   );
 
   // Once a row's share is floored to 0%, every other negative number on that
