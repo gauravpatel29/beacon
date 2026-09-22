@@ -493,7 +493,7 @@ function Optimization() {
             </p>
 
             <div className="opt-field">
-              <label>Step Size (K)</label>
+              <label>Step Size ($)</label>
               <input type="number" min="1" step="1" value={stepSize} onChange={(e) => setStepSize(e.target.value)} placeholder="1" />
             </div>
 
@@ -510,13 +510,16 @@ function Optimization() {
                 hand. */}
             <div className="constraints-table-wrapper">
               <table className="constraints-table">
-                <thead><tr><th>Channel</th><th>Min Spend ($)</th><th>Max Spend ($)</th></tr></thead>
+                <thead><tr><th>Channel</th><th>Min Spend ($)</th><th>Max Spend ($)</th>
+                {/* <th>Starting Iteration (iter)</th> */}
+                </tr></thead>
                 <tbody>
                   {channelBounds.map((b, idx) => (
                     <tr key={b.channel}>
                       <td><strong>{b.channel}</strong></td>
                       <td><input type="number" step="1000" min="0" value={b.min} onChange={(e) => updateBound(idx, 'min', e.target.value)} placeholder="0" /></td>
                       <td><input type="number" step="1000" min="0" value={b.max} onChange={(e) => updateBound(idx, 'max', e.target.value)} placeholder="150000" /></td>
+                      {/* <td><input type="number" step="1" min="1" value={b.iter ?? 1} onChange={(e) => updateBound(idx, 'iter', e.target.value)} placeholder="1" /></td> */}
                     </tr>
                   ))}
                 </tbody>
