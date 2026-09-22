@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import polars as pl
+import scipy.stats as stats
 import statsmodels.api as sm
 from sklearn.decomposition import PCA
 from sklearn.linear_model import Ridge
@@ -140,8 +141,6 @@ def parse_date_series_polars(df: pl.DataFrame, date_column: str) -> pl.DataFrame
         pl.Series(date_column, iso_strs).str.strptime(pl.Date, format="%Y-%m-%d", strict=False).alias(date_column)
     )
 
-
-# In python/core/processing.py
 
 def detect_date_granularity(df: pl.DataFrame, date_column: str) -> Optional[str]:
     if date_column not in df.columns:
@@ -956,9 +955,6 @@ def compute_poor_mans_curve_data(df: pd.DataFrame, x_col: str, y_col: str, n_bin
     }
 
 
-# ---------------------------------------------------------------------------
-# OUTLIER DETECTION & REMOVAL ENGINE (100% Corrected & Bound-Protected)
-# ---------------------------------------------------------------------------
 def detect_outliers_engine(
     df: pd.DataFrame,
     column: str,
@@ -967,10 +963,6 @@ def detect_outliers_engine(
     lower_percentile: float = 1.0,
     upper_percentile: float = 99.0,
 ) -> Dict[str, Any]:
-    """
-    Robust, Inversion-Proof Outlier Detector.
-    - Percentile Mode: Accurately parses small proportions and guarantees lower_bound <= upper_bound.
-    """
     if column not in df.columns:
         raise ValueError(f"Column '{column}' not in dataset.")
 
@@ -1018,11 +1010,10 @@ def detect_outliers_engine(
         outlier_mask = (vals < lower_bound) | (vals > upper_bound)
         method_label = f"IQR ({threshold} × IQR)"
 
-    else:  # Percentiles
+    else:
         lp = float(lower_percentile)
         up = float(upper_percentile)
 
-        # Scale percent values into proper 0.000 to 1.000 quantiles
         lp_norm = lp / 100.0 if lp > 0.01 else lp
         up_norm = up / 100.0 if up > 1.0 else up
 
@@ -1035,7 +1026,6 @@ def detect_outliers_engine(
         q_low = float(vals.quantile(lp_norm))
         q_high = float(vals.quantile(up_norm))
 
-        # Absolute protection: lower_bound is ALWAYS strictly <= upper_bound
         lower_bound = min(q_low, q_high)
         upper_bound = max(q_low, q_high)
 
@@ -1121,10 +1111,6 @@ def compute_trend_rollup(
     agg.rename(columns={"_period_str": "date"}, inplace=True)
     return agg.to_dict(orient="records")
 
-
-# ---------------------------------------------------------------------------
-# MODULE 5 TRANSFORMATION ENGINE
-# ---------------------------------------------------------------------------
 
 def geometric_adstock(series: np.ndarray, lags: int, adstock_coeff: float) -> np.ndarray:
     series = np.array(series, dtype=np.float64)
@@ -1335,7 +1321,6 @@ def apply_full_transformations_pipeline(
 ) -> pd.DataFrame:
     df_out = df.copy()
 
-    # Derived variables computation
     if derived_variables:
         for d in derived_variables:
             out_name = d.get("name")
@@ -1366,13 +1351,11 @@ def apply_full_transformations_pipeline(
 
             df_out[out_name] = res_series
 
-    # Apply transformations per channel with per-channel population weight resolution
     for t in transformations:
         channel = t.get("Channel Name")
         if not channel or channel not in df_out.columns:
             continue
 
-        # Resolve channel-specific population column or fallback to global pop_column
         ch_pop = t.get("pop_column") or t.get("Population Column") or pop_column
 
         transformed_s = transform_single_channel(
@@ -1397,6 +1380,7 @@ def apply_full_transformations_pipeline(
             df_out["Carryover"] = df_out[dependent_variable].shift(1, fill_value=0.0)
 
     return df_out
+
 
 def transform_edited_df(df: pd.DataFrame, edited_df: pd.DataFrame, geo_column: str, dependent_variable: str) -> pd.DataFrame:
     transformed_df = df.copy()
@@ -1589,7 +1573,7 @@ def optuna_params_to_transform_rows(channels_cfg: List[Dict], best_params: Dict)
 
 
 # ---------------------------------------------------------------------------
-# MODELLING REGRESSION ENGINES
+# MODELLING REGRESSION ENGINES (WITH FULL STATISTICAL INFERENCE FOR OLS & RIDGE)
 # ---------------------------------------------------------------------------
 
 def run_ols_regression(
@@ -1620,7 +1604,6 @@ def run_ols_regression(
     gdf = granular_df[(granular_df[date_column] >= start_dt) & (granular_df[date_column] <= end_dt)]
     gdf_prior = granular_df[(granular_df[date_column] >= prior_start_date) & (granular_df[date_column] <= prior_end_date)]
 
-    # Cast predictors and target strictly to float
     y = pd.to_numeric(tdf[dependent_variable_user_input], errors="coerce").fillna(0.0)
     X = tdf[selected_channels].apply(pd.to_numeric, errors="coerce").fillna(0.0)
     X = sm.add_constant(X, has_constant="add")
@@ -1630,7 +1613,17 @@ def run_ols_regression(
     sum_raw_sales = float(pd.to_numeric(gdf[dependent_variable], errors="coerce").sum()) if dependent_variable in gdf.columns else sum_sales
     sum_raw_sales_prior = float(pd.to_numeric(gdf_prior[dependent_variable], errors="coerce").sum()) if (len(gdf_prior) > 0 and dependent_variable in gdf_prior.columns) else 1.0
 
-    coefficients = pd.DataFrame({"Variable": model.params.index, "Coefficient": [float(v) for v in model.params.values]})
+    conf_int = model.conf_int()
+    coefficients = pd.DataFrame({
+        "Variable": model.params.index,
+        "Coefficient": [float(v) for v in model.params.values],
+        "Std Error": [float(v) for v in model.bse.values],
+        "t-stat": [float(v) for v in model.tvalues.values],
+        "P-value": [float(v) for v in model.pvalues.values],
+        "CI Lower (2.5%)": [float(v) for v in conf_int[0].values],
+        "CI Upper (97.5%)": [float(v) for v in conf_int[1].values],
+    })
+
     tdf_copy = tdf.copy()
     tdf_copy["const"] = 1.0
     gdf_copy = gdf.copy()
@@ -1714,7 +1707,8 @@ def get_original_scale_coefficients(model, scaler, selected_channels, prior_weig
 
 def _build_coefficients_table(
     params_series, transformed_df_channel_filtered, granular_df_date_filtered,
-    granular_df_prior_date_filtered, dependent_variable, dependent_variable_user_input
+    granular_df_prior_date_filtered, dependent_variable, dependent_variable_user_input,
+    se_series=None, t_stat_series=None, p_val_series=None, ci_lower_series=None, ci_upper_series=None
 ):
     transformed_df_copy = transformed_df_channel_filtered.copy()
     granular_df_copy = granular_df_date_filtered.copy()
@@ -1723,7 +1717,21 @@ def _build_coefficients_table(
     transformed_df_copy["const"] = 1.0
     granular_df_copy["const"] = 1.0
 
-    coefficients = pd.DataFrame({"Variable": params_series.index, "Coefficient": [float(v) for v in params_series.values]})
+    coefficients = pd.DataFrame({
+        "Variable": params_series.index,
+        "Coefficient": [float(v) for v in params_series.values]
+    })
+
+    if se_series is not None:
+        coefficients["Std Error"] = [float(v) for v in se_series]
+    if t_stat_series is not None:
+        coefficients["t-stat"] = [float(v) for v in t_stat_series]
+    if p_val_series is not None:
+        coefficients["P-value"] = [float(v) for v in p_val_series]
+    if ci_lower_series is not None:
+        coefficients["CI Lower (2.5%)"] = [float(v) for v in ci_lower_series]
+    if ci_upper_series is not None:
+        coefficients["CI Upper (97.5%)"] = [float(v) for v in ci_upper_series]
     
     def calc_raw(var):
         raw_name = var.replace("_transformed", "")
@@ -1873,22 +1881,9 @@ def run_ridge_regression(
     prior_weights = prior_weights or {}
     tdf, gdf, gdf_prior = _filter_modelling_frames(transformed_df, granular_df, date_column, start_date, end_date)
 
-    if stage == 1:
-        channels = selected_channels
-        y_raw = pd.to_numeric(tdf[dependent_variable_user_input], errors="coerce").fillna(0.0).values.astype(float)
-        X_raw = tdf[channels].apply(pd.to_numeric, errors="coerce").fillna(0.0)
-    else:
-        if not parent_channel or not s2_channels or not stage1_coefficients:
-            raise ValueError("Stage 2 requires parent_channel, s2_channels, and stage1_coefficients")
-        stage1_coeff_df = pd.DataFrame(stage1_coefficients)
-        parent_coeff = float(stage1_coeff_df.loc[stage1_coeff_df["Variable"] == parent_channel, "Coefficient"].iloc[0])
-        parent_row = stage1_coeff_df[stage1_coeff_df["Variable"] == parent_channel]
-        parent_impactable_sales = float(parent_row["Impactable Sales"].values[0]) if len(parent_row) > 0 else 0.0
-        if parent_channel not in tdf.columns:
-            raise ValueError(f"Parent channel '{parent_channel}' not found")
-        channels = s2_channels
-        y_raw = (pd.to_numeric(tdf[parent_channel], errors="coerce").fillna(0.0) * parent_coeff).values.astype(float)
-        X_raw = tdf[channels].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    channels = selected_channels
+    y_raw = pd.to_numeric(tdf[dependent_variable_user_input], errors="coerce").fillna(0.0).values.astype(float)
+    X_raw = tdf[channels].apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
     best_alpha = float(manual_alpha) if manual_alpha else 1.0
 
@@ -1904,26 +1899,43 @@ def run_ridge_regression(
     )
     params_series = pd.Series([intercept_orig] + list(coef_orig), index=["const"] + channels)
     y_pred = ridge_final.predict(X_scaled)
+    residuals = y_raw - y_pred
     rmse = float(np.sqrt(mean_squared_error(y_raw, y_pred)))
     ss_tot = float(np.sum((y_raw - np.mean(y_raw)) ** 2))
-    r2 = (1.0 - float(np.sum((y_raw - y_pred) ** 2)) / ss_tot) if ss_tot else 0.0
+    r2 = (1.0 - float(np.sum(residuals ** 2)) / ss_tot) if ss_tot else 0.0
     n, k = len(y_raw), len(channels)
     adj_r2 = 1.0 - (1.0 - r2) * (n - 1) / (n - k - 1) if (n - k - 1) > 0 else float("nan")
 
-    if stage == 1:
-        coefficients = _build_coefficients_table(
-            params_series, tdf, gdf, gdf_prior, dependent_variable, dependent_variable_user_input
-        )
-        model_type = "Ridge Stage 1"
-    else:
-        coefficients = _build_stage2_coefficients_table(
-            params_series, tdf, gdf, parent_channel, parent_coeff, parent_impactable_sales, channels
-        )
-        model_type = "Ridge Stage 2"
+    # Full Ridge Statistical Inference
+    dof = max(1, n - k - 1)
+    sigma_sq = float(np.sum(residuals ** 2) / dof)
+    XtX = np.dot(X_scaled.T, X_scaled)
+    A_inv = np.linalg.pinv(XtX + best_alpha * np.eye(X_scaled.shape[1]))
+    cov_matrix = sigma_sq * np.dot(np.dot(A_inv, XtX), A_inv)
+    se_scaled = np.sqrt(np.maximum(1e-12, np.diag(cov_matrix)))
+
+    se_orig = np.zeros(len(params_series))
+    se_orig[0] = se_scaled[0]
+    for i, col in enumerate(channels):
+        std = float(scaler_final.scale_[i]) if scaler_final.scale_[i] != 0 else 1.0
+        w = float(prior_weights.get(col, 1.0)) if use_custom_penalties else 1.0
+        se_orig[i + 1] = float(se_scaled[i + 1]) / (std * w)
+
+    t_stats = params_series.values / np.maximum(1e-9, se_orig)
+    p_values = 2 * (1 - stats.norm.cdf(np.abs(t_stats)))
+    ci_lower = params_series.values - 1.96 * se_orig
+    ci_upper = params_series.values + 1.96 * se_orig
+
+    coefficients = _build_coefficients_table(
+        params_series, tdf, gdf, gdf_prior, dependent_variable, dependent_variable_user_input,
+        se_series=se_orig, t_stat_series=t_stats, p_val_series=p_values,
+        ci_lower_series=ci_lower, ci_upper_series=ci_upper
+    )
+    model_type = "Ridge Stage 1"
 
     ridge_summary = f"{model_type} Summary\n{'─' * 54}\nAlpha: {best_alpha} | R²: {r2:.4f} | Adj R²: {adj_r2:.4f} | RMSE: {rmse:,.2f}"
 
-    result = {
+    return {
         "model_type": model_type,
         "summary": ridge_summary,
         "coefficients": coefficients.to_dict(orient="records"),
@@ -1937,9 +1949,6 @@ def run_ridge_regression(
         "end_date": str(end_date),
         "params": {k: float(v) for k, v in params_series.items()},
     }
-    if stage == 2:
-        result["parent_channel"] = parent_channel
-    return result
 
 
 def build_combined_table(s1_coeff_df: pd.DataFrame, s2_coeff_df: pd.DataFrame, parent_channel: str) -> pd.DataFrame:
@@ -2040,16 +2049,38 @@ def create_response_curve(channel_name, impactable_sales_nation, beta_coeff, spe
     spend_values = list(range(start, stop + 1, step))
     rows = []
     prev_impactable = None
+    
+    first_step_mroi = 0.0
+    if len(spend_values) > 1 and step > 0:
+        if saturation_function == "log":
+            s1_imp = calibration_factor * beta_coeff * np.log(1 + (step / (num_time * num_geo))) * num_time * num_geo
+        else:
+            s1_imp = calibration_factor * beta_coeff * np.power(step / (num_time * num_geo), power_value) * num_time * num_geo
+        first_step_mroi = float((s1_imp * price) / step)
+
     for i, spend in enumerate(spend_values):
         if saturation_function == "log":
             impactable_geo_time = calibration_factor * beta_coeff * np.log(1 + (spend / (num_time * num_geo)))
         else:
             impactable_geo_time = calibration_factor * beta_coeff * np.power(spend / (num_time * num_geo), power_value)
+        
         impactable_nation = impactable_geo_time * num_time * num_geo
         impactable_nation_currency = impactable_nation * price
-        roi = impactable_nation_currency / spend if spend > 0 else 0
-        mroi = ((impactable_nation - prev_impactable) * price / step) if prev_impactable is not None and spend > 0 else 0
-        rows.append({"spend": spend, "impactable_geo_time": impactable_geo_time, "impactable_nation": impactable_nation, "impactable_nation_currency": impactable_nation_currency, "roi": roi, "mroi": mroi})
-        prev_impactable = impactable_nation
-    return pd.DataFrame(rows)
+        roi = impactable_nation_currency / spend if spend > 0 else first_step_mroi
+        
+        if prev_impactable is not None and spend > 0:
+            mroi = ((impactable_nation - prev_impactable) * price / step)
+        else:
+            mroi = first_step_mroi
 
+        rows.append({
+            "spend": spend,
+            "impactable_geo_time": impactable_geo_time,
+            "impactable_nation": impactable_nation,
+            "impactable_nation_currency": impactable_nation_currency,
+            "roi": roi,
+            "mroi": mroi
+        })
+        prev_impactable = impactable_nation
+
+    return pd.DataFrame(rows)

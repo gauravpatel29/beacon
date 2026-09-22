@@ -3,7 +3,7 @@ import toast from "react-hot-toast";
 import { useNavigate } from "react-router-dom";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  BarChart, Bar
+  BarChart, Bar, ScatterChart, Scatter
 } from "recharts";
 import {
   applyTransformations,
@@ -14,8 +14,7 @@ import {
   edaDetectOutliers,
   edaRemoveOutliers,
   v2ListArds,
-  v2GetCsv,
-  problemMessage
+  v2GetCsv
 } from "../services/api";
 import { useAppState } from "../context/AppContext";
 import { PageHeader, Card, Btn, Alert, Spinner, DataTable, Select } from "../components/UI";
@@ -27,6 +26,14 @@ const NORMALIZATION_OPTIONS = [
   { value: "zscore", label: "Z-Score (Standardized σ)" },
   { value: "iqr", label: "Robust / IQR Scaling" },
 ];
+
+const format1Dec = (val) => {
+  const num = parseFloat(val);
+  if (isNaN(num)) return val;
+  if (Math.abs(num) >= 1000000) return `${(num / 1000000).toFixed(1)}M`;
+  if (Math.abs(num) >= 1000) return `${(num / 1000).toFixed(1)}k`;
+  return num.toFixed(1);
+};
 
 function detectGrainUnit(dates = []) {
   if (!dates || dates.length < 2) return { grain: "Weekly", unit: "Weeks", singular: "Week" };
@@ -40,79 +47,7 @@ function detectGrainUnit(dates = []) {
   if (gapDays <= 2) return { grain: "Daily", unit: "Days", singular: "Day" };
   if (gapDays <= 12) return { grain: "Weekly", unit: "Weeks", singular: "Week" };
   if (gapDays <= 45) return { grain: "Monthly", unit: "Months", singular: "Month" };
-  if (gapDays <= 110) return { grain: "Quarterly", unit: "Quarters", singular: "Quarter" };
   return { grain: "Monthly", unit: "Months", singular: "Month" };
-}
-
-function getChannelGuidance(channelName, grainUnit = "Weeks") {
-  const l = channelName.toLowerCase();
-  const unit = grainUnit.toLowerCase();
-
-  if (l.includes("call") || l.includes("det") || l.includes("rep") || l.includes("f2f")) {
-    return {
-      tacticType: "Personal Promotion: Sales Rep In-Person Detailing",
-      adstockDecay: "0.50 – 0.70 (High Relationship Memory)",
-      adstockHorizon: `3 to 6 ${unit}`,
-      pureLag: `0 to 1 ${unit}`,
-      saturation: "Power (p ≈ 0.50) or Log (k ≈ 1.0)",
-      rationale: "In-person clinical discussions build lasting physician prescribing habits with carryover decay. Responsiveness saturates after repeated detailing calls.",
-      actionItem: `Set Adstock Decay to 0.60, Adstock Horizon to 4 ${unit}, Lag to 0, and Saturation to Log (k = 1.0).`
-    };
-  }
-  if (l.includes("speak") || l.includes("symp") || l.includes("conf") || l.includes("event") || l.includes("dinner")) {
-    return {
-      tacticType: "Personal Promotion: Peer-to-Peer Speaker Programs",
-      adstockDecay: "0.60 – 0.75 (Long Clinical Half-Life)",
-      adstockHorizon: `6 to 8 ${unit}`,
-      pureLag: `1 to 2 ${unit}`,
-      saturation: "Logarithmic: ln(1 + k·x) (k ≈ 1.0)",
-      rationale: "Key opinion leader symposia alter treatment protocol across subsequent patient visits.",
-      actionItem: `Set Adstock Decay to 0.70, Adstock Horizon to 6 ${unit}, Lag to 1 ${unit}, and Saturation to Log.`
-    };
-  }
-  if (l.includes("samp") || l.includes("voucher") || l.includes("copay")) {
-    return {
-      tacticType: "Personal Promotion: Physical Samples & Co-Pay Cards",
-      adstockDecay: "0.20 – 0.35 (Fast In-Clinic Trial)",
-      adstockHorizon: `1 to 2 ${unit}`,
-      pureLag: `0 ${unit} (Immediate)`,
-      saturation: "Power: x^p (p ≈ 0.60)",
-      rationale: "Samples generate immediate trial prescriptions with lower residual carryover than detailing.",
-      actionItem: `Set Adstock Decay to 0.25, Adstock Horizon to 2 ${unit}, Lag to 0, and Saturation to Power (p = 0.60).`
-    };
-  }
-  if (l.includes("rte") || l.includes("email") || l.includes("npp") || l.includes("portal") || l.includes("hcp_web")) {
-    return {
-      tacticType: "Non-Personal Promotion (NPP): Rep-Triggered Emails & Portals",
-      adstockDecay: "0.10 – 0.25 (Fast Transient Decay)",
-      adstockHorizon: `1 to 2 ${unit}`,
-      pureLag: `0 ${unit} (Immediate Action)`,
-      saturation: "Logarithmic (k ≈ 1.5 – 2.0)",
-      rationale: "Digital communications have short half-lives. High frequency causes unsubscribe fatigue.",
-      actionItem: `Set Adstock Decay to 0.15, Adstock Horizon to 1 ${unit}, Lag to 0, and Saturation to Log (k = 1.5).`
-    };
-  }
-  if (l.includes("tv") || l.includes("broad") || l.includes("video") || l.includes("ctv")) {
-    return {
-      tacticType: "DTC Media: Broadcast TV & Connected TV",
-      adstockDecay: "0.65 – 0.80 (Highest Awareness Carryover)",
-      adstockHorizon: `6 to 10 ${unit}`,
-      pureLag: `1 to 2 ${unit} (Appointment Lag)`,
-      saturation: "Logarithmic: ln(1 + k·x) (k ≈ 1.0)",
-      rationale: "Consumer TV builds long-term brand equity with lag between consumer viewing and visiting physician.",
-      actionItem: `Set Adstock Decay to 0.70, Adstock Horizon to 6 ${unit}, Lag to 1 ${unit}, and Saturation to Log.`
-    };
-  }
-
-  return {
-    tacticType: "General Marketing & Promotion Channel",
-    adstockDecay: "0.40 – 0.50 (Standard Benchmark)",
-    adstockHorizon: `2 to 4 ${unit}`,
-    pureLag: `0 to 1 ${unit}`,
-    saturation: "Logarithmic: ln(1 + k·x) or Power (p = 0.50)",
-    rationale: "Standard promotional channel balancing in-period impact with moderate memory decay.",
-    actionItem: `Set Adstock Decay to 0.50, Adstock Horizon to 2 ${unit}, Lag to 0, and Saturation to Log.`
-  };
 }
 
 function IngestionCategoryBox({ title, subtitle, columns, selected = [], onToggle, colorBadge }) {
@@ -204,7 +139,7 @@ function HeatmapGrid({ matrix, columns, threshold = 0.7, title = "Correlation Ma
                     <td
                       key={col}
                       style={style}
-                      title={`${row} vs ${col}: ${Number(val).toFixed(3)}`}
+                      title={`${row} vs ${col}: ${Number(val).toFixed(2)}`}
                       className="w-14 h-9 text-center font-mono transition-all"
                     >
                       {Number(val).toFixed(2)}
@@ -231,7 +166,6 @@ export default function DataTransformation() {
   const [savedSets, setSavedSets] = useState(() => state.savedTransformationSets || []);
   const [activeSetIndex, setActiveSetIndex] = useState(0);
 
-  // Dynamic Time Grain State
   const [detectedGrain, setDetectedGrain] = useState("Weekly");
   const [grainUnit, setGrainUnit] = useState("Weeks");
 
@@ -243,7 +177,7 @@ export default function DataTransformation() {
           id: a.filename,
           name: a.filename.replace(/\.csv$/i, ""),
           filename: a.filename,
-          grain: a.grain || (a.derived_from && a.derived_from.grain) || (a.filename.toLowerCase().includes("dma") ? "dma" : "hcp"),
+          grain: a.grain || (a.filename.toLowerCase().includes("dma") ? "dma" : "hcp"),
           rows: a.row_count,
           cols: (a.columns || []).length,
           columns: a.columns || [],
@@ -271,7 +205,6 @@ export default function DataTransformation() {
       .catch(() => {});
   }, [workflowId, selectedArdId]);
 
-  // Outlier Diagnostics State
   const [distCol, setDistCol] = useState("");
   const [histData, setHistData] = useState(null);
   const [customBinWidth, setCustomBinWidth] = useState("");
@@ -290,7 +223,6 @@ export default function DataTransformation() {
     }
   }, [activeCsv, selectedArdId]);
 
-  // Detect time grain automatically from active CSV
   useEffect(() => {
     if (!activeCsv) return;
     try {
@@ -302,7 +234,6 @@ export default function DataTransformation() {
     } catch (e) {}
   }, [activeCsv]);
 
-  // Column Categorization & State
   const [allCols, setAllCols] = useState([]);
   const [columnRolesMap, setColumnRolesMap] = useState(() => state.columnRoles || {});
 
@@ -324,13 +255,13 @@ export default function DataTransformation() {
       cols.forEach((c) => {
         if (!roles[c]) {
           const l = c.toLowerCase();
-          if (l.includes("sale") || l.includes("trx") || l.includes("nrx") || l.includes("crx") || l.includes("nbrx") || l.includes("kpi") || l.includes("revenue")) {
+          if (l.includes("sale") || l.includes("trx") || l.includes("nrx") || l.includes("kpi")) {
             roles[c] = "Dependent Variable";
-          } else if (l.includes("date") || l.includes("week") || l.includes("month") || l.includes("year") || l.includes("period")) {
+          } else if (l.includes("date") || l.includes("week") || l.includes("month") || l.includes("period")) {
             roles[c] = "Time Variable";
-          } else if (l.includes("npi") || l.includes("geo") || l.includes("id") || l.includes("dma") || l.includes("zip")) {
+          } else if (l.includes("npi") || l.includes("geo") || l.includes("id") || l.includes("dma")) {
             roles[c] = "Cross-sectional Variable";
-          } else if (l.includes("pop") || l.includes("universe") || l.includes("macro") || l.includes("base") || l.includes("trend") || l.includes("weight")) {
+          } else if (l.includes("pop") || l.includes("universe") || l.includes("base") || l.includes("weight")) {
             roles[c] = "Baseline Variables";
           } else {
             roles[c] = "Independent Promotions";
@@ -379,9 +310,7 @@ export default function DataTransformation() {
         }
         setOutlierResult(oRes);
       })
-      .catch(() => {
-        toast.error("Could not load distribution diagnostics");
-      })
+      .catch(() => toast.error("Could not load distribution diagnostics"))
       .finally(() => setDistLoading(false));
   };
 
@@ -418,7 +347,7 @@ export default function DataTransformation() {
       setActiveCsv(res.clean_csv);
       setField("granularCsvData", res.clean_csv);
       setField("filteredCsvData", res.clean_csv);
-      toast.success(`Excluded ${res.dropped_rows} outlier row(s)! ${res.remaining_rows.toLocaleString()} rows remaining.`);
+      toast.success(`Excluded ${res.dropped_rows} outlier row(s)!`);
     } catch (err) {
       toast.error("Failed to remove outliers");
     } finally {
@@ -431,7 +360,7 @@ export default function DataTransformation() {
     setActiveCsv(backupCsv);
     setField("granularCsvData", backupCsv);
     setField("filteredCsvData", backupCsv);
-    toast.success("Restored original dataset (outlier exclusions cleared)");
+    toast.success("Restored original dataset");
   };
 
   const crossCols = useMemo(() => allCols.filter((c) => columnRolesMap[c] === "Cross-sectional Variable"), [allCols, columnRolesMap]);
@@ -461,12 +390,8 @@ export default function DataTransformation() {
   const [selectedDerivedVars, setSelectedDerivedVars] = useState([]);
   const [derivedWeights, setDerivedWeights] = useState({});
 
-  const [infoModalOpen, setInfoModalOpen] = useState(false);
-  const [infoChannelName, setInfoChannelName] = useState("");
-
   const [transformConfig, setTransformConfig] = useState(() => state.transformationConfig || []);
 
-  // Initialize and synchronize Transformation Table
   useEffect(() => {
     setTransformConfig((prev) => {
       const existingMap = new Map(prev.map((r) => [r["Channel Name"], r]));
@@ -515,16 +440,8 @@ export default function DataTransformation() {
 
   const updateConfigRow = (channelName, field, value) => {
     setTransformConfig((prev) =>
-      prev.map((row) => {
-        if (row["Channel Name"] !== channelName) return row;
-        return { ...row, [field]: value };
-      })
+      prev.map((row) => (row["Channel Name"] === channelName ? { ...row, [field]: value } : row))
     );
-  };
-
-  const handleOpenInfo = (channelName) => {
-    setInfoChannelName(channelName);
-    setInfoModalOpen(true);
   };
 
   const handleAddDerivedVariable = () => {
@@ -532,10 +449,6 @@ export default function DataTransformation() {
     if (selectedDerivedVars.length < 2) return toast.error("Select at least 2 source variables.");
 
     const derivedName = newDerivedName.trim().toUpperCase();
-    if (allCols.includes(derivedName) || derivedVars.some((d) => d.name === derivedName)) {
-      return toast.error(`Variable "${derivedName}" already exists.`);
-    }
-
     const entry = {
       name: derivedName,
       operator: derivedOperator,
@@ -557,7 +470,6 @@ export default function DataTransformation() {
     toast.success(`Removed derived channel "${channelName}"`);
   };
 
-  // Pre-Transformation Correlation Matrix (Explicitly including Derived Variables)
   const [preCorrMatrix, setPreCorrMatrix] = useState(null);
   const [preCorrColumns, setPreCorrColumns] = useState([]);
 
@@ -578,17 +490,87 @@ export default function DataTransformation() {
         setPreCorrMatrix(cRes.matrix);
         setPreCorrColumns(cRes.columns);
       })
-      .catch((err) => {
-        console.error("Pre-transformation correlation error:", err);
-      });
+      .catch(() => {});
   }, [activeCsv, activeTransformableList, derivedVars]);
 
-  // Execution & Post-Transformation Matrix
+  // Scatter plot X and Y explorer
+  const [scatterX, setScatterX] = useState("");
+  const [scatterY, setScatterY] = useState("");
+
+  useEffect(() => {
+    if (activeTransformableList.length > 0 && !scatterX) {
+      setScatterX(activeTransformableList[0]);
+    }
+    if (selDependent.length > 0 && !scatterY) {
+      setScatterY(selDependent[0]);
+    } else if (allCols.length > 0 && !scatterY) {
+      setScatterY(allCols[0]);
+    }
+  }, [activeTransformableList, selDependent, allCols]);
+
+  // Generate Sampled Scatter Data for Pre vs Post Plotting
+  const rawScatterPoints = useMemo(() => {
+    if (!activeCsv || !scatterX || !scatterY) return [];
+    try {
+      const lines = activeCsv.trim().split("\n");
+      const headers = lines[0].split(",").map((h) => h.trim().replace(/^["']|["']$/g, ""));
+      const xIdx = headers.indexOf(scatterX);
+      const yIdx = headers.indexOf(scatterY);
+      if (xIdx === -1 || yIdx === -1) return [];
+
+      const points = [];
+      const sampleLimit = Math.min(lines.length - 1, 400);
+      const step = Math.max(1, Math.floor((lines.length - 1) / sampleLimit));
+
+      for (let i = 1; i < lines.length; i += step) {
+        const parts = lines[i].split(",");
+        const xv = parseFloat(parts[xIdx]);
+        const yv = parseFloat(parts[yIdx]);
+        if (!isNaN(xv) && !isNaN(yv)) {
+          points.push({ x: xv, y: yv });
+        }
+      }
+      return points;
+    } catch (e) {
+      return [];
+    }
+  }, [activeCsv, scatterX, scatterY]);
+
   const [setNameInput, setSetNameInput] = useState("HCP FINAL ARD");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [transCorrMatrix, setTransCorrMatrix] = useState(null);
   const [transCorrThreshold, setTransCorrThreshold] = useState(0.7);
+
+  const transScatterPoints = useMemo(() => {
+    const csvSource = result?.csv_data || state.transformedCsvData;
+    if (!csvSource || !scatterX || !scatterY) return [];
+    try {
+      const transName = `${scatterX}_transformed`;
+      const lines = csvSource.trim().split("\n");
+      const headers = lines[0].split(",").map((h) => h.trim().replace(/^["']|["']$/g, ""));
+      let xIdx = headers.indexOf(transName);
+      if (xIdx === -1) xIdx = headers.indexOf(scatterX);
+      const yIdx = headers.indexOf(scatterY);
+      if (xIdx === -1 || yIdx === -1) return [];
+
+      const points = [];
+      const sampleLimit = Math.min(lines.length - 1, 400);
+      const step = Math.max(1, Math.floor((lines.length - 1) / sampleLimit));
+
+      for (let i = 1; i < lines.length; i += step) {
+        const parts = lines[i].split(",");
+        const xv = parseFloat(parts[xIdx]);
+        const yv = parseFloat(parts[yIdx]);
+        if (!isNaN(xv) && !isNaN(yv)) {
+          points.push({ x: xv, y: yv });
+        }
+      }
+      return points;
+    } catch (e) {
+      return [];
+    }
+  }, [result, state.transformedCsvData, scatterX, scatterY]);
 
   const handleApplyTransformations = async () => {
     if (!activeCsv) return toast.error("No dataset available");
@@ -600,7 +582,7 @@ export default function DataTransformation() {
     if (!primaryDate || !primaryGeo || !primaryDep) {
       return toast.error("Select Time Variable, Cross-sectional Geo Variable, and Dependent Variable.");
     }
-    if (!transformConfig.length) return toast.error("Configure at least one channel in the transformation table.");
+    if (!transformConfig.length) return toast.error("Configure at least one channel.");
 
     setLoading(true);
     try {
@@ -628,12 +610,9 @@ export default function DataTransformation() {
       setField("dateColumn", primaryDate);
       setField("dependentVariable", primaryDep);
       setField("transformationConfig", transformConfig);
-      setField("addCarryover", false);
 
       const activeArd = ardList.find((a) => a.id === selectedArdId);
-      const isDma = (activeArd?.grain || "").toLowerCase().includes("dma") ||
-                    (selectedArdId || "").toLowerCase().includes("dma") ||
-                    setNameInput.toLowerCase().includes("dma");
+      const isDma = (activeArd?.grain || "").toLowerCase().includes("dma") || setNameInput.toLowerCase().includes("dma");
       const detectedModelGrain = isDma ? "DMA" : "HCP";
 
       const newVersion = {
@@ -653,12 +632,9 @@ export default function DataTransformation() {
         crossVars: selCrossSectional,
         promotions: selPromotions,
         baselineVars: selBaseline,
-        columnPromoTiers: state.columnPromoTiers || {},
         dateColumn: primaryDate,
         geoColumn: primaryGeo,
         dependentVariable: primaryDep,
-        addCarryover: false,
-        lockDepVar: lockDepVar,
       };
 
       const updatedSets = [newVersion, ...savedSets.filter((s) => s.name !== newVersion.name)];
@@ -676,9 +652,9 @@ export default function DataTransformation() {
           .catch(() => {});
       }
 
-      toast.success(`Transformation Dataset "${newVersion.name}" saved & ready for Modelling!`);
+      toast.success(`Transformation Dataset "${newVersion.name}" saved!`);
     } catch (err) {
-      toast.error(err.response?.data?.error || err.response?.data?.detail || "Transformation failed");
+      toast.error(err.response?.data?.error || "Transformation failed");
     } finally {
       setLoading(false);
     }
@@ -691,14 +667,10 @@ export default function DataTransformation() {
     setTransformConfig(targetSet.configs || []);
     setDerivedVars(targetSet.derivedVars || []);
     setSetNameInput(targetSet.name);
-    if (targetSet.lockDepVar !== undefined) setLockDepVar(targetSet.lockDepVar);
-    if (targetSet.resultData) {
-      setResult(targetSet.resultData);
-    }
+    if (targetSet.resultData) setResult(targetSet.resultData);
     toast.success(`Switched to "${targetSet.name}"`);
   };
 
-  // Preview & Single Channel Validation
   const [selectedValidationVar, setSelectedValidationVar] = useState("");
   const [validationData, setValidationData] = useState(null);
   const [validationLoading, setValidationLoading] = useState(false);
@@ -734,12 +706,8 @@ export default function DataTransformation() {
       derived_variables: derivedVars,
       pop_column: cfg["Population Column"] || primaryPop || undefined,
     })
-      .then((res) => {
-        setValidationData(res);
-      })
-      .catch((err) => {
-        console.error("Preview failed:", err);
-      })
+      .then((res) => setValidationData(res))
+      .catch(() => {})
       .finally(() => setValidationLoading(false));
   }, [selectedValidationVar, activeCsv, transformConfig, derivedVars, selDependent, selCrossSectional, selTime, selBaseline]);
 
@@ -794,15 +762,13 @@ export default function DataTransformation() {
               onChange={(e) => {
                 const val = e.target.value;
                 setDetectedGrain(val);
-                setGrainUnit(val === "Daily" ? "Days" : val === "Weekly" ? "Weeks" : val === "Monthly" ? "Months" : val === "Quarterly" ? "Quarters" : "Years");
+                setGrainUnit(val === "Daily" ? "Days" : val === "Weekly" ? "Weeks" : val === "Monthly" ? "Months" : "Quarters");
               }}
               className="w-full text-xs font-bold border-2 border-slate-300 rounded-xl px-3.5 py-2.5 bg-white text-slate-800 focus:outline-none"
             >
               <option value="Daily">Daily (Units: Days)</option>
               <option value="Weekly">Weekly (Units: Weeks)</option>
               <option value="Monthly">Monthly (Units: Months)</option>
-              <option value="Quarterly">Quarterly (Units: Quarters)</option>
-              <option value="Yearly">Yearly (Units: Years)</option>
             </select>
           </div>
 
@@ -832,17 +798,8 @@ export default function DataTransformation() {
 
       {/* Step 1: Outliers */}
       <Card title="Step 1: Outlier Diagnostics & Pre-Treatment">
-        <p className="text-xs text-slate-500 mb-4">
-          Inspect extreme values and outliers before applying feature engineering transforms. Outlier exclusion updates the working dataset immediately.
-        </p>
-
         <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-4">
-          <Select
-            label="Select Variable to Inspect:"
-            value={distCol}
-            onChange={setDistCol}
-            options={allCols}
-          />
+          <Select label="Select Variable to Inspect:" value={distCol} onChange={setDistCol} options={allCols} />
           <Select
             label="Detection Strategy:"
             value={outlierMethod}
@@ -856,28 +813,20 @@ export default function DataTransformation() {
           {outlierMethod === "percentile" ? (
             <>
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Bottom Tail Cutoff %:
-                </label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Bottom Tail Cutoff %:</label>
                 <input
                   type="number"
                   step="0.5"
-                  min="0.0"
-                  max="49.0"
                   value={lowerPercentile}
                   onChange={(e) => setLowerPercentile(e.target.value)}
                   className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white"
                 />
               </div>
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Top Tail Cutoff %:
-                </label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Top Tail Cutoff %:</label>
                 <input
                   type="number"
                   step="0.5"
-                  min="50.0"
-                  max="100.0"
                   value={upperPercentile}
                   onChange={(e) => setUpperPercentile(e.target.value)}
                   className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white"
@@ -886,14 +835,10 @@ export default function DataTransformation() {
             </>
           ) : (
             <div className="sm:col-span-2">
-              <label className="block text-xs font-bold text-slate-700 mb-1">
-                Z-Score Threshold (σ):
-              </label>
+              <label className="block text-xs font-bold text-slate-700 mb-1">Z-Score Threshold (σ):</label>
               <input
                 type="number"
                 step="0.5"
-                min="1.0"
-                max="10.0"
                 value={zScoreThreshold}
                 onChange={(e) => setZScoreThreshold(e.target.value)}
                 className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white"
@@ -910,7 +855,6 @@ export default function DataTransformation() {
             <input
               type="number"
               step="any"
-              min="0.001"
               placeholder="Bucket width"
               value={customBinWidth}
               onChange={(e) => setCustomBinWidth(e.target.value)}
@@ -952,34 +896,41 @@ export default function DataTransformation() {
             {histData && (
               <div className="bg-white p-3 rounded-xl border border-slate-200">
                 <span className="text-[11px] font-bold text-slate-600 block mb-2">Raw Distribution Histogram ({distCol})</span>
-                <ResponsiveContainer width="100%" height={200}>
-                  <BarChart data={histData.counts.map((c, i) => ({ bin: histData.bin_labels[i], count: c }))}>
+                <ResponsiveContainer width="100%" height={220}>
+                  <BarChart data={histData.counts.map((c, i) => {
+                    const edges = histData.bin_edges || [];
+                    const midVal = edges[i] !== undefined && edges[i + 1] !== undefined ? (edges[i] + edges[i + 1]) / 2 : i;
+                    return {
+                      binLabel: histData.bin_labels[i],
+                      midpoint: format1Dec(midVal),
+                      count: c
+                    };
+                  })}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                    <XAxis dataKey="bin" tick={{ fontSize: 9 }} interval={histData.counts.length > 20 ? 1 : 0} />
-                    <YAxis tick={{ fontSize: 11 }} />
-                    <Tooltip />
+                    <XAxis
+                      dataKey="midpoint"
+                      tick={{ fontSize: 9 }}
+                      angle={-35}
+                      textAnchor="end"
+                      height={40}
+                      interval={Math.max(0, Math.floor(histData.counts.length / 10))}
+                    />
+                    <YAxis tickFormatter={format1Dec} tick={{ fontSize: 10 }} />
+                    <Tooltip formatter={(v, _n, item) => [`${v} records`, `Range: ${item.payload.binLabel}`]} />
                     <Bar dataKey="count" fill="#001E96" radius={[4, 4, 0, 0]} name="Frequency" />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
             )}
 
-            {outlierResult.outlier_count > 0 ? (
-              <>
-                <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Flagged Outlier Records:</h4>
-                <DataTable data={outlierResult.preview_flagged_rows} />
-                <div className="flex items-center gap-3 pt-2">
-                  <Btn variant="danger" onClick={() => setOutlierModalOpen(true)} className="text-xs">
-                    Exclude {outlierResult.outlier_count} Outliers from Dataset
-                  </Btn>
-                  <Btn variant="outline" onClick={handleRestoreOriginalDataset} className="text-xs">
-                    ↺ Restore Original Dataset
-                  </Btn>
-                </div>
-              </>
-            ) : (
-              <div className="bg-emerald-50 border border-emerald-200 p-3 rounded-xl text-xs font-bold text-emerald-800">
-                ✅ No extreme outliers detected in {distCol} with current parameters.
+            {outlierResult.outlier_count > 0 && (
+              <div className="flex items-center gap-3 pt-2">
+                <Btn variant="danger" onClick={() => setOutlierModalOpen(true)} className="text-xs">
+                  Exclude {outlierResult.outlier_count} Outliers from Dataset
+                </Btn>
+                <Btn variant="outline" onClick={handleRestoreOriginalDataset} className="text-xs">
+                  ↺ Restore Original Dataset
+                </Btn>
               </div>
             )}
           </div>
@@ -989,70 +940,19 @@ export default function DataTransformation() {
       {/* Step 2: Roles */}
       <Card title="Step 2: Column Categorization & Variable Roles">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-4">
-          <IngestionCategoryBox
-            title="1. Time Variable"
-            subtitle="Dates, Weeks, Periods"
-            columns={timeCols}
-            selected={selTime}
-            onToggle={(c) => toggleCategorySelection(c, selTime, setSelTime)}
-            colorBadge="bg-blue-100 text-blue-800"
-          />
-
-          <IngestionCategoryBox
-            title="2. Cross-sectional Variable"
-            subtitle="HCP IDs, DMA, Zip, Region Keys"
-            columns={crossCols}
-            selected={selCrossSectional}
-            onToggle={(c) => toggleCategorySelection(c, selCrossSectional, setSelCrossSectional)}
-            colorBadge="bg-purple-100 text-purple-800"
-          />
-
-          <IngestionCategoryBox
-            title="3. Dependent Variable (KPI)"
-            subtitle="Sales, TRx, NRx, Revenue"
-            columns={depCols}
-            selected={selDependent}
-            onToggle={(c) => toggleCategorySelection(c, selDependent, setSelDependent)}
-            colorBadge="bg-red-100 text-red-800"
-          />
-
-          <IngestionCategoryBox
-            title="4. Independent Promotions"
-            subtitle="Calls, Details, Spend, Emails, Media"
-            columns={promoCols}
-            selected={selPromotions}
-            onToggle={(c) => toggleCategorySelection(c, selPromotions, setSelPromotions)}
-            colorBadge="bg-emerald-100 text-emerald-800"
-          />
-
-          <IngestionCategoryBox
-            title="5. Baseline Variables"
-            subtitle="Target Population, Macro, Universe"
-            columns={baseCols}
-            selected={selBaseline}
-            onToggle={(c) => toggleCategorySelection(c, selBaseline, setSelBaseline)}
-            colorBadge="bg-amber-100 text-amber-800"
-          />
-
+          <IngestionCategoryBox title="1. Time Variable" subtitle="Dates, Weeks, Periods" columns={timeCols} selected={selTime} onToggle={(c) => toggleCategorySelection(c, selTime, setSelTime)} colorBadge="bg-blue-100 text-blue-800" />
+          <IngestionCategoryBox title="2. Cross-sectional Variable" subtitle="HCP IDs, DMA, Zip Keys" columns={crossCols} selected={selCrossSectional} onToggle={(c) => toggleCategorySelection(c, selCrossSectional, setSelCrossSectional)} colorBadge="bg-purple-100 text-purple-800" />
+          <IngestionCategoryBox title="3. Dependent Variable (KPI)" subtitle="Sales, TRx, NRx, Revenue" columns={depCols} selected={selDependent} onToggle={(c) => toggleCategorySelection(c, selDependent, setSelDependent)} colorBadge="bg-red-100 text-red-800" />
+          <IngestionCategoryBox title="4. Independent Promotions" subtitle="Calls, Details, Spend, Emails" columns={promoCols} selected={selPromotions} onToggle={(c) => toggleCategorySelection(c, selPromotions, setSelPromotions)} colorBadge="bg-emerald-100 text-emerald-800" />
+          <IngestionCategoryBox title="5. Baseline Variables" subtitle="Target Population, Macro" columns={baseCols} selected={selBaseline} onToggle={(c) => toggleCategorySelection(c, selBaseline, setSelBaseline)} colorBadge="bg-amber-100 text-amber-800" />
           <div className="bg-slate-50 rounded-2xl border border-slate-200 p-4 flex flex-col justify-between">
             <div>
-              <span className="text-xs font-bold text-slate-800 uppercase tracking-wider block mb-2">
-                Sales KPI Lock Control
-              </span>
+              <span className="text-xs font-bold text-slate-800 uppercase tracking-wider block mb-2">Sales KPI Lock Control</span>
               <label className="flex items-start gap-2.5 text-xs font-bold text-slate-700 cursor-pointer p-3 bg-white rounded-xl border border-slate-200">
-                <input
-                  type="checkbox"
-                  checked={!lockDepVar}
-                  onChange={(e) => setLockDepVar(!e.target.checked)}
-                  className="accent-[#001E96] h-4 w-4 mt-0.5"
-                />
+                <input type="checkbox" checked={!lockDepVar} onChange={(e) => setLockDepVar(!e.target.checked)} className="accent-[#001E96] h-4 w-4 mt-0.5" />
                 <div>
                   <span>Unlock Dependent Variable (Sales KPI)</span>
-                  <span className="block text-[10px] font-normal text-slate-500 mt-0.5">
-                    {lockDepVar
-                      ? "🔒 Locked: Sales KPI is protected from transformation."
-                      : "🔓 Unlocked: Sales KPI is included in the table for transformation & correlation."}
-                  </span>
+                  <span className="block text-[10px] font-normal text-slate-500 mt-0.5">{lockDepVar ? "🔒 Locked" : "🔓 Unlocked"}</span>
                 </div>
               </label>
             </div>
@@ -1060,19 +960,12 @@ export default function DataTransformation() {
         </div>
       </Card>
 
-      {/* Step 3: Transformation Table with Dynamic Population Weight Column Selector */}
+      {/* Step 3: Transformation Table */}
       {transformConfig.length > 0 && (
         <Card title={`Step 3: Transformation Configuration Table (Units: ${grainUnit})`}>
           <div className="flex justify-between items-center mb-4 flex-wrap gap-3">
-            <p className="text-xs text-slate-500">
-              Configure Normalization, Adstock Decay, Adstock Horizon, and Pure Lags (aligned with <strong>{detectedGrain}</strong> grain).
-            </p>
-
-            <Btn
-              variant="outline"
-              onClick={() => setDerivedModalOpen(true)}
-              className="text-xs py-1.5 px-3"
-            >
+            <p className="text-xs text-slate-500">Configure Adstock Decay, Adstock Horizon, and Pure Lags.</p>
+            <Btn variant="outline" onClick={() => setDerivedModalOpen(true)} className="text-xs py-1.5 px-3">
               ➕ Add Derived Channel
             </Btn>
           </div>
@@ -1083,7 +976,7 @@ export default function DataTransformation() {
                 <tr>
                   <th className="px-3 py-3">Channel Name</th>
                   <th className="px-3 py-3">Category</th>
-                  <th className="px-3 py-3">Normalization &amp; Population Weight</th>
+                  <th className="px-3 py-3">Normalization</th>
                   <th className="px-3 py-3">Adstock Decay (λ)</th>
                   <th className="px-3 py-3">Adstock Horizon ({grainUnit})</th>
                   <th className="px-3 py-3">Lag Shift ({grainUnit})</th>
@@ -1093,267 +986,72 @@ export default function DataTransformation() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {transformConfig.map((row) => {
-                  const isPower = row["Saturation Function"] === "Power";
-                  const isLog = row["Saturation Function"] === "Log";
-                  const isDerived = row.is_derived;
-                  const isDep = row.is_dependent;
-
-                  return (
-                    <tr key={row["Channel Name"]} className={isDerived ? "bg-amber-50/40" : isDep ? "bg-red-50/30" : "hover:bg-slate-50"}>
-                      <td className="px-3 py-2.5 font-bold text-slate-800 whitespace-nowrap">
-                        <div className="flex items-center gap-1.5">
-                          {isDerived && <span className="text-amber-600 font-bold" title="Derived Variable">⚡</span>}
-                          {isDep && <span className="text-red-600 font-bold" title="Dependent Variable">🎯</span>}
-                          <span>{row["Channel Name"]}</span>
-                        </div>
-                        {isDerived && row.formula && (
-                          <span className="block text-[10px] text-amber-700 font-mono font-normal">
-                            = {row.formula}
-                          </span>
-                        )}
-                      </td>
-
-                      <td className="px-3 py-2">
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                          isDerived
-                            ? "bg-amber-100 text-amber-800"
-                            : isDep
-                            ? "bg-red-100 text-red-800"
-                            : "bg-emerald-100 text-emerald-800"
-                        }`}>
-                          {row["Grain"] || "Promo"}
-                        </span>
-                      </td>
-
-                      {/* Normalization & Population Weight Dropdown */}
-                      <td className="px-3 py-2 min-w-[210px]">
-                        <div className="space-y-1.5">
-                          <select
-                            value={row["Normalization"] || "none"}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              updateConfigRow(row["Channel Name"], "Normalization", val);
-                              if (val === "population" && !row["Population Column"]) {
-                                const defaultPop = baseCols[0] || allCols.find((c) => /pop|weight|universe/i.test(c)) || allCols[0] || "";
-                                updateConfigRow(row["Channel Name"], "Population Column", defaultPop);
-                              }
-                            }}
-                            className="border border-slate-200 rounded-lg px-2 py-1 text-xs bg-white focus:outline-none w-full"
-                          >
-                            {NORMALIZATION_OPTIONS.map((opt) => (
-                              <option key={opt.value} value={opt.value}>
-                                {opt.label}
-                              </option>
-                            ))}
-                          </select>
-
-                          {/* Dynamic Population Weight Column Dropdown from ARD */}
-                          {row["Normalization"] === "population" && (
-                            <div className="flex items-center gap-1.5 bg-amber-50/80 p-1.5 rounded-lg border border-amber-200">
-                              <span className="text-[10px] font-bold text-amber-900 whitespace-nowrap">
-                                ÷ Weight:
-                              </span>
-                              <select
-                                value={row["Population Column"] || baseCols[0] || ""}
-                                onChange={(e) => updateConfigRow(row["Channel Name"], "Population Column", e.target.value)}
-                                className="border border-amber-300 rounded px-1.5 py-0.5 text-[11px] font-bold bg-white text-amber-900 focus:outline-none w-full"
-                              >
-                                <option value="">Select ARD Column…</option>
-                                {allCols.filter((c) => c !== row["Channel Name"]).map((col) => (
-                                  <option key={col} value={col}>
-                                    {col} {baseCols.includes(col) ? "★" : ""}
-                                  </option>
-                                ))}
-                              </select>
-                            </div>
-                          )}
-                        </div>
-                      </td>
-
-                      <td className="px-3 py-2">
-                        <input
-                          type="number"
-                          step="0.05"
-                          min="0.0"
-                          max="0.99"
-                          value={row["Adstock"] ?? 0.5}
-                          onChange={(e) => updateConfigRow(row["Channel Name"], "Adstock", parseFloat(e.target.value) || 0)}
-                          className="w-20 border border-slate-200 rounded-lg px-2 py-1 text-xs font-mono"
-                        />
-                      </td>
-
-                      <td className="px-3 py-2">
-                        <div className="flex items-center gap-1.5">
-                          <input
-                            type="number"
-                            step="1"
-                            min="0"
-                            max="100"
-                            value={row["Adstock Horizon"] ?? 2}
-                            onChange={(e) => updateConfigRow(row["Channel Name"], "Adstock Horizon", parseInt(e.target.value, 10) || 0)}
-                            className="w-16 border-2 border-slate-200 rounded-lg px-2 py-1 text-xs font-bold text-brand-700 bg-white"
-                          />
-                          <span className="text-[11px] font-semibold text-slate-500">{grainUnit}</span>
-                        </div>
-                      </td>
-
-                      <td className="px-3 py-2">
-                        <div className="flex items-center gap-1.5">
-                          <input
-                            type="number"
-                            step="1"
-                            min="0"
-                            max="50"
-                            value={row["Lag"] ?? 0}
-                            onChange={(e) => updateConfigRow(row["Channel Name"], "Lag", parseInt(e.target.value, 10) || 0)}
-                            className="w-16 border-2 border-slate-200 rounded-lg px-2 py-1 text-xs font-bold text-slate-800 bg-white"
-                          />
-                          <span className="text-[11px] font-semibold text-slate-500">{grainUnit}</span>
-                        </div>
-                      </td>
-
-                      <td className="px-3 py-2">
-                        <select
-                          value={row["Saturation Function"] || "None"}
-                          onChange={(e) => updateConfigRow(row["Channel Name"], "Saturation Function", e.target.value === "None" ? null : e.target.value)}
-                          className="border border-slate-200 rounded-lg px-2 py-1 text-xs bg-white font-semibold"
-                        >
-                          <option value="None">None (Linear)</option>
-                          <option value="Log">Log: ln(1 + k·x)</option>
-                          <option value="Power">Power: x^p</option>
-                        </select>
-                      </td>
-
-                      <td className="px-3 py-2">
-                        {isPower ? (
-                          <div className="flex items-center gap-1">
-                            <span className="text-[10px] text-slate-400">p:</span>
-                            <input
-                              type="number"
-                              step="0.05"
-                              min="0.1"
-                              max="1.0"
-                              value={row["Power (k)"] ?? 0.5}
-                              onChange={(e) => updateConfigRow(row["Channel Name"], "Power (k)", parseFloat(e.target.value) || 0.5)}
-                              className="w-14 border border-slate-200 rounded-lg px-2 py-1 text-xs font-mono"
-                            />
-                          </div>
-                        ) : isLog ? (
-                          <div className="flex items-center gap-1">
-                            <span className="text-[10px] text-slate-400">k:</span>
-                            <input
-                              type="number"
-                              step="0.1"
-                              min="0.1"
-                              max="10.0"
-                              value={row["Log (k)"] ?? 1.0}
-                              onChange={(e) => updateConfigRow(row["Channel Name"], "Log (k)", parseFloat(e.target.value) || 1.0)}
-                              className="w-14 border border-slate-200 rounded-lg px-2 py-1 text-xs font-mono"
-                            />
-                          </div>
-                        ) : (
-                          <span className="text-slate-300 text-xs">—</span>
-                        )}
-                      </td>
-
-                      <td className="px-3 py-2 text-right whitespace-nowrap">
-                        <div className="flex items-center justify-end gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => handleOpenInfo(row["Channel Name"])}
-                            className="w-6 h-6 rounded-full bg-brand-50 hover:bg-brand-100 text-brand-700 font-black text-xs flex items-center justify-center border border-brand-200 transition-all shadow-sm"
-                            title="View benchmark parameter guidance"
-                          >
-                            ℹ️
-                          </button>
-                          {isDerived && (
-                            <button
-                              type="button"
-                              onClick={() => removeDerivedVariable(row["Channel Name"])}
-                              className="px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-[11px] font-bold text-red-600"
-                              title="Delete derived channel"
-                            >
-                              ✕
-                            </button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
+                {transformConfig.map((row) => (
+                  <tr key={row["Channel Name"]} className="hover:bg-slate-50">
+                    <td className="px-3 py-2.5 font-bold text-slate-800">{row["Channel Name"]}</td>
+                    <td className="px-3 py-2"><span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">{row["Grain"] || "Promo"}</span></td>
+                    <td className="px-3 py-2">
+                      <select value={row["Normalization"] || "none"} onChange={(e) => updateConfigRow(row["Channel Name"], "Normalization", e.target.value)} className="border border-slate-200 rounded-lg px-2 py-1 text-xs bg-white">
+                        {NORMALIZATION_OPTIONS.map((opt) => (<option key={opt.value} value={opt.value}>{opt.label}</option>))}
+                      </select>
+                    </td>
+                    <td className="px-3 py-2">
+                      <input type="number" step="0.05" min="0.0" max="0.99" value={row["Adstock"] ?? 0.5} onChange={(e) => updateConfigRow(row["Channel Name"], "Adstock", parseFloat(e.target.value) || 0)} className="w-20 border border-slate-200 rounded-lg px-2 py-1 text-xs" />
+                    </td>
+                    <td className="px-3 py-2">
+                      <input type="number" step="1" min="0" value={row["Adstock Horizon"] ?? 2} onChange={(e) => updateConfigRow(row["Channel Name"], "Adstock Horizon", parseInt(e.target.value, 10) || 0)} className="w-16 border-2 border-slate-200 rounded-lg px-2 py-1 text-xs font-bold text-brand-700" />
+                    </td>
+                    <td className="px-3 py-2">
+                      <input type="number" step="1" min="0" value={row["Lag"] ?? 0} onChange={(e) => updateConfigRow(row["Channel Name"], "Lag", parseInt(e.target.value, 10) || 0)} className="w-16 border-2 border-slate-200 rounded-lg px-2 py-1 text-xs font-bold" />
+                    </td>
+                    <td className="px-3 py-2">
+                      <select value={row["Saturation Function"] || "None"} onChange={(e) => updateConfigRow(row["Channel Name"], "Saturation Function", e.target.value === "None" ? null : e.target.value)} className="border border-slate-200 rounded-lg px-2 py-1 text-xs bg-white">
+                        <option value="None">None (Linear)</option>
+                        <option value="Log">Log: ln(1 + k·x)</option>
+                        <option value="Power">Power: x^p</option>
+                      </select>
+                    </td>
+                    <td className="px-3 py-2">
+                      {row["Saturation Function"] === "Power" ? (
+                        <input type="number" step="0.05" min="0.1" max="1.0" value={row["Power (k)"] ?? 0.5} onChange={(e) => updateConfigRow(row["Channel Name"], "Power (k)", parseFloat(e.target.value) || 0.5)} className="w-14 border rounded-lg px-2 py-1 text-xs font-mono" />
+                      ) : row["Saturation Function"] === "Log" ? (
+                        <input type="number" step="0.1" min="0.1" value={row["Log (k)"] ?? 1.0} onChange={(e) => updateConfigRow(row["Channel Name"], "Log (k)", parseFloat(e.target.value) || 1.0)} className="w-14 border rounded-lg px-2 py-1 text-xs font-mono" />
+                      ) : <span className="text-slate-300 text-xs">—</span>}
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      {row.is_derived && (
+                        <button type="button" onClick={() => removeDerivedVariable(row["Channel Name"])} className="text-red-500 font-bold px-1.5 py-0.5">✕</button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
 
           <div className="mt-6 pt-4 border-t border-slate-200 flex items-center justify-between flex-wrap gap-4">
             <div className="flex items-center gap-2">
-              <label className="text-xs font-bold text-slate-700">Transformation Dataset Name:</label>
-              <input
-                type="text"
-                value={setNameInput}
-                onChange={(e) => setSetNameInput(e.target.value)}
-                placeholder="e.g. HCP FINAL ARD"
-                className="text-xs font-bold border border-slate-200 rounded-lg px-3 py-2 bg-white w-64"
-              />
+              <label className="text-xs font-bold text-slate-700">Set Name:</label>
+              <input type="text" value={setNameInput} onChange={(e) => setSetNameInput(e.target.value)} className="text-xs font-bold border border-slate-200 rounded-lg px-3 py-2 bg-white w-64" />
             </div>
-
-            <Btn
-              onClick={handleApplyTransformations}
-              disabled={loading || !transformConfig.length}
-              className="py-2.5 px-6 font-bold uppercase tracking-wider text-xs"
-            >
-              {loading ? "Applying Transformations…" : "▶ Save & Apply Transformation Set"}
+            <Btn onClick={handleApplyTransformations} disabled={loading || !transformConfig.length} className="py-2.5 px-6 font-bold uppercase tracking-wider text-xs">
+              {loading ? "Applying…" : "▶ Save & Apply Transformation Set"}
             </Btn>
           </div>
         </Card>
       )}
 
-      {loading && <Spinner label="Applying transformations and computing diagnostics…" />}
-
       {/* Step 4: Correlation */}
       {(preCorrMatrix || transCorrMatrix) && (
         <Card title="Step 4: Pre vs. Post Transformation Correlation Comparison">
-          <p className="text-xs text-slate-500 mb-4">
-            Compare correlation structure before and after feature engineering (including derived arithmetic variables).
-          </p>
-
-          <div className="mb-4">
-            <label className="text-xs font-bold text-slate-700 block mb-1">
-              Highlight Threshold (|r| ≥ {transCorrThreshold}):
-            </label>
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.05"
-              value={transCorrThreshold}
-              onChange={(e) => setTransCorrThreshold(parseFloat(e.target.value))}
-              className="w-56"
-            />
-          </div>
-
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <div>
-              <HeatmapGrid
-                matrix={preCorrMatrix}
-                columns={preCorrColumns}
-                threshold={transCorrThreshold}
-                title="1. Pre-Transformation Matrix (Raw Features)"
-              />
-            </div>
-
+            <div><HeatmapGrid matrix={preCorrMatrix} columns={preCorrColumns} threshold={transCorrThreshold} title="1. Pre-Transformation Matrix (Raw Features)" /></div>
             <div>
               {transCorrMatrix ? (
-                <HeatmapGrid
-                  matrix={transCorrMatrix.matrix}
-                  columns={transCorrMatrix.columns}
-                  threshold={transCorrThreshold}
-                  title="2. Post-Transformation Matrix (Transformed Features)"
-                />
+                <HeatmapGrid matrix={transCorrMatrix.matrix} columns={transCorrMatrix.columns} threshold={transCorrThreshold} title="2. Post-Transformation Matrix (Transformed Features)" />
               ) : (
                 <div className="h-[280px] rounded-xl border border-dashed border-slate-200 flex items-center justify-center text-xs text-slate-400">
-                  Click "Save & Apply Transformation Set" above to generate post-transformation matrix.
+                  Save & Apply Transformation Set above to view post-transformation matrix.
                 </div>
               )}
             </div>
@@ -1361,206 +1059,102 @@ export default function DataTransformation() {
         </Card>
       )}
 
-      {/* Step 5: Dataset Preview */}
+      {/* Step 5: Restored Dataset Preview Table */}
       {result && (
         <Card title="Step 5: Transformed Dataset Preview">
           <div className="flex items-center justify-between mb-3">
             <span className="text-xs text-slate-500">
-              Showing first 10 rows of {(result.rows || 0).toLocaleString()} total rows ({result.cols} columns)
+              Showing first 15 rows of {(result.rows || 0).toLocaleString()} total rows ({result.cols} columns)
             </span>
           </div>
-          <DataTable data={result.preview} maxRows={10} />
+          <DataTable data={result.preview} maxRows={15} />
         </Card>
       )}
 
-      {/* Step 6: Single Validation */}
-      {transformConfig.length > 0 && (
-        <Card title="Step 6: Single Channel Validation & Response Shape">
-          <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 mb-6 flex items-center justify-between gap-4 flex-wrap">
-            <div className="flex-1 min-w-[280px]">
-              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
-                Select Variable to Inspect:
-              </label>
-              <select
-                value={selectedValidationVar}
-                onChange={(e) => setSelectedValidationVar(e.target.value)}
-                className="w-full text-xs font-bold border-2 border-brand-500 rounded-xl px-3.5 py-2.5 bg-white text-slate-800 focus:outline-none"
-              >
-                {transformConfig.map((c) => (
-                  <option key={c["Channel Name"]} value={c["Channel Name"]}>
-                    {c["Channel Name"]} ({c["Grain"] || "Promo"} • {c["Normalization"]} • {c["Saturation Function"] || "Linear"})
-                  </option>
-                ))}
-              </select>
-            </div>
+      {/* Step 6: Bivariate Scatter Explorer */}
+      <Card title="Step 6: Bivariate Relationship Explorer (Pre vs. Post Transformation)">
+        <p className="text-xs text-slate-500 mb-4">
+          Select an Independent Variable and Target KPI to visually inspect the scatter distribution before and after nonlinear adstock and saturation transformations.
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+          <Select label="Independent Variable (X-Axis):" value={scatterX} onChange={setScatterX} options={activeTransformableList} />
+          <Select label="Dependent Variable (Y-Axis):" value={scatterY} onChange={setScatterY} options={selDependent.length ? selDependent : allCols} />
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="bg-white p-4 rounded-xl border border-slate-200">
+            <span className="text-xs font-bold text-slate-700 block mb-2 uppercase">
+              1. Pre-Transformation (Raw: {scatterX} vs {scatterY})
+            </span>
+            <ResponsiveContainer width="100%" height={260}>
+              <ScatterChart margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                <XAxis type="number" dataKey="x" tickFormatter={format1Dec} tick={{ fontSize: 10 }} label={{ value: scatterX, position: "insideBottom", offset: -10, fontSize: 10 }} />
+                <YAxis type="number" dataKey="y" tickFormatter={format1Dec} tick={{ fontSize: 10 }} label={{ value: scatterY, angle: -90, position: "insideLeft", fontSize: 10 }} />
+                <Tooltip formatter={(v) => Number(v)?.toFixed(1)} />
+                <Scatter name="Raw Data" data={rawScatterPoints} fill="#64748B" opacity={0.6} />
+              </ScatterChart>
+            </ResponsiveContainer>
           </div>
 
-          {validationLoading && <Spinner label="Loading before/after validation metrics..." />}
+          <div className="bg-white p-4 rounded-xl border border-slate-200">
+            <span className="text-xs font-bold text-brand-700 block mb-2 uppercase">
+              2. Post-Transformation ({scatterX}_transformed vs {scatterY})
+            </span>
+            <ResponsiveContainer width="100%" height={260}>
+              <ScatterChart margin={{ top: 10, right: 20, bottom: 20, left: 10 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                <XAxis type="number" dataKey="x" tickFormatter={format1Dec} tick={{ fontSize: 10 }} label={{ value: `${scatterX}_transformed`, position: "insideBottom", offset: -10, fontSize: 10 }} />
+                <YAxis type="number" dataKey="y" tickFormatter={format1Dec} tick={{ fontSize: 10 }} label={{ value: scatterY, angle: -90, position: "insideLeft", fontSize: 10 }} />
+                <Tooltip formatter={(v) => Number(v)?.toFixed(1)} />
+                <Scatter name="Transformed Data" data={transScatterPoints} fill="#001E96" opacity={0.6} />
+              </ScatterChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      </Card>
 
-          {validationData && !validationLoading && (
-            <div className="space-y-6">
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-                <div className="lg:col-span-5 bg-slate-50 p-5 rounded-2xl border border-slate-200 space-y-3">
-                  <span className="text-xs font-bold text-brand-800 uppercase tracking-wider block border-b border-slate-200 pb-2">
-                    Transformation Details: {validationData.channel}
-                  </span>
-                  <div className="grid grid-cols-2 gap-2 text-xs">
-                    <div>
-                      <span className="text-slate-400 block text-[10px] uppercase font-bold">Normalization</span>
-                      <strong className="text-slate-800">
-                        {validationData.config?.Normalization === "population"
-                          ? `Population (÷ ${validationData.config?.pop_column || validationData.config?.["Population Column"] || "Weight"})`
-                          : (validationData.config?.Normalization || "None")}
-                      </strong>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 block text-[10px] uppercase font-bold">Adstock Decay</span>
-                      <strong className="text-slate-800">{validationData.config?.Adstock ?? 0.5}</strong>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 block text-[10px] uppercase font-bold">Adstock Horizon</span>
-                      <strong className="text-slate-800">{validationData.config?.Lags ?? 2} {grainUnit}</strong>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 block text-[10px] uppercase font-bold">Saturation Transform</span>
-                      <strong className="text-slate-800">{validationData.config?.["Saturation Function"] || "Linear"}</strong>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="lg:col-span-7">
-                  <span className="text-xs font-bold text-slate-700 uppercase tracking-wider block mb-2">
-                    Before vs. After Summary Statistics ({validationData.channel}):
-                  </span>
-                  <div className="overflow-x-auto rounded-xl border border-slate-200">
-                    <table className="w-full text-xs text-left bg-white">
-                      <thead className="bg-slate-50 border-b border-slate-200 font-bold text-slate-700">
-                        <tr>
-                          <th className="px-3 py-2.5">Metric</th>
-                          <th className="px-3 py-2.5">Original</th>
-                          <th className="px-3 py-2.5">Transformed</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 font-mono">
-                        {validationData.stats_table?.map((st, i) => (
-                          <tr key={i} className="hover:bg-slate-50">
-                            <td className="px-3 py-2 font-sans font-bold text-slate-700">{st.metric}</td>
-                            <td className="px-3 py-2 text-slate-600">{st.original?.toLocaleString()}</td>
-                            <td className="px-3 py-2 font-bold text-brand-700">{st.transformed?.toLocaleString()}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-
-              <div>
-                <span className="text-xs font-bold text-slate-700 uppercase tracking-wider block mb-2">
-                  Distribution Comparison:
-                </span>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div className="bg-white p-3 rounded-2xl border border-slate-200">
-                    <span className="text-[11px] font-bold text-slate-600 block mb-2">Original Distribution (Raw)</span>
-                    <ResponsiveContainer width="100%" height={200}>
-                      <BarChart data={validationData.raw_hist}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                        <XAxis dataKey="bin" tick={{ fontSize: 9 }} />
-                        <YAxis tick={{ fontSize: 10 }} />
-                        <Tooltip />
-                        <Bar dataKey="count" fill="#94A3B8" radius={[4, 4, 0, 0]} name="Frequency" />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-
-                  <div className="bg-white p-3 rounded-2xl border border-slate-200">
-                    <span className="text-[11px] font-bold text-brand-700 block mb-2">Transformed Distribution</span>
-                    <ResponsiveContainer width="100%" height={200}>
-                      <BarChart data={validationData.trans_hist}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                        <XAxis dataKey="bin" tick={{ fontSize: 9 }} />
-                        <YAxis tick={{ fontSize: 10 }} />
-                        <Tooltip />
-                        <Bar dataKey="count" fill="#001E96" radius={[4, 4, 0, 0]} name="Frequency" />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
-              </div>
-
-              {validationData.raw_curve?.binned_curve?.length > 0 && validationData.trans_curve?.binned_curve?.length > 0 && (
-                <div>
-                  <span className="text-xs font-bold text-slate-700 uppercase tracking-wider block mb-2">
-                    Relationship with KPI: Before vs. After Transformation
-                  </span>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="bg-white p-3 rounded-2xl border border-slate-200">
-                      <span className="text-[11px] font-bold text-slate-600 block mb-1">
-                        Before: {validationData.channel} vs {selDependent[0]} ({validationData.raw_curve.shape_indicator})
-                      </span>
-                      <ResponsiveContainer width="100%" height={220}>
-                        <LineChart data={validationData.raw_curve.binned_curve}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                          <XAxis dataKey="spend_x" tick={{ fontSize: 9 }} />
-                          <YAxis dataKey="response_y" tick={{ fontSize: 10 }} />
-                          <Tooltip />
-                          <Line type="linear" dataKey="response_y" stroke="#94A3B8" strokeWidth={2.5} dot={{ r: 3 }} name="Raw Response" />
-                        </LineChart>
-                      </ResponsiveContainer>
-                    </div>
-
-                    <div className="bg-white p-3 rounded-2xl border border-slate-200">
-                      <span className="text-[11px] font-bold text-brand-700 block mb-1">
-                        After: {validationData.channel} (Transformed) vs {selDependent[0]} ({validationData.trans_curve.shape_indicator})
-                      </span>
-                      <ResponsiveContainer width="100%" height={220}>
-                        <LineChart data={validationData.trans_curve.binned_curve}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                          <XAxis dataKey="spend_x" tick={{ fontSize: 9 }} />
-                          <YAxis dataKey="response_y" tick={{ fontSize: 10 }} />
-                          <Tooltip />
-                          <Line type="linear" dataKey="response_y" stroke="#001E96" strokeWidth={2.5} dot={{ r: 3 }} name="Transformed Response" />
-                        </LineChart>
-                      </ResponsiveContainer>
-                    </div>
-                  </div>
-                </div>
-              )}
+      {/* Step 7: Single Channel Validation */}
+      {transformConfig.length > 0 && validationData && (
+        <Card title="Step 7: Single Channel Validation & Response Shape">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="bg-white p-3 rounded-2xl border border-slate-200">
+              <span className="text-[11px] font-bold text-slate-600 block mb-1">Before: {validationData.channel} vs {selDependent[0]}</span>
+              <ResponsiveContainer width="100%" height={220}>
+                <LineChart data={validationData.raw_curve?.binned_curve}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                  <XAxis dataKey="spend_x" tickFormatter={format1Dec} tick={{ fontSize: 9 }} />
+                  <YAxis dataKey="response_y" tickFormatter={format1Dec} tick={{ fontSize: 10 }} />
+                  <Tooltip formatter={(v) => [format1Dec(v), "Raw Response"]} />
+                  <Line type="linear" dataKey="response_y" stroke="#94A3B8" strokeWidth={2.5} dot={{ r: 3 }} name="Raw Response" />
+                </LineChart>
+              </ResponsiveContainer>
             </div>
-          )}
+
+            <div className="bg-white p-3 rounded-2xl border border-slate-200">
+              <span className="text-[11px] font-bold text-brand-700 block mb-1">After: {validationData.channel} (Transformed) vs {selDependent[0]}</span>
+              <ResponsiveContainer width="100%" height={220}>
+                <LineChart data={validationData.trans_curve?.binned_curve}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                  <XAxis dataKey="spend_x" tickFormatter={format1Dec} tick={{ fontSize: 9 }} />
+                  <YAxis dataKey="response_y" tickFormatter={format1Dec} tick={{ fontSize: 10 }} />
+                  <Tooltip formatter={(v) => [format1Dec(v), "Transformed Response"]} />
+                  <Line type="linear" dataKey="response_y" stroke="#001E96" strokeWidth={2.5} dot={{ r: 3 }} name="Transformed Response" />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
         </Card>
       )}
 
       {/* Bottom Bar */}
       <div className="bg-slate-900 text-white rounded-2xl p-5 flex items-center justify-between flex-wrap gap-4 shadow-xl">
-        <div className="flex items-center gap-2">
-          <label className="text-xs font-bold text-slate-300">Set Name:</label>
-          <input
-            type="text"
-            value={setNameInput}
-            onChange={(e) => setSetNameInput(e.target.value)}
-            placeholder="e.g. HCP FINAL ARD"
-            className="text-xs font-bold border border-slate-700 rounded-lg px-3 py-1.5 bg-slate-800 text-white w-56"
-          />
-        </div>
-
-        <div className="flex items-center gap-3 flex-wrap">
-          <Btn
-            onClick={handleApplyTransformations}
-            disabled={loading || !transformConfig.length}
-            className="py-2.5 px-5 font-bold uppercase tracking-wider text-xs bg-brand-600 hover:bg-brand-700"
-          >
-            {loading ? "Saving Set…" : "💾 Save Transformation Set"}
-          </Btn>
-
-          <Btn
-            onClick={handleProceedToModelling}
-            disabled={!result && savedSets.length === 0}
-            className="py-2.5 px-5 font-bold uppercase tracking-wider text-xs bg-[#1ABC9C] hover:bg-[#16a085]"
-          >
-            Proceed to Modeling →
-          </Btn>
-        </div>
+        <Btn onClick={handleApplyTransformations} disabled={loading || !transformConfig.length} className="py-2.5 px-5 font-bold uppercase tracking-wider text-xs bg-brand-600 hover:bg-brand-700">
+          {loading ? "Saving…" : "💾 Save Transformation Set"}
+        </Btn>
+        <Btn onClick={handleProceedToModelling} disabled={!result && savedSets.length === 0} className="py-2.5 px-5 font-bold uppercase tracking-wider text-xs bg-[#1ABC9C] hover:bg-[#16a085]">
+          Proceed to Modeling →
+        </Btn>
       </div>
 
       {/* Outlier Modal */}
@@ -1568,85 +1162,10 @@ export default function DataTransformation() {
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4">
             <h3 className="text-lg font-bold text-slate-800">Confirm Outlier Exclusion</h3>
-            <p className="text-xs text-slate-600">
-              Excluding <strong>{outlierResult?.outlier_count} rows</strong> with extreme values in <code>{distCol}</code> using {outlierResult?.method}.
-            </p>
+            <p className="text-xs text-slate-600">Excluding <strong>{outlierResult?.outlier_count} rows</strong> with extreme values in <code>{distCol}</code>.</p>
             <div className="flex justify-end gap-2 pt-2">
               <Btn variant="secondary" onClick={() => setOutlierModalOpen(false)}>Cancel</Btn>
               <Btn variant="danger" onClick={handleConfirmRemoveOutliers}>Confirm & Exclude Rows</Btn>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Guidance Modal */}
-      {infoModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-xl w-full p-6 shadow-2xl space-y-4">
-            <div className="flex justify-between items-center border-b border-slate-100 pb-3">
-              <div className="flex items-center gap-2">
-                <span className="text-xl">🤖</span>
-                <div>
-                  <h3 className="text-base font-black text-slate-800">
-                    Transformation Guidance: {infoChannelName}
-                  </h3>
-                  <p className="text-xs text-slate-400">Benchmark Parameter Recommendations ({grainUnit})</p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setInfoModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 font-bold p-1 text-sm"
-              >
-                ✕
-              </button>
-            </div>
-
-            {(() => {
-              const guide = getChannelGuidance(infoChannelName, grainUnit);
-              return (
-                <div className="space-y-4 text-xs">
-                  <div className="p-3 bg-brand-50 border border-brand-100 rounded-xl space-y-1">
-                    <span className="font-bold text-brand-900 block">Classified Channel Archetype:</span>
-                    <span className="text-brand-700 font-semibold">{guide.tacticType}</span>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
-                      <span className="text-slate-400 font-bold uppercase text-[10px] block">Recommended Adstock Decay</span>
-                      <strong className="text-slate-800 text-sm">{guide.adstockDecay}</strong>
-                    </div>
-                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
-                      <span className="text-slate-400 font-bold uppercase text-[10px] block">Adstock Horizon</span>
-                      <strong className="text-slate-800 text-sm">{guide.adstockHorizon}</strong>
-                    </div>
-                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
-                      <span className="text-slate-400 font-bold uppercase text-[10px] block">Pure Delay Lag</span>
-                      <strong className="text-slate-800 text-sm">{guide.pureLag}</strong>
-                    </div>
-                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
-                      <span className="text-slate-400 font-bold uppercase text-[10px] block">Saturation Shape</span>
-                      <strong className="text-slate-800 text-sm">{guide.saturation}</strong>
-                    </div>
-                  </div>
-
-                  <div className="space-y-1.5 p-3 bg-slate-50 border border-slate-200 rounded-xl">
-                    <span className="font-bold text-slate-800 block">Behavioral Rationale:</span>
-                    <p className="text-slate-600 leading-relaxed">{guide.rationale}</p>
-                  </div>
-
-                  <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-900">
-                    <span className="font-bold block mb-0.5">Recommended Table Setting:</span>
-                    <span>{guide.actionItem}</span>
-                  </div>
-                </div>
-              );
-            })()}
-
-            <div className="flex justify-end pt-2 border-t border-slate-100">
-              <Btn onClick={() => setInfoModalOpen(false)}>
-                Got it, Close
-              </Btn>
             </div>
           </div>
         </div>
@@ -1656,82 +1175,27 @@ export default function DataTransformation() {
       {derivedModalOpen && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4">
-            <div className="flex justify-between items-center border-b border-slate-100 pb-3">
-              <h3 className="text-base font-black text-slate-800">Create Arithmetic Derived Channel</h3>
-              <button
-                type="button"
-                onClick={() => setDerivedModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 font-bold"
-              >
-                ✕
-              </button>
+            <h3 className="text-base font-black text-slate-800">Create Arithmetic Derived Channel</h3>
+            <input type="text" placeholder="e.g. TOTAL_PERSONAL_PROMO" value={newDerivedName} onChange={(e) => setNewDerivedName(e.target.value)} className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white" />
+            <select value={derivedOperator} onChange={(e) => setDerivedOperator(e.target.value)} className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white">
+              <option value="+">Addition (+)</option>
+              <option value="-">Subtraction (-)</option>
+              <option value="*">Multiplication (*)</option>
+              <option value="/">Division (/)</option>
+            </select>
+            <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto p-2 border border-slate-200 rounded-xl">
+              {allCols.map((v) => {
+                const isSel = selectedDerivedVars.includes(v);
+                return (
+                  <button key={v} type="button" onClick={() => setSelectedDerivedVars(isSel ? selectedDerivedVars.filter((x) => x !== v) : [...selectedDerivedVars, v])} className={`px-2.5 py-1 rounded-full text-xs font-bold transition-all ${isSel ? "bg-brand-600 text-white" : "bg-slate-100 text-slate-600"}`}>
+                    {v}
+                  </button>
+                );
+              })}
             </div>
-
-            <div className="space-y-3">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Derived Channel Name:</label>
-                <input
-                  type="text"
-                  placeholder="e.g. TOTAL_PERSONAL_PROMO"
-                  value={newDerivedName}
-                  onChange={(e) => setNewDerivedName(e.target.value)}
-                  className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Operator:</label>
-                <select
-                  value={derivedOperator}
-                  onChange={(e) => setDerivedOperator(e.target.value)}
-                  className="w-full text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white"
-                >
-                  <option value="+">Addition (+)</option>
-                  <option value="-">Subtraction (-)</option>
-                  <option value="*">Multiplication (*)</option>
-                  <option value="/">Division (/)</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Select Source Variables:
-                </label>
-                <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto p-2 border border-slate-200 rounded-xl">
-                  {allCols.map((v) => {
-                    const isSel = selectedDerivedVars.includes(v);
-                    return (
-                      <button
-                        key={v}
-                        type="button"
-                        onClick={() => {
-                          if (isSel) {
-                            setSelectedDerivedVars(selectedDerivedVars.filter((x) => x !== v));
-                          } else {
-                            setSelectedDerivedVars([...selectedDerivedVars, v]);
-                          }
-                        }}
-                        className={`px-2.5 py-1 rounded-full text-xs font-bold transition-all ${
-                          isSel
-                            ? "bg-brand-600 text-white"
-                            : "bg-slate-100 text-slate-600 hover:bg-slate-200"
-                        }`}
-                      >
-                        {v}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-
-            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
-              <Btn variant="secondary" onClick={() => setDerivedModalOpen(false)}>
-                Cancel
-              </Btn>
-              <Btn onClick={handleAddDerivedVariable}>
-                Save & Add to Table
-              </Btn>
+            <div className="flex justify-end gap-2 pt-2">
+              <Btn variant="secondary" onClick={() => setDerivedModalOpen(false)}>Cancel</Btn>
+              <Btn onClick={handleAddDerivedVariable}>Save & Add to Table</Btn>
             </div>
           </div>
         </div>
