@@ -132,7 +132,13 @@ const DATE_FORMATS = [
   { value: '%d/%m/%Y', label: 'DD/MM/YYYY (24/05/2026)' },
   { value: '%m/%d/%Y', label: 'MM/DD/YYYY (05/24/2026)' },
   { value: '%Y-%m-%d', label: 'YYYY-MM-DD (2026-05-24)' },
+  // For a column that has no day in it. Rewriting "2023-01" as "01/01/2023"
+  // invents a day the file never had.
+  { value: '%Y-%m', label: 'YYYY-MM (2026-05) - month grain' },
 ];
+
+/** A source format with no day in it, so its target must not invent one. */
+const isMonthGrainFormat = (fmt) => /^%Y[-/]%m$/.test(fmt || '');
 
 
 // Granularity left this screen for Data Stitching, where it belongs: a rollup
@@ -1308,7 +1314,11 @@ function DataIngestion() {
           // needs it - a file whose dates are all day <= 12 showed no date
           // options at all.
           dateConfigs: profile.filter((p) => p.suggested_date_from)
-            .map((p) => ({ col: p.column, format: '%Y-%m-%d' })),
+            .map((p) => ({
+              col: p.column,
+              // A month-grain column keeps its grain; everything else lands on ISO.
+              format: isMonthGrainFormat(p.suggested_date_from) ? '%Y-%m' : '%Y-%m-%d',
+            })),
           dateSourceFormats: Object.fromEntries(profile.filter((p) => p.suggested_date_from)
             .map((p) => [p.column, p.suggested_date_from])),
           // The Filter tab edits one column at a time (`activeColumn`) but keeps a
@@ -1422,11 +1432,13 @@ function DataIngestion() {
     // Date by hand still produces a usable conversion.
     const dateSourceFormats = { ...(file.dateSourceFormats || {}) };
     if (type === 'date' && !dateConfigs.find((d) => d.col === col)) {
-      dateConfigs = [...dateConfigs, { col, format: '%d/%m/%Y' }];
       const detected = (file.profile || []).find((p) => p.column === col);
-      if (detected?.suggested_date_from) {
-        dateSourceFormats[col] = detected.suggested_date_from;
-      }
+      const source = detected?.suggested_date_from;
+      dateConfigs = [...dateConfigs, {
+        col,
+        format: isMonthGrainFormat(source) ? '%Y-%m' : '%d/%m/%Y',
+      }];
+      if (source) dateSourceFormats[col] = source;
     } else if (type !== 'date') {
       dateConfigs = dateConfigs.filter((d) => d.col !== col);
       delete dateSourceFormats[col];

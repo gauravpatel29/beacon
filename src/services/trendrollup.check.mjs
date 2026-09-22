@@ -68,6 +68,28 @@ eq('April holds both of its rows', byMonth.points[1].v, 8);
 eq('and they come out in date order, not text order',
    byMonth.points.map((p) => p.date), [...byMonth.points.map((p) => p.date)].sort());
 
+console.log('\n3b. a year-month period column');
+// How a monthly file usually stores its period: "2023-01", one row per month.
+// The engine reads it as the first of that month - granularity detection
+// reported Monthly on exactly these files - but `toIsoDate` rejected it, so
+// every row counted as an unparseable date and the chart drew nothing while
+// the data behind it was fine.
+const ym = [
+  { m: '2023-01', v: 10 }, { m: '2023-01', v: 5 },
+  { m: '2023-02', v: 20 }, { m: '2023-03', v: 30 },
+];
+const byYm = aggregateTrend(ym, 'm', ['v'], 'month', true);
+eq('every month is a point', byYm.points.map((p) => p.date), ['2023-01', '2023-02', '2023-03']);
+eq('and rows in the same month are summed', byYm.points[0].v, 15);
+eq('none of it is counted unparseable', byYm.unparseable, 0);
+// Weekly bucketing of a monthly column lands on the Monday of the 1st.
+eq('it also buckets weekly without loss',
+   aggregateTrend(ym, 'm', ['v'], 'week', true).unparseable, 0);
+// A bare year is an integer column far more often than a date; reading it as
+// one would put a metric on the time axis.
+eq('a bare year is still rejected',
+   aggregateTrend([{ m: '2023', v: 1 }], 'm', ['v'], 'month', true).unparseable, 1);
+
 console.log('\n4. the awkward rows');
 const messy = [
   { d: '2026-01-05', v: '3' },      // numeric text

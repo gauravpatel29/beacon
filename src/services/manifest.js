@@ -57,11 +57,31 @@ export function renamedName(file, col) {
   return to && to !== col ? to : col;
 }
 
-/** Accepts DD/MM/YYYY or YYYY-MM-DD. Returns ISO, or undefined if unparseable. */
+/**
+ * Accepts YYYY-MM-DD, DD/MM/YYYY and YYYY-MM. Returns ISO, or undefined.
+ *
+ * `YYYY-MM` is how a monthly file usually stores its period - "2023-01", one
+ * row per month - and the engine reads it happily: pandas parses it as the
+ * first of that month, which is why granularity detection reported Monthly on
+ * exactly the files this used to reject. Without it here, every row of such a
+ * file was counted as an unparseable date and the trend chart drew nothing at
+ * all while the data behind it was fine.
+ *
+ * A bare year is deliberately NOT accepted: "2023" is far more often an
+ * integer column than a date, and reading it as one would put a metric on the
+ * time axis.
+ */
 export function toIsoDate(text) {
   const s = (text || '').trim();
   if (!s) return null;
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // Year-month, with either separator: the first of the month, as the engine
+  // reads it.
+  const ym = s.match(/^(\d{4})[-/](\d{1,2})$/);
+  if (ym) {
+    const [, y, mo] = ym;
+    return `${y}-${mo.padStart(2, '0')}-01`;
+  }
   const m = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
   if (!m) return undefined;
   const [, d, mo, y] = m;
