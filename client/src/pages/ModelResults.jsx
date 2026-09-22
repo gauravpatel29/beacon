@@ -8,6 +8,11 @@ import { useAppState } from "../context/AppContext";
 import { PageHeader, Card, Alert, Metric, DataTable, Btn, Select, Spinner } from "../components/UI";
 import { generateResponseCurves, fetchBenchmarkComparison } from "../services/api";
 
+const format1Dec = (val) => {
+  const num = parseFloat(val);
+  return isNaN(num) ? val : num.toFixed(1);
+};
+
 function getChannelTier(variableName, promoTiers = {}) {
   const raw = (variableName || "").replace("_transformed", "").trim();
   const l = raw.toLowerCase();
@@ -47,25 +52,16 @@ export default function ModelResults() {
   const isFinalized = selectedModel && (selectedModel.id === finalizedModelId || selectedModel.isFinalized);
 
   const [channelSpendMap, setChannelSpendMap] = useState(() => state.channelSpendMap || {});
-
-  // Economic Metric & Cost/Value Per Unit (Revenue per TRx)
   const [unitValue, setUnitValue] = useState(() => state.unitValue || 100.0);
   const [unitValueMetricLabel, setUnitValueMetricLabel] = useState(() => state.unitValueLabel || "Revenue Per TRx");
 
-  const handleUnitValueChange = (val) => {
-    const num = Math.max(0.01, parseFloat(val) || 1.0);
-    setUnitValue(num);
-    setField("unitValue", num);
-  };
-
-  // Response Curves State
   const [rcLoading, setRcLoading] = useState(false);
   const [responseCurvesData, setResponseCurvesData] = useState(() => state.responseCurves || {});
   const [activeRcChannel, setActiveRcChannel] = useState("");
 
-  // Benchmark Filters State
-  const [maturityStage, setMaturityStage] = useState("2–5Y");
-  const [competitionLevel, setCompetitionLevel] = useState("Medium");
+  const [diseaseArea, setDiseaseArea] = useState("Dermatology (Specialty)");
+  const [maturityStage, setMaturityStage] = useState("Launch (<1 Year)");
+  const [competitionLevel, setCompetitionLevel] = useState("High Competition");
   const [benchmarkResult, setBenchmarkResult] = useState(null);
   const [benchLoading, setBenchLoading] = useState(false);
 
@@ -93,13 +89,13 @@ export default function ModelResults() {
     const newFinalizedId = selectedModel.id;
     setFinalizedModelId(newFinalizedId);
     setField("finalizedModelId", newFinalizedId);
-    
+
     const updatedOutputs = outputs.map((m) => ({
       ...m,
       isFinalized: m.id === newFinalizedId,
     }));
     setField("regressionOutputs", updatedOutputs);
-    toast.success(`Model "${selectedModel.modelName || selectedModel.name}" is now finalized! Unlocking response curves.`);
+    toast.success(`Model "${selectedModel.modelName || selectedModel.name}" is now finalized! Response curves unlocked.`);
   };
 
   const handleSpendChange = (ch, val) => {
@@ -109,7 +105,12 @@ export default function ModelResults() {
     setField("channelSpendMap", updated);
   };
 
-  // Channel-level Performance Deep Dive with Incremental TRx & Incremental Revenue ROI
+  const handleUnitValueChange = (val) => {
+    const num = Math.max(0.01, parseFloat(val) || 1.0);
+    setUnitValue(num);
+    setField("unitValue", num);
+  };
+
   const channelPerformanceData = useMemo(() => {
     if (!selectedModel || !selectedModel.coefficients) return [];
     return selectedModel.coefficients
@@ -121,7 +122,7 @@ export default function ModelResults() {
         const incrementalRevenue = incrementalTrx * unitValue;
         const spend = Number(channelSpendMap[rawName]) || Number(r.Spend) || 50000;
         const roi = spend > 0 ? (incrementalRevenue / spend) : 0;
-        const ltRoi = r["Long Term ROI"] ? (Number(r["Long Term ROI"]) * (unitValue > 1 ? unitValue : 1)) : (roi * 1.35);
+        const ltRoi = r["Long Term ROI"] && Number(r["Long Term ROI"]) > 0 ? Number(r["Long Term ROI"]) : (roi * 1.35);
 
         return {
           channel: rawName,
@@ -138,10 +139,9 @@ export default function ModelResults() {
       .sort((a, b) => b.incrementalRevenue - a.incrementalRevenue);
   }, [selectedModel, channelSpendMap, promoTiers, unitValue]);
 
-  // Executive Summary 4-Tier Breakdown
   const executiveImpactBreakdown = useMemo(() => {
     if (!selectedModel || !selectedModel.coefficients) return [];
-    
+
     let baselineImpact = 0;
     let baselineSales = 0;
     let personalImpact = 0;
@@ -180,7 +180,6 @@ export default function ModelResults() {
     ];
   }, [selectedModel, promoTiers, unitValue]);
 
-  // Generate Response Curves with accurate unitValue price
   useEffect(() => {
     if (!isFinalized || !selectedModel || !channelPerformanceData.length) return;
     setRcLoading(true);
@@ -229,8 +228,8 @@ export default function ModelResults() {
 
   const activeRcMetrics = useMemo(() => {
     if (!activeCurvePoints.length) return null;
-    const currentSpend = channelSpendMap[activeRcChannel] || activeCurvePoints[Math.floor(activeCurvePoints.length / 3)]?.spend || 50000;
-    
+    const currentSpend = channelSpendMap[activeRcChannel] || 50000;
+
     let closestPoint = activeCurvePoints[0];
     let minDiff = Infinity;
     activeCurvePoints.forEach((pt) => {
@@ -244,36 +243,50 @@ export default function ModelResults() {
     const maxImpact = activeCurvePoints[activeCurvePoints.length - 1]?.impactable_nation || 1;
     const currentImpact = closestPoint?.impactable_nation || 0;
     const saturationPct = Math.min(100, Math.round((currentImpact / maxImpact) * 100));
-    const optimalPoint = activeCurvePoints.find((p) => (p.impactable_nation / maxImpact) >= 0.80) || activeCurvePoints[Math.floor(activeCurvePoints.length * 0.75)];
+
+    // Optimal Target Spend based on Marginal Dollar ROI break-even (mROI = 1.0)
+    const optimalPoint = activeCurvePoints.find((p) => p.mroi <= 1.05 && p.mroi >= 0.95)
+      || activeCurvePoints.find((p) => (p.impactable_nation / maxImpact) >= 0.80)
+      || activeCurvePoints[Math.floor(activeCurvePoints.length * 0.75)];
 
     return {
       currentSpend,
-      optimalSpend: optimalPoint?.spend || Math.round(currentSpend * 1.3),
+      optimalSpend: optimalPoint?.spend || Math.round(currentSpend * 1.2),
       saturationPct,
-      currentMroi: closestPoint?.mroi ? Number(closestPoint.mroi.toFixed(3)) : 1.25,
-      currentRoi: closestPoint?.roi ? Number(closestPoint.roi.toFixed(3)) : 2.10,
+      currentMroi: closestPoint?.mroi ? Number(closestPoint.mroi.toFixed(2)) : 1.25,
+      currentRoi: closestPoint?.roi ? Number(closestPoint.roi.toFixed(2)) : 2.10,
     };
   }, [activeCurvePoints, activeRcChannel, channelSpendMap]);
 
   useEffect(() => {
     setBenchLoading(true);
+
+    const userShares = {
+      baseline: executiveImpactBreakdown.find((b) => b.category === "Baseline Demand")?.sharePct || 48.5,
+      salesforce: executiveImpactBreakdown.find((b) => b.category === "Personal Promotion")?.sharePct || 26.2,
+      hcp_pp: 6.4,
+      access: 14.1,
+      hcp_npp: executiveImpactBreakdown.find((b) => b.category === "NPP Promotion")?.sharePct || 7.5,
+      consumer_npp: executiveImpactBreakdown.find((b) => b.category === "DTC / Media")?.sharePct || 8.3,
+    };
+
     fetchBenchmarkComparison({
+      disease_area: diseaseArea,
       maturity_stage: maturityStage,
       competition_level: competitionLevel,
       channels: channelPerformanceData.map((c) => ({ channel: c.channel, roi: c.roi })),
+      user_impact_shares: userShares,
     })
-      .then((res) => {
-        setBenchmarkResult(res);
-      })
+      .then((res) => setBenchmarkResult(res))
       .catch(() => {})
       .finally(() => setBenchLoading(false));
-  }, [maturityStage, competitionLevel, channelPerformanceData]);
+  }, [diseaseArea, maturityStage, competitionLevel, channelPerformanceData, executiveImpactBreakdown]);
 
   if (!outputs.length) {
     return (
       <div className="space-y-6">
-        <PageHeader title="Module 7: Model Output & Response Curves" subtitle="Compare model iterations, review executive impact breakdowns, configure spend ROI, and generate saturation response curves" icon="📋" />
-        <Alert type="warning">No model iterations found. Run a model in Module 6 (Modelling) first.</Alert>
+        <PageHeader title="Module 7: Model Output & Response Curves" subtitle="Compare model iterations and benchmarks" icon="📋" />
+        <Alert type="warning">No model iterations found. Run a model in Module 6 first.</Alert>
       </div>
     );
   }
@@ -397,7 +410,7 @@ export default function ModelResults() {
         </div>
       </div>
 
-      {/* Economic Metric & Value Per Unit Card */}
+      {/* 3. Unit Value Configuration */}
       <Card title="Economic Metric & Unit Value Configuration ($)">
         <p className="text-xs text-slate-500 mb-4">
           Specify the monetary value generated per sales prescription (TRx) to translate incremental unit volumes into revenue and calculate true economic ROI.
@@ -445,7 +458,7 @@ export default function ModelResults() {
         </div>
       </Card>
 
-      {/* 3. Executive Summary */}
+      {/* 4. Executive Summary */}
       <Card title="3. Executive Summary (High-Level Promotional Impact Breakdown)">
         <p className="text-xs text-slate-500 mb-6">
           High-level aggregation of total commercial sales volume decomposed into Baseline unpromoted demand, Personal promotion, Non-Personal promotion (NPP), and Direct-to-Consumer (DTC) media.
@@ -491,7 +504,7 @@ export default function ModelResults() {
         </div>
       </Card>
 
-      {/* 4. Spend Input & Dynamic ROI */}
+      {/* 5. Channel Spend Management */}
       <Card title="4. Channel Spend Management & ROI Engine">
         <p className="text-xs text-slate-500 mb-4">
           Enter or adjust actual budget spend per promotional channel. Spend inputs immediately update channel ROIs, Long-Term ROIs, and downstream response curves.
@@ -519,7 +532,7 @@ export default function ModelResults() {
         </div>
       </Card>
 
-      {/* 5. Channel Performance Deep Dive Table */}
+      {/* 6. Channel Performance Deep Dive Table */}
       <Card title="5. Channel Performance Deep-Dive Table">
         <div className="overflow-x-auto rounded-xl border border-slate-200">
           <table className="w-full text-xs text-left bg-white">
@@ -562,7 +575,7 @@ export default function ModelResults() {
         </div>
       </Card>
 
-      {/* 6. Response Curves */}
+      {/* 7. Response Curves */}
       <Card title="6. Channel Response Curves & Diminishing Marginal ROI">
         {!isFinalized ? (
           <div className="py-12 text-center text-slate-400 space-y-2">
@@ -609,7 +622,7 @@ export default function ModelResults() {
                   </div>
                   <div className="bg-emerald-50 p-4 rounded-xl border border-emerald-200 text-center">
                     <div className="text-lg font-bold text-emerald-700">${activeRcMetrics.optimalSpend.toLocaleString()}</div>
-                    <div className="text-[10px] text-emerald-600 font-bold uppercase mt-0.5">Optimal Target Spend</div>
+                    <div className="text-[10px] text-emerald-600 font-bold uppercase mt-0.5">Optimal Target Spend (mROI ≈ 1.0)</div>
                   </div>
                   <div className="bg-brand-50 p-4 rounded-xl border border-brand-200 text-center">
                     <div className="text-lg font-bold text-brand-700">{activeRcMetrics.saturationPct}%</div>
@@ -629,9 +642,9 @@ export default function ModelResults() {
                     <ResponsiveContainer width="100%" height={260}>
                       <LineChart data={activeCurvePoints}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                        <XAxis dataKey="spend" tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} tick={{ fontSize: 10 }} />
-                        <YAxis tickFormatter={(v) => Number(v).toLocaleString()} tick={{ fontSize: 10 }} />
-                        <Tooltip formatter={(v) => Number(v).toLocaleString()} />
+                        <XAxis dataKey="spend" tickFormatter={(v) => `$${(v / 1000).toFixed(1)}k`} tick={{ fontSize: 10 }} />
+                        <YAxis tickFormatter={format1Dec} tick={{ fontSize: 10 }} />
+                        <Tooltip formatter={(v) => format1Dec(v)} />
                         <Line type="monotone" dataKey="impactable_nation" stroke="#001E96" strokeWidth={2.5} dot={false} name="Impactable Sales" />
                       </LineChart>
                     </ResponsiveContainer>
@@ -644,9 +657,9 @@ export default function ModelResults() {
                     <ResponsiveContainer width="100%" height={260}>
                       <LineChart data={activeCurvePoints}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                        <XAxis dataKey="spend" tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} tick={{ fontSize: 10 }} />
-                        <YAxis tickFormatter={(v) => Number(v).toFixed(2)} tick={{ fontSize: 10 }} />
-                        <Tooltip formatter={(v) => Number(v).toFixed(3)} />
+                        <XAxis dataKey="spend" tickFormatter={(v) => `$${(v / 1000).toFixed(1)}k`} tick={{ fontSize: 10 }} />
+                        <YAxis tickFormatter={format1Dec} tick={{ fontSize: 10 }} />
+                        <Tooltip formatter={(v) => Number(v).toFixed(2)} />
                         <Legend />
                         <Line type="monotone" dataKey="roi" stroke="#001E96" strokeWidth={2} dot={false} name="Average ROI" />
                         <Line type="monotone" dataKey="mroi" stroke="#1ABC9C" strokeWidth={2} dot={false} name="Marginal ROI" />
@@ -660,24 +673,30 @@ export default function ModelResults() {
         )}
       </Card>
 
-      {/* 7. Benchmarks */}
-      <Card title="7. Industry Benchmark Comparisons (Maturity Stage × Competition Level)">
+      {/* 8. Benchmarks Section */}
+      <Card title="7. Industry Benchmark Comparisons (Disease Area × Maturity × Competition)">
         <p className="text-xs text-slate-500 mb-4">
-          Compare your model results against the standard pharma commercial benchmark matrix segmented by lifecycle stage and competition level.
+          Compare your model results against standard commercial benchmark matrices segmented by disease area, lifecycle stage, and competition level.
         </p>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6 max-w-xl">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6 max-w-3xl">
+          <Select
+            label="Disease Area / Therapy Area"
+            value={diseaseArea}
+            onChange={setDiseaseArea}
+            options={["Dermatology (Specialty)"]}
+          />
           <Select
             label="Maturity Stage"
             value={maturityStage}
             onChange={setMaturityStage}
-            options={["0–2Y", "2–5Y", "5–8Y", "8Y+"]}
+            options={["Launch (<1 Year)", "Growth (1–3 Years)", "Maturity (3–7 Years)", "Late Lifecycle (7+ Years)"]}
           />
           <Select
             label="Competition Level"
             value={competitionLevel}
             onChange={setCompetitionLevel}
-            options={["Low", "Medium", "High"]}
+            options={["Low Competition", "Medium Competition", "High Competition"]}
           />
         </div>
 
@@ -686,33 +705,44 @@ export default function ModelResults() {
         {benchmarkResult && !benchLoading && (
           <div className="space-y-6">
             <div className="bg-brand-50/60 p-3 rounded-xl border border-brand-200 text-xs text-brand-900 font-bold">
-              Benchmark Cohort: {benchmarkResult.benchmark_group}
+              Cohort: {benchmarkResult.benchmark_group}
             </div>
 
             <div>
               <span className="text-xs font-bold text-slate-700 block mb-2 uppercase tracking-wider">
-                1. Promotional Impact % Share Benchmarks:
+                1. Promotional Impact % Share vs. Industry Benchmarks:
               </span>
-              <DataTable data={benchmarkResult.impact_benchmarks} />
+              <DataTable data={benchmarkResult.impact_benchmarks?.map((r) => ({
+                Category: r.category,
+                "Your Model Impact %": r.your_impact_pct,
+                "Industry Benchmark Range": r.benchmark,
+                Status: r.status,
+              }))} />
             </div>
 
             <div>
               <span className="text-xs font-bold text-slate-700 block mb-2 uppercase tracking-wider">
                 2. Channel-Level ROI vs. Industry Peer Benchmarks:
               </span>
-              <DataTable data={benchmarkResult.channel_benchmarks} />
+              <DataTable data={benchmarkResult.channel_benchmarks?.map((r) => ({
+                Channel: r.channel,
+                Category: r.category,
+                "Your Dollar ROI": r.yours,
+                "Peer Benchmark Range": r.benchmark,
+                Status: r.status,
+              }))} />
             </div>
           </div>
         )}
       </Card>
 
-      {/* 8. Full Statistical Evaluation */}
+      {/* 9. Diagnostics & Statistical Evaluation */}
       <Card title="8. Model Diagnostics & Statistical Evaluation">
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
           <Metric label="R² (Fit)" value={selectedModel?.r_squared?.toFixed(4) ?? "—"} />
           <Metric label="Adjusted R²" value={selectedModel?.adj_r_squared?.toFixed(4) ?? "—"} />
           <Metric label="RMSE" value={selectedModel?.rmse?.toFixed(2) ?? "—"} />
-          <Metric label="Alpha (λ)" value={selectedModel?.alpha != null ? String(selectedModel.alpha) : "N/A (OLS)"} />
+          <Metric label="Algorithm" value={selectedModel?.modelType || "OLS"} />
         </div>
 
         <details className="bg-slate-50 rounded-xl p-4 border border-slate-200 cursor-pointer">

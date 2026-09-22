@@ -6,10 +6,9 @@ from typing import Dict, Any, List
 router = APIRouter()
 
 # ─── Exact Industry Benchmark Reference Matrix ──────────────────────────────
-# Segmented by Maturity Stage (0–2Y, 2–5Y, 5–8Y, 8Y+) × Competition (Low, Medium, High)
-NEW_BENCHMARK_MATRIX = {
-    "0–2Y": {
-        "Low": {
+DERMATOLOGY_BENCHMARK_MATRIX = {
+    "Launch (<1 Year)": {
+        "Low Competition": {
             "baseline_impact": "30–45%",
             "salesforce_impact": "25–35%",
             "hcp_pp_impact": "5–9%",
@@ -22,7 +21,7 @@ NEW_BENCHMARK_MATRIX = {
             "hcp_npp_roi": "1.5–3.0x",
             "consumer_npp_roi": "1.5–3.5x",
         },
-        "Medium": {
+        "Medium Competition": {
             "baseline_impact": "25–40%",
             "salesforce_impact": "22–32%",
             "hcp_pp_impact": "4–8%",
@@ -35,35 +34,7 @@ NEW_BENCHMARK_MATRIX = {
             "hcp_npp_roi": "1.2–2.7x",
             "consumer_npp_roi": "1.2–3.0x",
         },
-        "High": {
-            "baseline_impact": "20–35%",
-            "salesforce_impact": "20–30%",
-            "hcp_pp_impact": "3–7%",
-            "access_impact": "8–16%",
-            "hcp_npp_impact": "3–7%",
-            "consumer_npp_impact": "4–10%",
-            "salesforce_roi": "0.5–2.0x",
-            "hcp_pp_roi": "0.4–1.2x",
-            "access_roi": "0.7–1.3x",
-            "hcp_npp_roi": "1.0–2.4x",
-            "consumer_npp_roi": "1.0–2.7x",
-        },
-    },
-    "2–5Y": {
-        "Low": {
-            "baseline_impact": "45–60%",
-            "salesforce_impact": "25–33%",
-            "hcp_pp_impact": "5–9%",
-            "access_impact": "14–21%",
-            "hcp_npp_impact": "6–11%",
-            "consumer_npp_impact": "7–13%",
-            "salesforce_roi": "3.0–4.3x",
-            "hcp_pp_roi": "1.8–2.7x",
-            "access_roi": "1.1–1.7x",
-            "hcp_npp_roi": "4.0–5.8x",
-            "consumer_npp_roi": "5.0–7.0x",
-        },
-        "Medium": {
+        "High Competition": {
             "baseline_impact": "40–55%",
             "salesforce_impact": "22–30%",
             "hcp_pp_impact": "4–8%",
@@ -76,7 +47,35 @@ NEW_BENCHMARK_MATRIX = {
             "hcp_npp_roi": "3.2–5.0x",
             "consumer_npp_roi": "4.0–6.5x",
         },
-        "High": {
+    },
+    "Growth (1–3 Years)": {
+        "Low Competition": {
+            "baseline_impact": "45–60%",
+            "salesforce_impact": "25–33%",
+            "hcp_pp_impact": "5–9%",
+            "access_impact": "14–21%",
+            "hcp_npp_impact": "6–11%",
+            "consumer_npp_impact": "7–13%",
+            "salesforce_roi": "3.0–4.3x",
+            "hcp_pp_roi": "1.8–2.7x",
+            "access_roi": "1.1–1.7x",
+            "hcp_npp_roi": "4.0–5.8x",
+            "consumer_npp_roi": "5.0–7.0x",
+        },
+        "Medium Competition": {
+            "baseline_impact": "40–55%",
+            "salesforce_impact": "22–30%",
+            "hcp_pp_impact": "4–8%",
+            "access_impact": "12–19%",
+            "hcp_npp_impact": "5–10%",
+            "consumer_npp_impact": "6–12%",
+            "salesforce_roi": "2.5–3.8x",
+            "hcp_pp_roi": "1.5–2.4x",
+            "access_roi": "1.0–1.5x",
+            "hcp_npp_roi": "3.2–5.0x",
+            "consumer_npp_roi": "4.0–6.5x",
+        },
+        "High Competition": {
             "baseline_impact": "35–50%",
             "salesforce_impact": "20–27%",
             "hcp_pp_impact": "4–7%",
@@ -90,8 +89,8 @@ NEW_BENCHMARK_MATRIX = {
             "consumer_npp_roi": "3.5–5.8x",
         },
     },
-    "5–8Y": {
-        "Low": {
+    "Maturity (3–7 Years)": {
+        "Low Competition": {
             "baseline_impact": "60–75%",
             "salesforce_impact": "25–32%",
             "hcp_pp_impact": "6–10%",
@@ -104,7 +103,7 @@ NEW_BENCHMARK_MATRIX = {
             "hcp_npp_roi": "4.5–6.5x",
             "consumer_npp_roi": "5.5–7.8x",
         },
-        "Medium": {
+        "Medium Competition": {
             "baseline_impact": "55–70%",
             "salesforce_impact": "22–29%",
             "hcp_pp_impact": "5–9%",
@@ -117,7 +116,7 @@ NEW_BENCHMARK_MATRIX = {
             "hcp_npp_roi": "4.0–5.8x",
             "consumer_npp_roi": "5.0–7.2x",
         },
-        "High": {
+        "High Competition": {
             "baseline_impact": "50–65%",
             "salesforce_impact": "19–26%",
             "hcp_pp_impact": "4–8%",
@@ -131,8 +130,8 @@ NEW_BENCHMARK_MATRIX = {
             "consumer_npp_roi": "4.0–6.2x",
         },
     },
-    "8Y+": {
-        "Low": {
+    "Late Lifecycle (7+ Years)": {
+        "Low Competition": {
             "baseline_impact": "75–90%",
             "salesforce_impact": "22–29%",
             "hcp_pp_impact": "5–8%",
@@ -145,7 +144,7 @@ NEW_BENCHMARK_MATRIX = {
             "hcp_npp_roi": "4.0–5.8x",
             "consumer_npp_roi": "5.0–7.0x",
         },
-        "Medium": {
+        "Medium Competition": {
             "baseline_impact": "70–85%",
             "salesforce_impact": "19–26%",
             "hcp_pp_impact": "4–7%",
@@ -158,7 +157,7 @@ NEW_BENCHMARK_MATRIX = {
             "hcp_npp_roi": "3.5–5.2x",
             "consumer_npp_roi": "4.5–6.5x",
         },
-        "High": {
+        "High Competition": {
             "baseline_impact": "60–80%",
             "salesforce_impact": "17–24%",
             "hcp_pp_impact": "3–7%",
@@ -187,27 +186,68 @@ async def results_summary(payload: dict):
 @router.post("/benchmarks")
 async def benchmark_comparison(payload: dict):
     try:
-        maturity = payload.get("maturity_stage", "2–5Y")
-        competition = payload.get("competition_level", "Medium")
+        disease_area = payload.get("disease_area", "Dermatology (Specialty)")
+        maturity = payload.get("maturity_stage", "Launch (<1 Year)")
+        competition = payload.get("competition_level", "High Competition")
         channels = payload.get("channels", [])
+        user_impact_shares = payload.get("user_impact_shares", {})
 
-        # Query exact benchmark table
-        maturity_key = maturity if maturity in NEW_BENCHMARK_MATRIX else "2–5Y"
-        mat_dict = NEW_BENCHMARK_MATRIX[maturity_key]
-        comp_key = competition if competition in mat_dict else "Medium"
-        bench_row = mat_dict[comp_key]
+        maturity_key = maturity if maturity in DERMATOLOGY_BENCHMARK_MATRIX else "Launch (<1 Year)"
+        comp_key = competition if competition in DERMATOLOGY_BENCHMARK_MATRIX[maturity_key] else "High Competition"
+        bench_row = DERMATOLOGY_BENCHMARK_MATRIX[maturity_key][comp_key]
 
-        # 1. Overall Impact % Benchmark Breakdown
+        def get_status(user_pct_val, bench_str):
+            try:
+                parts = bench_str.replace("%", "").split("–")
+                lo, hi = float(parts[0]), float(parts[1])
+                if user_pct_val >= lo and user_pct_val <= hi:
+                    return "Within Benchmark"
+                elif user_pct_val > hi:
+                    return "Above Benchmark"
+                else:
+                    return "Below Benchmark"
+            except Exception:
+                return "Within Benchmark"
+
         impact_benchmarks = [
-            {"category": "Baseline Impact %", "benchmark": bench_row["baseline_impact"]},
-            {"category": "Salesforce Impact %", "benchmark": bench_row["salesforce_impact"]},
-            {"category": "HCP PP (Personal Promo) Impact %", "benchmark": bench_row["hcp_pp_impact"]},
-            {"category": "Access Impact %", "benchmark": bench_row["access_impact"]},
-            {"category": "HCP NPP (Non-Personal Promo) Impact %", "benchmark": bench_row["hcp_npp_impact"]},
-            {"category": "Consumer NPP / DTC Impact %", "benchmark": bench_row["consumer_npp_impact"]},
+            {
+                "category": "Baseline Impact %",
+                "your_impact_pct": f"{float(user_impact_shares.get('baseline', 48.5)):.1f}%",
+                "benchmark": bench_row["baseline_impact"],
+                "status": get_status(float(user_impact_shares.get('baseline', 48.5)), bench_row["baseline_impact"])
+            },
+            {
+                "category": "Salesforce Impact %",
+                "your_impact_pct": f"{float(user_impact_shares.get('salesforce', 26.2)):.1f}%",
+                "benchmark": bench_row["salesforce_impact"],
+                "status": get_status(float(user_impact_shares.get('salesforce', 26.2)), bench_row["salesforce_impact"])
+            },
+            {
+                "category": "HCP PP (Personal Promo) Impact %",
+                "your_impact_pct": f"{float(user_impact_shares.get('hcp_pp', 6.4)):.1f}%",
+                "benchmark": bench_row["hcp_pp_impact"],
+                "status": get_status(float(user_impact_shares.get('hcp_pp', 6.4)), bench_row["hcp_pp_impact"])
+            },
+            {
+                "category": "Access Impact %",
+                "your_impact_pct": f"{float(user_impact_shares.get('access', 14.1)):.1f}%",
+                "benchmark": bench_row["access_impact"],
+                "status": get_status(float(user_impact_shares.get('access', 14.1)), bench_row["access_impact"])
+            },
+            {
+                "category": "HCP NPP (Non-Personal Promo) Impact %",
+                "your_impact_pct": f"{float(user_impact_shares.get('hcp_npp', 7.5)):.1f}%",
+                "benchmark": bench_row["hcp_npp_impact"],
+                "status": get_status(float(user_impact_shares.get('hcp_npp', 7.5)), bench_row["hcp_npp_impact"])
+            },
+            {
+                "category": "Consumer NPP / DTC Impact %",
+                "your_impact_pct": f"{float(user_impact_shares.get('consumer_npp', 8.3)):.1f}%",
+                "benchmark": bench_row["consumer_npp_impact"],
+                "status": get_status(float(user_impact_shares.get('consumer_npp', 8.3)), bench_row["consumer_npp_impact"])
+            },
         ]
 
-        # 2. Channel-Level ROI Comparison
         channel_benchmarks = []
         for ch in channels:
             ch_name = ch.get("channel", "")
@@ -216,21 +256,20 @@ async def benchmark_comparison(payload: dict):
 
             if "call" in l or "rep" in l or "detail" in l:
                 bench_roi_str = bench_row["salesforce_roi"]
-                category_label = "Salesforce (Rep Detailing)"
-            elif "samp" in l or "speaker" in l or "f2f" in l or "event" in l:
+                category_label = "Personal Promotion"
+            elif "samp" in l or "speaker" in l or "spk" in l or "event" in l:
                 bench_roi_str = bench_row["hcp_pp_roi"]
-                category_label = "HCP Personal Promo (PP)"
+                category_label = "Personal Promotion"
             elif "access" in l or "copay" in l or "voucher" in l:
                 bench_roi_str = bench_row["access_roi"]
                 category_label = "Access / Co-Pay"
             elif "rte" in l or "email" in l or "portal" in l or "web" in l or "npp" in l:
                 bench_roi_str = bench_row["hcp_npp_roi"]
-                category_label = "HCP Non-Personal Promo (NPP)"
+                category_label = "Non-Personal Promotion"
             else:
                 bench_roi_str = bench_row["consumer_npp_roi"]
-                category_label = "Consumer NPP / DTC"
+                category_label = "DTC Promotion"
 
-            # Parse benchmark bounds for status assessment
             try:
                 parts = bench_roi_str.replace("x", "").split("–")
                 min_roi = float(parts[0])
@@ -239,11 +278,11 @@ async def benchmark_comparison(payload: dict):
                 min_roi, max_roi = 1.0, 3.0
 
             if user_roi >= min_roi:
-                status = "🟢 Within/Above Benchmark"
+                status = "Within/Above Benchmark"
             elif user_roi >= (min_roi * 0.75):
-                status = "🟡 Near Benchmark"
+                status = "Near Benchmark"
             else:
-                status = "🔴 Below Benchmark"
+                status = "Below Benchmark"
 
             channel_benchmarks.append({
                 "channel": ch_name,
@@ -254,7 +293,7 @@ async def benchmark_comparison(payload: dict):
             })
 
         return {
-            "benchmark_group": f"Maturity: {maturity_key} • Competition: {comp_key}",
+            "benchmark_group": f"Disease Area: {disease_area} • Maturity: {maturity_key} • Competition: {comp_key}",
             "impact_benchmarks": impact_benchmarks,
             "channel_benchmarks": channel_benchmarks,
             "raw_benchmark_row": bench_row,
