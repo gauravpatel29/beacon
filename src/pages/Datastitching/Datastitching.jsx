@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { v2ListFiles, v2BuildArd, v2ListArds, v2GetCsv, deleteFile, problemMessage, ensureWorkflow } from '../../services/api.js';
 import { forgetFile, loadScreenState, recordStage, saveScreenState } from '../../services/workflowState.js';
+import GranularityPanel from '../../components/Granularity/GranularityPanel.jsx';
 import './Datastitching.css';
 import PageFooterNav from '../../components/PageFooterNav/PageFooterNav.jsx';
 
@@ -872,6 +873,16 @@ function Datastitching() {
 
           {activeTab && (
             <>
+          {/* Before the join, not after: two files at different time grains
+              cannot be joined on a date, and this is where that becomes
+              apparent. Moved here from a tab on Data Ingestion, which asked
+              the question one file at a time and out of context. */}
+          <GranularityPanel
+            files={files}
+            workflowId={workflowId}
+            onApplied={() => loadEverything()}
+          />
+
           {/* ---- Source files ---- */}
           <div className="source-files-card">
             <p className="section-heading">Source Files</p>

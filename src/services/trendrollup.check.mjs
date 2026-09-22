@@ -165,9 +165,24 @@ t('with no date column, the message says what to do',
   /No date column in this file yet/.test(ingest), 'dead end');
 
 console.log('\n7b. the screen wires those buttons up');
-t('the granularity comes from the file, target first',
-  /file\.granularityConfig\?\.target \|\| file\.granularityConfig\?\.detected/.test(ingest),
-  'a configured rollup would be ignored');
+// Detection runs on its own now. It used to need the Detect Granularity
+// button on the Granularity tab, so until somebody pressed it a monthly file
+// offered Week-on-Week - and that tab is being removed.
+t('granularity is detected without a button press',
+  /detectGranularity\(file\.workflowId, file\.filename, \{/.test(ingest), 'still manual');
+t('detection sees the renamed column and the draft edits',
+  /date_column: renamedName\(file, effectiveXAxis\)/.test(ingest)
+  && /live_updates: buildLiveUpdates\(file\)/.test(ingest),
+  'detects against the raw column');
+t('it re-runs when the file or the date column changes',
+  /const detectKey = `\$\{file\.filename\}\|\$\{effectiveXAxis\}`/.test(ingest), 'runs once');
+t('a failure costs the narrowing, not the chart',
+  /if \(!cancelled\) setAutoGrain\(''\)/.test(ingest), 'an error banner for a chart that works');
+// A configured rollup still wins: after rolling daily up to monthly the file
+// IS monthly, whatever its raw dates say.
+t('a configured rollup still outranks detection',
+  /file\.granularityConfig\?\.target\s*\n?\s*\|\| file\.granularityConfig\?\.detected\s*\n?\s*\|\| autoGrain/.test(ingest),
+  'detection would override an explicit choice');
 t('the buttons are rendered from the allowed list',
   /\{aggOptions\.map\(\(key\) => \(/.test(ingest), 'still two hardcoded buttons');
 t('and no hardcoded pair survives',

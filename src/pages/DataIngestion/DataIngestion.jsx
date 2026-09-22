@@ -54,7 +54,6 @@ import {
   humanFormat,
   localProblems,
   localWarnings,
-  numericColumns,
   renamedName,
   toIsoDate,
 } from '../../services/manifest.js';
@@ -135,14 +134,13 @@ const DATE_FORMATS = [
   { value: '%Y-%m-%d', label: 'YYYY-MM-DD (2026-05-24)' },
 ];
 
-const NUM_OPS = ['sum', 'average', 'min', 'max', 'product'];
-const GRAN_OPTIONS = {
-  Daily: ['Weekly', 'Monthly'],
-  Weekly: ['Monthly'],
-  Monthly: ['Yearly'],
-};
 
-const TAB_ORDER = ['mapping', 'standardize', 'filter', 'granularity', 'review'];
+// Granularity left this screen for Data Stitching, where it belongs: a rollup
+// exists so two files can be joined on a date, and that is only apparent with
+// both files in view. The manifest field itself is untouched - see
+// `buildGranularity`, which still reproduces whatever rollup a file already
+// carries, so applying a change here cannot quietly undo one configured there.
+const TAB_ORDER = ['mapping', 'standardize', 'filter', 'review'];
 
 /**
  * Has this dataset ever been applied?
@@ -444,10 +442,55 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceRows, effectiveXAxis, xAxisIsDateLike, effectiveStart, effectiveEnd]);
 
-  // What this file's rows actually are. `target` wins when a rollup has been
-  // configured on the Granularity tab: after rolling daily rows up to monthly,
-  // the file is monthly, whatever detection said about the original.
-  const fileGrain = file.granularityConfig?.target || file.granularityConfig?.detected || '';
+  // What this file's rows actually are.
+  //
+  // Detection runs on its own as soon as a date column is known, rather than
+  // waiting for a Detect Granularity button on a tab that is being removed. A
+  // monthly file offering Week-on-Week is wrong whether or not anybody pressed
+  // that button first.
+  const [autoGrain, setAutoGrain] = useState('');
+  // True until detection for this file and column settles. The period buttons
+  // are built from the answer, so rendering them first would offer
+  // Week-on-Week on a monthly file and then take it away a moment later.
+  const [isDetectingGrain, setIsDetectingGrain] = useState(true);
+  const detectKey = `${file.filename}|${effectiveXAxis}`;
+  useEffect(() => {
+    let cancelled = false;
+    const detect = async () => {
+      if (!file.workflowId || !effectiveXAxis || !xAxisIsDateLike) {
+        // Nothing to detect against. Settle rather than spin forever.
+        setIsDetectingGrain(false);
+        return;
+      }
+      setIsDetectingGrain(true);
+      try {
+        const detail = await detectGranularity(file.workflowId, file.filename, {
+          // Detection sees the dates as configured, so it must be told the
+          // post-rename name and the same draft edits the preview uses.
+          date_column: renamedName(file, effectiveXAxis),
+          live_updates: buildLiveUpdates(file),
+          filters: buildFilters(file),
+        });
+        if (!cancelled) setAutoGrain(detail.granularity || '');
+      } catch {
+        // Too few distinct dates, or an unparseable column. Not an error worth
+        // showing: the chart still works, it just offers both periods.
+        if (!cancelled) setAutoGrain('');
+      } finally {
+        if (!cancelled) setIsDetectingGrain(false);
+      }
+    };
+    detect();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detectKey, file.workflowId]);
+
+  // A configured rollup wins over detection: after rolling daily rows up to
+  // monthly the file IS monthly, whatever the raw dates say.
+  const fileGrain = file.granularityConfig?.target
+    || file.granularityConfig?.detected
+    || autoGrain
+    || '';
   const aggOptions = aggregationsFor(fileGrain);
 
   // A stored aggregation that this granularity does not support - saved before
@@ -479,6 +522,25 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
         No date column in this file yet. Type one as a date on the Standardize tab
         and it will appear here as an X Axis option.
       </p>
+    );
+  }
+
+  // Hold the whole section until the grain is known. The period buttons are
+  // derived from it, so drawing them first means showing Week-on-Week on a
+  // monthly file and withdrawing it once the answer arrives.
+  if (isDetectingGrain || (isLoadingFull && !usingFullFile)) {
+    return (
+      <div style={{ marginTop: '1.5rem' }}>
+        <p className="mapping-section-label">Time-Series Trend</p>
+        <div className="trend-loading">
+          <span className="trend-spinner" aria-hidden="true" />
+          <span>
+            {isDetectingGrain
+              ? 'Detecting the time grain of this file…'
+              : 'Loading the full file…'}
+          </span>
+        </div>
+      </div>
     );
   }
 
@@ -955,8 +1017,6 @@ function DataIngestion() {
   const [isApplying, setIsApplying] = useState(false);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [isFiltering, setIsFiltering] = useState(false);
-  const [isDetectingGranularity, setIsDetectingGranularity] = useState(false);
-  const [isModifyingGranularity, setIsModifyingGranularity] = useState(false);
   const [isRestoringFiles, setIsRestoringFiles] = useState(() => Boolean(storedWorkflowId()));
   const [isUploadingFiles, setIsUploadingFiles] = useState(false);
   const [deletingFileId, setDeletingFileId] = useState(null);
@@ -974,9 +1034,9 @@ function DataIngestion() {
   // ── Platform Connections (Databricks / Snowflake / Fabric) ──────────────
   // PLACEHOLDER: no backend endpoint exists yet for creating, testing, or
   // listing platform connections — nothing like this is in services/api.js.
-  // Kept as local-only state, same pattern as handleDetectGranularity below:
-  // the full UI flow is reviewable now, and each handler is marked with
-  // exactly what a real API call would need to replace it.
+  // Kept as local-only state: the full UI flow is reviewable now, and each
+  // handler is marked with exactly what a real API call would need to
+  // replace it.
   const [platformConnections, setPlatformConnections] = useState([]);
   const [isPlatformModalOpen, setIsPlatformModalOpen] = useState(false);
   const [editingConnectionId, setEditingConnectionId] = useState(null);
@@ -1432,30 +1492,6 @@ function DataIngestion() {
   };
 
   // Granularity tab
-  const setGranularityField = (file, key, value) =>
-    updateFileConfig(file.id, {
-      granularityConfig: { ...file.granularityConfig, [key]: value },
-    });
-
-  // PLACEHOLDER: no backend endpoint yet - just marks a granularity as
-  // "detected" locally so the UI flow can be reviewed. Replace with a real
-  // API call once available.
-  const handleDetectGranularity = async (file) => {
-    if (!file.granularityConfig.dateCol || isDetectingGranularity) return;
-    setIsDetectingGranularity(true);
-    try {
-      const detail = await detectGranularity(file.workflowId, file.filename, {
-        date_column: renamedName(file, file.granularityConfig.dateCol),
-        live_updates: buildLiveUpdates(file),
-        filters: buildFilters(file),
-      });
-      setGranularityField(file, 'detected', detail.granularity);
-    } catch (err) {
-      window.alert(err instanceof ApiError ? err.text : 'Granularity detection failed.');
-    } finally {
-      setIsDetectingGranularity(false);
-    }
-  };
 
   const applyFile = async (file) => {
     const problems = localProblems(file);
@@ -1508,35 +1544,6 @@ function DataIngestion() {
       setApplyMessage(err instanceof ApiError ? err.text : 'Changes could not be previewed.');
     } finally {
       setIsPreviewing(false);
-    }
-  };
-
-  const modifyGranularity = async (file) => {
-    const problems = localProblems(file);
-    if (problems.length) {
-      setApplyMessage(problems.join(' '));
-      return;
-    }
-    setIsModifyingGranularity(true);
-    setApplyMessage('Modifying granularity… Nothing is being saved.');
-    try {
-      const preview = await previewSpec(file.workflowId, file.filename, buildSpec(file));
-      updateFileConfig(file.id, {
-        previewRows: preview.preview || [],
-        previewColumns: preview.columns || file.columns,
-        previewRowCount: preview.row_count,
-      });
-      setPreviewResult({ fileId: file.id, applied: preview.applied || {} });
-      const dropped = preview.applied?.unhandled_columns || [];
-      setApplyMessage(
-        dropped.length
-          ? `Granularity preview ready. These columns had no aggregation and were dropped: ${dropped.join(', ')}. Nothing has been saved.`
-          : 'Granularity preview ready. These changes have not been saved.'
-      );
-    } catch (err) {
-      setApplyMessage(err instanceof ApiError ? err.text : 'Granularity could not be modified.');
-    } finally {
-      setIsModifyingGranularity(false);
     }
   };
 
@@ -1618,9 +1625,6 @@ function DataIngestion() {
 
   const previewColumns = selectedFile?.previewColumns || selectedFile?.columns || [];
   const hasFiles = uploadedFiles.length > 0;
-  // Only numeric, kept columns can be aggregated, and never the two grouping
-  // keys. The rollup drops anything else, so offering them would be misleading.
-  const aggregatableColumns = selectedFile ? numericColumns(selectedFile) : [];
 
   return (
     <div className="data-ingestion-page">
@@ -1881,15 +1885,6 @@ function DataIngestion() {
                       }}
                     >
                       Filter
-                    </button>
-                    <button
-                      className={`tab-btn${activeTab === 'granularity' ? ' active' : ''}`}
-                      onClick={() => {
-                        setActiveTab('granularity');
-                        setVisitedTabs((prev) => new Set(prev).add('granularity'));
-                      }}
-                    >
-                      Granularity
                     </button>
                     <button
                       className={`tab-btn${activeTab === 'review' ? ' active' : ''}`}
@@ -2334,116 +2329,6 @@ function DataIngestion() {
                     </div>
                     <p className="tab-placeholder-note">
                       Applying the filter previews the matching rows without saving changes.
-                    </p>
-                  </>
-                )}
-
-                {activeTab === 'granularity' && (
-                  <>
-                    <div className="filter-grid">
-                      <div>
-                        <p className="filter-field-label">Date</p>
-                        <select
-                          className="filter-select"
-                          value={selectedFile.granularityConfig.dateCol}
-                          onChange={(e) => setGranularityField(selectedFile, 'dateCol', e.target.value)}
-                        >
-                          <option value="">Select date column</option>
-                          {selectedFile.columns.map((c) => (
-                            <option key={c} value={c}>{c}</option>
-                          ))}
-                        </select>
-                      </div>
-                      <div>
-                        <p className="filter-field-label">Grouping (Geo/NPI/DMA)</p>
-                        <select
-                          className="filter-select"
-                          value={selectedFile.granularityConfig.geoCol}
-                          onChange={(e) => setGranularityField(selectedFile, 'geoCol', e.target.value)}
-                        >
-                          <option value="">Select geo/ID column</option>
-                          {selectedFile.columns.map((c) => (
-                            <option key={c} value={c}>{c}</option>
-                          ))}
-                        </select>
-                      </div>
-                    </div>
-
-                    <button
-                      className="granularity-detect-btn"
-                      onClick={() => handleDetectGranularity(selectedFile)}
-                      disabled={!selectedFile.granularityConfig.dateCol || isDetectingGranularity}
-                    >
-                      {isDetectingGranularity ? 'Detecting granularity…' : 'Detect Granularity'}
-                    </button>
-                    {selectedFile.granularityConfig.detected && (
-                      <span className="granularity-detected-badge">
-                        Detected: {selectedFile.granularityConfig.detected}
-                      </span>
-                    )}
-
-                    {selectedFile.granularityConfig.detected && (
-                      <>
-                        {aggregatableColumns.map((col) => (
-                          <div key={col} className="agg-op-row">
-                            <span>{col}</span>
-                            <select
-                              className="filter-select"
-                              value={selectedFile.granularityConfig.numOps[col] || 'sum'}
-                              onChange={(e) =>
-                                setGranularityField(selectedFile, 'numOps', {
-                                  ...selectedFile.granularityConfig.numOps,
-                                  [col]: e.target.value,
-                                })
-                              }
-                            >
-                              {NUM_OPS.map((op) => (
-                                <option key={op} value={op}>{op}</option>
-                              ))}
-                            </select>
-                          </div>
-                        ))}
-
-                        <p className="filter-field-label" style={{ marginTop: '1rem' }}>
-                          Target Granularity
-                        </p>
-                        <select
-                          className="filter-select"
-                          value={selectedFile.granularityConfig.target}
-                          onChange={(e) => setGranularityField(selectedFile, 'target', e.target.value)}
-                        >
-                          <option value="">Select target granularity</option>
-                          {(GRAN_OPTIONS[selectedFile.granularityConfig.detected] || []).map((g) => (
-                            <option key={g} value={g}>{g}</option>
-                          ))}
-                        </select>
-
-                        <div className="filter-actions">
-                          {previewResult?.fileId === selectedFile.id
-                            && previewResult.applied.granularity_applied && (
-                            <p className="preview-filter-result" role="status">
-                              {previewResult.applied.rows_out} rows after rolling up to{' '}
-                              {selectedFile.granularityConfig.target}
-                              {previewResult.applied.unhandled_columns?.length > 0
-                                && ` · not aggregated: ${previewResult.applied.unhandled_columns.join(', ')}`}.
-                            </p>
-                          )}
-                          <button
-                            className="mapping-btn primary"
-                            disabled={
-                              !selectedFile.granularityConfig.target
-                              || isPreviewing || isApplying || isFiltering || isModifyingGranularity
-                            }
-                            onClick={() => modifyGranularity(selectedFile)}
-                          >
-                            {isModifyingGranularity ? 'Modifying granularity…' : 'Modify Granularity'}
-                          </button>
-                        </div>
-                      </>
-                    )}
-                    <p className="tab-placeholder-note">
-                      Only numeric columns can be aggregated. Modifying granularity previews the
-                      rolled-up rows without saving changes.
                     </p>
                   </>
                 )}
