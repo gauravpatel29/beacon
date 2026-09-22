@@ -77,6 +77,7 @@ async def run_regression(payload: dict):
             selected_channels=payload["selected_channels"],
             start_date=payload["start_date"],
             end_date=payload["end_date"],
+            include_const=bool(payload.get("include_const", True)),
         )
         result["model_type"] = "OLS Stage 1"
         return result
@@ -133,6 +134,7 @@ async def run_ridge_route(payload: dict):
             stage=stage,
             parent_channel=payload.get("parent_channel"),
             s2_channels=payload.get("s2_channels"),
+            include_const=bool(payload.get("include_const", True)),
             stage1_coefficients=payload.get("stage1_coefficients"),
         )
         return result

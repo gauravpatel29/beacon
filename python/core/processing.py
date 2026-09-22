@@ -1586,7 +1586,17 @@ def run_ols_regression(
     selected_channels: List[str],
     start_date,
     end_date,
+    include_const: bool = True,
 ) -> dict:
+    """include_const=False fits through the origin.
+
+    The screen's "Hide const row" used to drop the intercept from the table
+    only, which changed what the reader saw without changing what was fitted:
+    every other coefficient was still estimated against an intercept that was
+    no longer shown, and the contributions no longer added up to anything the
+    table explained. Passing it through to the fit is what the checkbox was
+    always taken to mean.
+    """
     transformed_df = transformed_df.copy()
     granular_df = granular_df.copy()
 
@@ -1606,7 +1616,8 @@ def run_ols_regression(
 
     y = pd.to_numeric(tdf[dependent_variable_user_input], errors="coerce").fillna(0.0)
     X = tdf[selected_channels].apply(pd.to_numeric, errors="coerce").fillna(0.0)
-    X = sm.add_constant(X, has_constant="add")
+    if include_const:
+        X = sm.add_constant(X, has_constant="add")
     model = sm.OLS(y, X).fit()
 
     sum_sales = float(y.sum())
@@ -1701,7 +1712,10 @@ def get_original_scale_coefficients(model, scaler, selected_channels, prior_weig
         std = float(scaler.scale_[i]) if scaler.scale_[i] != 0 else 1.0
         w = float(prior_weights.get(col, 1.0)) if use_custom_penalties else 1.0
         coef_original[i] = float(coef_scaled[i]) / (std * w)
-    intercept_original = float(intercept_scaled) - float(np.sum(coef_original * scaler.mean_))
+    # StandardScaler(with_mean=False) - the no-intercept path - leaves mean_
+    # as None rather than zeros, and there is no centring to undo.
+    means = scaler.mean_ if scaler.mean_ is not None else np.zeros(len(selected_channels))
+    intercept_original = float(intercept_scaled) - float(np.sum(coef_original * means))
     return intercept_original, coef_original
 
 
@@ -1877,7 +1891,18 @@ def run_ridge_regression(
     prior_weights: Optional[Dict] = None, stage: int = 1,
     parent_channel: Optional[str] = None, s2_channels: Optional[List[str]] = None,
     stage1_coefficients: Optional[List[Dict]] = None,
+    include_const: bool = True,
 ) -> dict:
+    """include_const=False fits through the origin - see run_ols_regression.
+
+    Ridge needs one extra thing OLS does not. The features are standardised
+    before fitting, and centring them re-introduces an intercept through the
+    back door: a model with no constant column fitted on centred data still
+    carries -sum(coef * mean). Dropping the constant alone would leave that
+    term in the rescaled coefficients. So when the constant is excluded the
+    features are scaled but NOT centred, which is what fitting through the
+    origin actually requires.
+    """
     prior_weights = prior_weights or {}
     tdf, gdf, gdf_prior = _filter_modelling_frames(transformed_df, granular_df, date_column, start_date, end_date)
 
@@ -1887,9 +1912,10 @@ def run_ridge_regression(
 
     best_alpha = float(manual_alpha) if manual_alpha else 1.0
 
-    scaler_final = StandardScaler()
+    scaler_final = StandardScaler(with_mean=include_const)
     X_scaled = _ridge_scale_and_weight(X_raw, scaler_final, channels, prior_weights, use_custom_penalties, fit=True)
-    X_scaled = sm.add_constant(X_scaled, has_constant="add")
+    if include_const:
+        X_scaled = sm.add_constant(X_scaled, has_constant="add")
 
     ridge_final = Ridge(alpha=best_alpha, positive=positive_coef, fit_intercept=False)
     ridge_final.fit(X_scaled, y_raw)
@@ -1897,7 +1923,12 @@ def run_ridge_regression(
     intercept_orig, coef_orig = get_original_scale_coefficients(
         ridge_final, scaler_final, channels, prior_weights, use_custom_penalties
     )
-    params_series = pd.Series([intercept_orig] + list(coef_orig), index=["const"] + channels)
+    # No constant was fitted, so no const row is reported. Carrying one at
+    # 0.0 would put an Intercept line in the table for a model that has none.
+    if include_const:
+        params_series = pd.Series([intercept_orig] + list(coef_orig), index=["const"] + channels)
+    else:
+        params_series = pd.Series(list(coef_orig), index=list(channels))
     y_pred = ridge_final.predict(X_scaled)
     residuals = y_raw - y_pred
     rmse = float(np.sqrt(mean_squared_error(y_raw, y_pred)))
@@ -1914,12 +1945,17 @@ def run_ridge_regression(
     cov_matrix = sigma_sq * np.dot(np.dot(A_inv, XtX), A_inv)
     se_scaled = np.sqrt(np.maximum(1e-12, np.diag(cov_matrix)))
 
+    # The constant occupies row 0 of the scaled design only when one was
+    # fitted. Without this offset the no-constant path read every channel's
+    # standard error one row late and ran off the end of the array.
+    offset = 1 if include_const else 0
     se_orig = np.zeros(len(params_series))
-    se_orig[0] = se_scaled[0]
+    if include_const:
+        se_orig[0] = se_scaled[0]
     for i, col in enumerate(channels):
         std = float(scaler_final.scale_[i]) if scaler_final.scale_[i] != 0 else 1.0
         w = float(prior_weights.get(col, 1.0)) if use_custom_penalties else 1.0
-        se_orig[i + 1] = float(se_scaled[i + 1]) / (std * w)
+        se_orig[i + offset] = float(se_scaled[i + offset]) / (std * w)
 
     t_stats = params_series.values / np.maximum(1e-9, se_orig)
     p_values = 2 * (1 - stats.norm.cdf(np.abs(t_stats)))
