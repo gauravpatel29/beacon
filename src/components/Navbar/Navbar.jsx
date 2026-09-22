@@ -1,5 +1,8 @@
 import './Navbar.css';
 import procdna_logo from '../../assets/procdna_logo.png';
+import Beaconlogo from  '../../assets/Beaconlogo.svg'
+
+
 
 
 // PLACEHOLDER: swap this with real user data once authentication is implemented
@@ -21,8 +24,8 @@ function Navbar() {
         <div className="navbar-divider" />
 
         {/* Beacon product wordmark */}
-        <span className="navbar-wordmark">
-          Beacon
+        <span className="beacon-logo-placeholder">
+          <img src={Beaconlogo} alt="Beacon" />
         </span>
       </div>
 

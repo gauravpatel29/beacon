@@ -53,6 +53,16 @@
   color: var(--color-accent);
 }
 
+/* Beaconlogo.svg carries its own white background card baked into the file
+   (visible as a white rounded box behind "Beacon" against the hero's
+   light-blue gradient). Without the SVG source itself to strip that
+   background out at the file level, `multiply` blends white pixels into
+   whatever sits behind them - dissolving the card into the gradient rather
+   than covering it - while leaving the logo's own darker ink untouched. */
+.beacon-logo-blend {
+  mix-blend-mode: multiply;
+}
+
 /* --- Hero heading & copy --- */
 .hero-heading {
   font-size: var(--font-size-h1);
