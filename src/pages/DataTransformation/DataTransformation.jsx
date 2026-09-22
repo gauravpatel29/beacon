@@ -1287,7 +1287,7 @@ function DataTransformation() {
                       <thead>
                         <tr>
                           <th>Variable</th><th>Category</th><th>Normalization</th><th>Adstock (Decay)</th>
-                          <th>Adstock Horizon</th><th>Lag (Shift)</th>
+                          <th>Adstock Horizon (<span className="lag-input-unit">{granularityUnitLabel}</span>)</th><th>Lag (Shift)(<span className="lag-input-unit">{granularityUnitLabel}</span>)</th>
                           <th>Saturation Curve</th><th>Param (k / p)</th><th>Guidance</th>
                         </tr>
                       </thead>
@@ -1387,7 +1387,7 @@ function DataTransformation() {
                                       });
                                     }}
                                   />
-                                  <span className="lag-input-unit">{granularityUnitLabel}(s)</span>
+                                  {/* <span className="lag-input-unit">{granularityUnitLabel}</span> */}
                                 </div>
                               </td>
                               {/* The pure shift, separate from the horizon and
@@ -1422,7 +1422,7 @@ function DataTransformation() {
                                       });
                                     }}
                                   />
-                                  <span className="lag-input-unit">{granularityUnitLabel}(s)</span>
+                                  {/* <span className="lag-input-unit">{granularityUnitLabel}</span> */}
                                 </div>
                               </td>
                               <td>
@@ -1517,7 +1517,7 @@ function DataTransformation() {
                           Showing first 10 rows of {transformResult.rows.length.toLocaleString()} total rows ({[...columns, ...transformResult.transformedCols.map((c) => c.transformed)].length} columns)
                         </p>
                       </div>
-                      <button type="button" className="download-csv-btn save-apply-btn " onClick={downloadTransformed}>
+                      <button type="button" className="download-csv-btn" onClick={downloadTransformed}>
                       Download CSV
                       </button>
                     </div>
