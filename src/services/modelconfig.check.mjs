@@ -201,6 +201,66 @@ t('coefficients are not stored',
   /Coefficients and summaries are not stored/.test(page), 'a stale fit would outlive its ARD');
 t('history moved out of localStorage', !/localStorage/.test(page), 'browser-local history');
 
+console.log('\n11b. a negative impactable share reads as 0%');
+// A channel cannot take sales away from the total it is decomposed out of, so
+// a negative share is an artefact of the fit rather than a quantity to act on.
+// Run the formatter the table actually calls.
+const pctFn = new Function(
+  'return ' + page.match(/function formatPercentCell\(raw\) \{[\s\S]*?\n\}/)[0]
+)();
+eq('a negative number floors at zero', pctFn('-12.4'), '0.0%');
+eq('so does a negative percent string', pctFn('-12.40%'), '0.0%');
+eq('and a value just below zero', pctFn('-0.0001'), '0.0%');
+eq('zero is unchanged', pctFn('0'), '0.0%');
+// The flooring must not disturb the ordinary path.
+eq('a positive value still rounds to 1dp', pctFn('12.4567'), '12.5%');
+eq('a positive percent string too', pctFn('36.9276%'), '36.9%');
+eq('a blank stays a dash', pctFn(''), '-');
+eq('and so does a missing value', pctFn(null), '-');
+eq('a non-numeric value passes through', pctFn('n/a'), 'n/a');
+t('only percent columns are floored',
+  /const isPercentColumn = \(c\) => c\.trim\(\)\.endsWith\('\(%\)'\)/.test(page),
+  'other columns would be clamped too');
+// Impactable Sales, Coefficient and ROI stay as the engine returned them.
+t('the other cells are untouched',
+  /numeric\(r\[c\]\) \? fmt\(r\[c\]\) : \(r\[c\] \?\? '-'\)/.test(page), 'clamped elsewhere');
+
+console.log('\n11c. the impactable share column totals exactly 100');
+// Two things stop the engine's shares adding up on their own: flooring the
+// negatives removes weight without giving it back, and the raw shares only
+// sum to 100 when the fit reconstructs the dependent variable exactly, which
+// ridge and a two-stage split do not.
+const colFn = new Function(
+  'return ' + page.match(/function percentColumn\(rows, column\) \{[\s\S]*?\n\}/)[0]
+)();
+const COL = 'Impactable (%)';
+const shareTotal = (vals) => {
+  const out = colFn(vals.map((v) => ({ [COL]: v })), COL);
+  return { out, sum: Number(out.reduce((s, v) => s + (v === null ? 0 : parseFloat(v)), 0).toFixed(1)) };
+};
+for (const [label, vals] of [
+  ['already 100', [50, 30, 20]],
+  ['a floored negative', [60, 50, -10]],
+  ['under 100 (ridge)', [40, 30, 20]],
+  ['over 100', [70, 60, 30]],
+  ['percent strings', ['36.9276%', '-12.40%', '75.6%']],
+  ['a blank row', [50, null, 50]],
+  ['one row only', [42]],
+]) {
+  eq(`${label}: totals 100.0`, shareTotal(vals).sum, 100);
+}
+// Rounding each share independently to 1dp leaves a column reading 99.9% or
+// 100.1%, which is what a reader with a calculator finds.
+eq('three equal thirds still total 100.0', shareTotal([1, 1, 1]).sum, 100);
+eq('and seven equal rows do too', shareTotal([1, 1, 1, 1, 1, 1, 1]).sum, 100);
+eq('the drift lands on one row, not all',
+   shareTotal([1, 1, 1]).out, ['33.4%', '33.3%', '33.3%']);
+// Nothing to divide by; inventing a total would be worse than showing zeroes.
+eq('an all-negative column shows zeroes', shareTotal([-5, -3]).out, ['0.0%', '0.0%']);
+eq('a non-numeric cell is left alone', colFn([{ [COL]: 'n/a' }], COL), [null]);
+t('the column is resolved once for every row, not per cell',
+  /const shares = Object\.fromEntries\(/.test(page), 'a cell cannot make a column total 100');
+
 console.log('\n12. the reference screen, step for step');
 for (const step of ['Step 1 - Select Model Level', 'Step 3 - Model Setup',
                     'Step 4 - Variable Selection']) {

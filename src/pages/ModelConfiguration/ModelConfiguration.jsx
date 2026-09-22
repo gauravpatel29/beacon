@@ -1119,11 +1119,71 @@ function ModelConfiguration() {
 // whatever precision fmt() or the backend happens to produce — handles the
 // value arriving either as a plain number or as an already "36.9276%"-style
 // string, so rounding is guaranteed either way.
+//
+// A negative share is floored at 0%. A channel cannot take sales away from the
+// total it is being decomposed out of, so a negative value here is an artefact
+// of the fit - a coefficient that came out below zero on a collinear or sparse
+// channel - rather than a quantity anybody can act on.
+//
+// Only the displayed share is floored. The coefficient, impactable sales and
+// ROI on the same row are left exactly as the engine returned them, so a
+// negative fit is still visible where it carries meaning.
 function formatPercentCell(raw) {
   if (raw === null || raw === undefined || raw === '') return '-';
   const num = Number(String(raw).replace('%', ''));
   if (!Number.isFinite(num)) return String(raw);
-  return `${num.toFixed(1)}%`;
+  return `${Math.max(0, num).toFixed(1)}%`;
+}
+
+/**
+ * One percentage column, floored at zero and rescaled to total exactly 100.0.
+ *
+ * Two things stop the raw shares adding up on their own. Flooring the
+ * negatives removes weight without giving it back, so what is left over-counts
+ * the total; and the engine's own shares only sum to 100 when the fit
+ * reconstructs the dependent variable exactly, which ridge and a two-stage
+ * split do not.
+ *
+ * Rounding is done by largest remainder rather than per cell: rounding each
+ * share independently to one decimal leaves a column reading 99.9% or 100.1%,
+ * which is exactly the kind of total somebody checks with a calculator. The
+ * leftover tenths go to the rows with the largest fractional parts, so the
+ * numbers on screen add to 100.0 as written.
+ *
+ * Returns one entry per row: a formatted string, or null for a cell that was
+ * not a number and should be rendered as it arrived.
+ */
+function percentColumn(rows, column) {
+  const values = rows.map((r) => {
+    const raw = r[column];
+    if (raw === null || raw === undefined || raw === '') return null;
+    const num = Number(String(raw).replace('%', ''));
+    return Number.isFinite(num) ? Math.max(0, num) : null;
+  });
+
+  const total = values.reduce((sum, v) => sum + (v || 0), 0);
+  // Every share floored away, or a column of blanks: there is no total to
+  // divide by, and inventing one would be worse than showing zeroes.
+  if (!(total > 0)) return values.map((v) => (v === null ? null : '0.0%'));
+
+  // Work in tenths of a percent so the rounding is exact integer arithmetic.
+  const exact = values.map((v) => (v === null ? null : (v / total) * 1000));
+  const floors = exact.map((v) => (v === null ? null : Math.floor(v)));
+  const assigned = floors.reduce((sum, v) => sum + (v || 0), 0);
+
+  // Hand the remaining tenths to the largest fractional parts.
+  const order = exact
+    .map((v, i) => ({ i, frac: v === null ? -1 : v - Math.floor(v) }))
+    .filter((e) => e.frac >= 0)
+    .sort((a, b) => b.frac - a.frac);
+
+  const tenths = [...floors];
+  let left = 1000 - assigned;
+  for (let n = 0; n < order.length && left > 0; n += 1, left -= 1) {
+    tenths[order[n].i] += 1;
+  }
+
+  return tenths.map((v) => (v === null ? null : `${(v / 10).toFixed(1)}%`));
 }
 
 function CoefficientTable({ rows }) {
@@ -1137,6 +1197,12 @@ function CoefficientTable({ rows }) {
   const numeric = (v) => typeof v === 'number';
   const isPercentColumn = (c) => c.trim().endsWith('(%)');
 
+  // Each percentage column is resolved once, across every row, because making
+  // a column total 100 is not a decision a single cell can take.
+  const shares = Object.fromEntries(
+    columns.filter(isPercentColumn).map((c) => [c, percentColumn(list, c)])
+  );
+
   return (
     <div className="coef-table-wrap">
       <table className="coef-table">
@@ -1144,7 +1210,7 @@ function CoefficientTable({ rows }) {
           <tr>{columns.map((c) => <th key={c}>{c}</th>)}</tr>
         </thead>
         <tbody>
-          {list.map((r) => (
+          {list.map((r, rowIndex) => (
             <tr key={rowKey(r)}>
               {columns.map((c) => (
                 <td
@@ -1153,7 +1219,9 @@ function CoefficientTable({ rows }) {
                     ? (r[c] >= 0 ? 'coef-positive' : 'coef-negative') : ''}
                 >
                   {isPercentColumn(c)
-                    ? formatPercentCell(r[c])
+                    // A cell the column could not read as a number keeps
+                    // whatever it arrived as.
+                    ? (shares[c][rowIndex] ?? formatPercentCell(r[c]))
                     : (numeric(r[c]) ? fmt(r[c]) : (r[c] ?? '-'))}
                 </td>
               ))}
