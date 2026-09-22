@@ -47,6 +47,30 @@ const BUCKET_LABELS = { baseline: 'Baseline', personal: 'Personal Promotion', np
 const EXEC_LABELS = { baseline: 'Baseline Demand', personal: 'Personal Promotion', npp: 'NPP Promotion', dtc: 'DTC / Media' };
 const BUCKET_COLORS = { baseline: '#001E96', personal: '#1ABC9C', npp: '#F59E0B', dtc: '#8B5CF6' };
 
+// Section 7's own classification — 6 tiers, not the 4 buckets Sections 3/5
+// use, per the confirmed benchmarking API doc's Stage 2 keyword rules.
+// Kept fully separate from classifyChannel above rather than replacing it,
+// since Sections 3/5 are an established, working system this doesn't need
+// to touch.
+function classifyBenchmarkTier(variable) {
+  const n = variable.toLowerCase();
+  if (/const|intercept|baseline|macro|trend/.test(n)) return 'baseline';
+  if (/call|rep_f2f|detail/.test(n)) return 'salesforce';
+  if (/speaker|dinner|sample/.test(n)) return 'hcp_pp';
+  if (/co.?pay|copay|patient_assist|voucher/.test(n)) return 'access';
+  if (/rte|portal|hcp_web|web_detail/.test(n)) return 'hcp_npp';
+  if (/tv|broadcast|digital|search|social|media|disp/.test(n)) return 'consumer_npp';
+  return 'hcp_pp'; // unmatched falls back to the same tier classifyChannel defaults to (personal)
+}
+const BENCHMARK_TIER_LABELS = {
+  baseline: 'Baseline Impact %',
+  salesforce: 'Salesforce Impact %',
+  hcp_pp: 'HCP PP (Personal Promo) Impact %',
+  access: 'Access Impact %',
+  hcp_npp: 'HCP NPP (Non-Personal Promo) Impact %',
+  consumer_npp: 'Consumer NPP / DTC Impact %',
+};
+
 // The coefficient array is documented (MODEL_OUTPUT_API.md) to live at
 // `coefficients` on each stored model run. Sections 3/4/5 read it entirely
 // client-side — there's no endpoint for them by design. But real runs have
@@ -78,32 +102,27 @@ function findCoefficientArray(model) {
 // wrong string here doesn't fail, it just quietly benchmarks against the
 // wrong (or default) cohort with no visible sign anything's off. Note the en
 // dash (–, U+2013) in the maturity stages, not a plain hyphen.
+const DISEASE_AREAS = ['Dermatology (Specialty)'];
 const MATURITY_STAGES = ['Launch (<1 Year)', 'Growth (1–3 Years)', 'Mature (3–7 Years)', 'Late Lifecycle (7+ Years)'];
 const MARKETING_DYNAMICS = ['High Competition', 'Medium Competition', 'Low / Niche Competition'];
 
 
-// Hardcoded per explicit instruction — NOT derived from /api/results/benchmarks.
-// results.py's real overall_comparison only ever returns 3 rows (Promotional
-// Lift Share, Baseline Organic Share, Average Portfolio ROI), each a single
-// benchmark value, not 6 categories with ranges. This table is static and
-// does not change with the selected Maturity/Competition filters.
-const PROMOTIONAL_IMPACT_BENCHMARKS = [
-  { category: 'Baseline Impact %', benchmark: '40–55%' },
-  { category: 'Salesforce Impact %', benchmark: '22–30%' },
-  { category: 'HCP PP (Personal Promo) Impact %', benchmark: '4–8%' },
-  { category: 'Access Impact %', benchmark: '12–19%' },
-  { category: 'HCP NPP (Non-Personal Promo) Impact %', benchmark: '5–10%' },
-  { category: 'Consumer NPP / DTC Impact %', benchmark: '6–12%' },
-];
-
-// Status strings from /api/results/benchmarks carry emoji (🟢🟡🔴) — per the
-// house rule, strip the emoji and colour the cell instead of showing it raw.
+// Older assumed format carried emoji (🟢🟡🔴); the confirmed API doc shows
+// plain text instead ("Below Benchmark", "Within Benchmark", "Above
+// Benchmark", "Within/Above Benchmark"). Handles both: emoji wins if
+// present, otherwise tone is read from the words themselves.
 function parseStatus(raw) {
   if (!raw) return { text: '', tone: 'neutral' };
   let tone = 'neutral';
   if (raw.includes('🟢')) tone = 'good';
   else if (raw.includes('🟡')) tone = 'warn';
   else if (raw.includes('🔴')) tone = 'bad';
+  else {
+    const lower = raw.toLowerCase();
+    if (lower.includes('above') || lower.includes('within')) tone = 'good';
+    else if (lower.includes('near')) tone = 'warn';
+    else if (lower.includes('below')) tone = 'bad';
+  }
   const text = raw.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '').trim();
   return { text, tone };
 }
@@ -687,11 +706,7 @@ function ModelOutput() {
   }, [currentCurve, deepDive, responseChannel]);
 
   // ── Section 7: benchmarks (locked until finalized) ───────────────────────
-  // Therapy Type is no longer a user-facing filter (removed per screenshot),
-  // but results.py's own default is `payload.get("therapy_type", "Chronic")`
-  // — so the real endpoint call still needs a value, hardcoded to match that
-  // same default rather than sending nothing.
-  const THERAPY_TYPE_FIXED = 'Chronic';
+  const [diseaseArea, setDiseaseArea] = useState('');
   const [maturityStage, setMaturityStage] = useState('');
   const [marketingDynamic, setMarketingDynamic] = useState('');
   const [benchmarkResult, setBenchmarkResult] = useState(null);
@@ -703,44 +718,79 @@ function ModelOutput() {
     return withRoi.length ? mean(withRoi.map((d) => d.roi)) : null;
   }, [deepDive]);
 
+  // Stage 1 (per-channel Impactable %) already exists on every channelRows
+  // entry — the regression output provides it, nothing to recompute. This is
+  // Stage 2 only: aggregating those existing values into the 6 commercial
+  // tiers the confirmed benchmarking API doc specifies, reusing the same
+  // baseline/intercept handling highLevelImpact above already established
+  // (channelRows excludes the const/Carryover row on purpose, so it's pulled
+  // back in from baselineRows here too).
+  const userImpactShares = useMemo(() => {
+    if (!channelRows.length && !baselineRows.length) return null;
+    const shares = { baseline: 0, salesforce: 0, hcp_pp: 0, access: 0, hcp_npp: 0, consumer_npp: 0 };
+    channelRows.forEach((r) => {
+      const tier = classifyBenchmarkTier(r.variable);
+      shares[tier] = (shares[tier] || 0) + r.impactablePct;
+    });
+    baselineRows.forEach((r) => {
+      const rawPct = r['Impactable (%)'] ?? r['Impactable %'] ?? 0;
+      shares.baseline += parseFloat(String(rawPct).replace('%', '')) || 0;
+    });
+    return shares;
+  }, [channelRows, baselineRows]);
+
   const [benchmarkIsFallback, setBenchmarkIsFallback] = useState(false);
 
-  // Ported from the reference implementation: if the live benchmark service
-  // is unavailable, compute a rough local comparison instead of leaving the
-  // section blank. Clearly labeled as an estimate via benchmarkIsFallback —
-  // this is never presented as real industry data.
+  // If the live benchmark service is unavailable, compute a rough local
+  // comparison instead of leaving the section blank. Clearly labeled as an
+  // estimate via benchmarkIsFallback — never presented as real industry data.
+  // Benchmark ranges here are the same illustrative values already used
+  // elsewhere for this purpose, just reshaped to the confirmed response
+  // format (your_impact_pct + status per category, category on each channel row).
+  const FALLBACK_TIER_RANGES = {
+    baseline: [40, 55], salesforce: [22, 30], hcp_pp: [4, 8],
+    access: [12, 19], hcp_npp: [5, 10], consumer_npp: [6, 12],
+  };
+  const statusForRange = (value, [min, max]) => (value < min ? 'Below Benchmark' : value > max ? 'Above Benchmark' : 'Within Benchmark');
   const buildFallbackBenchmark = () => {
-    const baselineShare = highLevelImpact ? (highLevelImpact.pctBuckets.baseline || 0) : 40;
+    const shares = userImpactShares || { baseline: 0, salesforce: 0, hcp_pp: 0, access: 0, hcp_npp: 0, consumer_npp: 0 };
     return {
-      benchmark_group: `${maturityStage} • ${marketingDynamic} (estimated)`,
-      overall_comparison: [
-        { metric: 'Promotional Lift Share (%)', benchmark: '34.5%', status: '🟡 Near Benchmark' },
-        { metric: 'Baseline Organic Share (%)', benchmark: '45.0%', status: '🟡 Near Benchmark' },
-        { metric: 'Average Portfolio ROI', benchmark: '2.10x', status: '🟡 Near Benchmark' },
-      ],
+      benchmark_group: `Disease Area: ${diseaseArea} • Maturity: ${maturityStage} • Competition: ${marketingDynamic} (estimated)`,
+      impact_benchmarks: Object.keys(BENCHMARK_TIER_LABELS).map((tier) => {
+        const range = FALLBACK_TIER_RANGES[tier];
+        const value = shares[tier] || 0;
+        return {
+          category: BENCHMARK_TIER_LABELS[tier],
+          your_impact_pct: `${value.toFixed(1)}%`,
+          benchmark: `${range[0]}–${range[1]}%`,
+          status: statusForRange(value, range),
+        };
+      }),
       channel_benchmarks: deepDive.filter((d) => d.roi !== null).map((d) => {
         const benchVal = Number((d.roi * 0.85 + 0.3).toFixed(2));
         const delta = d.roi - benchVal;
         return {
           channel: d.variable,
-          // yours: `${d.roi.toFixed(2)}x`,
+          category: BENCHMARK_TIER_LABELS[classifyBenchmarkTier(d.variable)],
+          yours: `${d.roi.toFixed(2)}x`,
           benchmark: `${benchVal.toFixed(2)}x`,
-          status: delta >= 0.2 ? '🟢 Above Benchmark' : delta >= -0.2 ? '🟡 Near Benchmark' : '🔴 Below Benchmark',
+          status: delta >= 0.2 ? 'Above Benchmark' : delta >= -0.2 ? 'Near Benchmark' : 'Below Benchmark',
         };
       }),
     };
   };
 
   const handleRunBenchmark = async () => {
-    if (!maturityStage || !marketingDynamic) return;
+    if (!diseaseArea || !maturityStage || !marketingDynamic) return;
     setBenchmarkError(null);
     setIsLoadingBenchmark(true);
     try {
       const data = await fetchBenchmarks({
-        therapyType: THERAPY_TYPE_FIXED,
+        diseaseArea,
         maturityStage,
         competitionLevel: marketingDynamic,
         channels: deepDive.filter((d) => d.roi !== null).map((d) => ({ channel: d.variable, roi: d.roi })),
+        userImpactShares,
       });
       setBenchmarkResult(data);
       setBenchmarkIsFallback(false);
@@ -751,16 +801,6 @@ function ModelOutput() {
     } finally {
       setIsLoadingBenchmark(false);
     }
-  };
-
-  // The server does not compute overall_comparison[].yours — it returns the
-  // literal string "Calculated from Model" and expects the frontend to fill
-  // it in. Only "Average Portfolio ROI" has a clear client-side source; any
-  // other placeholder metric falls back to "—" rather than guessing.
-  const resolveYours = (metric, yours) => {
-    if (yours !== 'Calculated from Model') return yours;
-    if (/average portfolio roi/i.test(metric)) return avgPortfolioRoi !== null ? `${avgPortfolioRoi.toFixed(2)}x` : '';
-    return '';
   };
 
   const [showStatSummary, setShowStatSummary] = useState(false);
@@ -1085,7 +1125,7 @@ function ModelOutput() {
                   {/* ---- 7. Industry Benchmarks (locked until finalized) ---- */}
                   <div className="mo-card">
                     <p className="mo-section-title">Industry Benchmark Comparisons (Maturity Stage &times; Competition Level)</p>
-                    <p className="mo-section-desc">Compare your model results against the standard pharma commercial benchmark matrix segmented by lifecycle stage and competition level.</p>
+                    <p className="mo-section-desc">Compare your model results against the standard pharma commercial benchmark matrix segmented by disease area, lifecycle stage, and competition level.</p>
                     {!isViewingFinalized ? (
                       <div className="locked-state">
                         <p className="locked-title">Finalize this model to unlock benchmarks</p>
@@ -1094,6 +1134,11 @@ function ModelOutput() {
                     ) : (
                       <>
                         <div className="benchmark-controls-row">
+                          <div className="benchmark-field"><label>Disease Area</label>
+                            <select value={diseaseArea} onChange={(e) => setDiseaseArea(e.target.value)}>
+                              <option value="">Select...</option>{DISEASE_AREAS.map((t) => <option key={t} value={t}>{t}</option>)}
+                            </select>
+                          </div>
                           <div className="benchmark-field"><label>Maturity Stage</label>
                             <select value={maturityStage} onChange={(e) => setMaturityStage(e.target.value)}>
                               <option value="">Select...</option>{MATURITY_STAGES.map((t) => <option key={t} value={t}>{t}</option>)}
@@ -1106,52 +1151,48 @@ function ModelOutput() {
                           </div>
                         </div>
                         {benchmarkError && <div className={benchmarkIsFallback ? 'mo-note' : 'mo-error'}>{benchmarkError}</div>}
-                        <button className="generate-curves-btn" onClick={handleRunBenchmark} disabled={!maturityStage || !marketingDynamic || isLoadingBenchmark}>
+                        <button className="generate-curves-btn" onClick={handleRunBenchmark} disabled={!diseaseArea || !maturityStage || !marketingDynamic || isLoadingBenchmark}>
                           {isLoadingBenchmark ? 'Loading...' : 'Compare Against Benchmark'}
                         </button>
 
                         {benchmarkResult && (
                           <>
                             <div className="cohort-banner-lg">
-                              Benchmark Cohort: Maturity: {maturityStage} &bull; Competition: {marketingDynamic}
+                              Cohort: Disease Area: {diseaseArea} &bull; Maturity: {maturityStage} &bull; Competition: {marketingDynamic}
                               {benchmarkIsFallback && ' (estimated — live service unavailable)'}
                             </div>
 
-                            <p className="benchmark-subheading">Promotional Impact % Share Benchmarks:</p>
+                            <p className="benchmark-subheading">1. Promotional Impact % Share vs. Industry Benchmarks:</p>
                             <table className="benchmark-table-lg">
-                              <thead><tr><th>category</th><th>benchmark</th></tr></thead>
+                              <thead><tr><th>Category</th><th>Your Model Impact %</th><th>Industry Benchmark Range</th><th>Status</th></tr></thead>
                               <tbody>
-                                {PROMOTIONAL_IMPACT_BENCHMARKS.map((row) => (
-                                  <tr key={row.category}>
-                                    <td>{row.category}</td>
-                                    <td>{row.benchmark}</td>
-                                  </tr>
-                                ))}
+                                {(benchmarkResult.impact_benchmarks || []).map((row, i) => {
+                                  const status = parseStatus(row.status);
+                                  return (
+                                    <tr key={i}>
+                                      <td>{row.category}</td>
+                                      <td>{row.your_impact_pct}</td>
+                                      <td>{row.benchmark}</td>
+                                      <td className={`status-cell-lg ${status.tone}`}>{status.text}</td>
+                                    </tr>
+                                  );
+                                })}
                               </tbody>
                             </table>
 
-                            <p className="benchmark-subheading">Channel-Level ROI vs. Industry Peer Benchmarks:</p>
+                            <p className="benchmark-subheading">2. Channel-Level ROI vs. Industry Peer Benchmarks:</p>
                             <table className="benchmark-table-lg">
-                              <thead><tr><th>channel</th><th>category</th><th>yours</th><th>benchmark</th><th>status</th></tr></thead>
+                              <thead><tr><th>Channel</th><th>Category</th><th>Your Dollar ROI</th><th>Peer Benchmark Range</th><th>Status</th></tr></thead>
                               <tbody>
                                 {(benchmarkResult.channel_benchmarks || []).map((row, i) => {
                                   const status = parseStatus(row.status);
-                                  // No category field comes back from the benchmark endpoint — this
-                                  // reuses the same tier classification already computed for this
-                                  // channel in Sections 3/5 (deepDive[].bucket), rather than inventing
-                                  // a value. Falls back to '—' only if the channel isn't in deepDive
-                                  // for some reason (e.g. it had no ROI and was filtered out upstream).
-                                  const matched = deepDive.find((d) => d.variable === row.channel);
-                                  const categoryLabel = matched ? BUCKET_LABELS[matched.bucket] : '—';
                                   return (
                                     <tr key={i}>
                                       <td>{row.channel}</td>
-                                      <td>{categoryLabel}</td>
+                                      <td>{row.category}</td>
                                       <td>{row.yours}</td>
                                       <td>{row.benchmark}</td>
-                                      <td className={`status-cell-lg ${status.tone}`}>
-                                        {status.text}
-                                      </td>
+                                      <td className={`status-cell-lg ${status.tone}`}>{status.text}</td>
                                     </tr>
                                   );
                                 })}

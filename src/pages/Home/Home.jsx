@@ -316,7 +316,7 @@ function Home() {
                 Get Started
               </button>
               <button className="btn btn-primary" onClick={openWorkflowDialog}>Continue Workflow</button>
-              <a href="https://takedammx.vercel.app/" target="_blank"><button className="btn btn-primary" >Interact With Beacon</button></a>
+              <a href="https://procdnammx.vercel.app/" target="_blank"><button className="btn btn-primary" >Interact With Beacon</button></a>
             </div>
           </div>
 
