@@ -18,9 +18,21 @@ import './ModelOutput.css';
 // Prefer the per-column category recorded during ingestion
 // (spec.config_metadata.column_roles) where it answers the question; the
 // name-pattern rules below are the fallback, not the primary source.
+// column_roles records one of the five INGESTION roles - 'Baseline
+// Variables', 'Independent Promotions', and so on. Those are not these four
+// output buckets, and returning one straight through filed rows under keys
+// like 'Baseline Variables' that nothing on this screen reads. The damage
+// showed up in Baseline Demand: the real baseline variables vanished into an
+// unrendered bucket, leaving the tier to be the intercept alone, which is
+// routinely negative even in a model whose baseline contribution is
+// positive. Only 'Baseline Variables' maps cleanly onto a bucket;
+// 'Independent Promotions' still has to be split into personal/npp/dtc,
+// which only the name rules can do.
+const ROLE_TO_BUCKET = { 'Baseline Variables': 'baseline' };
+
 function classifyChannel(variable, columnRoles) {
-  const role = columnRoles?.[variable];
-  if (role) return role;
+  const mapped = ROLE_TO_BUCKET[columnRoles?.[variable]];
+  if (mapped) return mapped;
 
   const n = variable.toLowerCase();
   if (/const|baseline|intercept|carryover/.test(n)) return 'baseline';
@@ -878,7 +890,11 @@ function ModelOutput() {
                       <div className="exec-summary-row">
                         {['baseline', 'personal', 'npp', 'dtc'].map((bucket) => {
                           const sales = highLevelImpact.salesBuckets[bucket] || 0;
-                          const pct = highLevelImpact.pctBuckets[bucket] || 0;
+                          // Floored at zero, matching the share chart beside
+                          // it - which already did this - and the coefficient
+                          // table on Model Configuration. A tier cannot
+                          // contribute a negative share of total volume.
+                          const pct = Math.max(0, highLevelImpact.pctBuckets[bucket] || 0);
                           return (
                             <div key={bucket} className="exec-stat-card">
                               <p className="exec-stat-label">{EXEC_LABELS[bucket]}</p>

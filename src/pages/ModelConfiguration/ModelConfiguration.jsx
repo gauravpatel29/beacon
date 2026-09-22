@@ -1191,6 +1191,23 @@ function percentColumn(rows, column) {
   return tenths.map((v) => (v === null ? null : `${(v / 10).toFixed(1)}%`));
 }
 
+/**
+ * The rows whose share was negative before the percentage column floored it
+ * to zero. Their remaining figures describe the same contribution in other
+ * units, so a row reading "0.0%" beside a negative number would be
+ * contradicting itself.
+ */
+function flooredRows(rows, column) {
+  const out = new Set();
+  rows.forEach((r, i) => {
+    const raw = r[column];
+    if (raw === null || raw === undefined || raw === '') return;
+    const num = Number(String(raw).replace('%', ''));
+    if (Number.isFinite(num) && num < 0) out.add(i);
+  });
+  return out;
+}
+
 function CoefficientTable({ rows, hideConst = false }) {
   const list = Array.isArray(rows) ? rows : [];
   if (!list.length) return <p className="mc-empty">No coefficients returned.</p>;
@@ -1202,12 +1219,14 @@ function CoefficientTable({ rows, hideConst = false }) {
 
   // `Impactable %` is the raw number behind the formatted `Impactable (%)`;
   // showing both would be the same column twice. Coefficient/ROI/Note/Long
-  // Term ROI are hidden per instruction — Impactable (%) and Impactable
-  // Sales are pulled to the front, right after Variable, since they're the
-  // figures that matter most in this view.
-  const hidden = new Set(['Impactable %', 'Coefficient', 'ROI', 'Note', 'Long Term ROI']);
+  // Term ROI and Impactable Sales are hidden per instruction, leaving
+  // Impactable (%) pulled to the front, right after Variable, as the figure
+  // that matters most in this view.
+  const hidden = new Set([
+    'Impactable %', 'Impactable Sales', 'Coefficient', 'ROI', 'Note', 'Long Term ROI',
+  ]);
   const allColumns = Object.keys(visibleRows[0]).filter((c) => !hidden.has(c));
-  const FRONT_ORDER = ['Variable', 'Impactable (%)', 'Impactable Sales'];
+  const FRONT_ORDER = ['Variable', 'Impactable (%)'];
   const columns = [
     ...FRONT_ORDER.filter((c) => allColumns.includes(c)),
     ...allColumns.filter((c) => !FRONT_ORDER.includes(c)),
@@ -1217,9 +1236,16 @@ function CoefficientTable({ rows, hideConst = false }) {
 
   // Each percentage column is resolved once, across every row, because making
   // a column total 100 is not a decision a single cell can take.
+  const percentColumns = columns.filter(isPercentColumn);
   const shares = Object.fromEntries(
-    columns.filter(isPercentColumn).map((c) => [c, percentColumn(visibleRows, c)])
+    percentColumns.map((c) => [c, percentColumn(visibleRows, c)])
   );
+
+  // Once a row's share is floored to 0%, every other negative number on that
+  // row is floored too. Leaving them would show a variable contributing zero
+  // percent of sales and a negative count of them in the same row.
+  const floored = new Set();
+  for (const c of percentColumns) for (const i of flooredRows(visibleRows, c)) floored.add(i);
 
   return (
     <div className="coef-table-wrap">
@@ -1236,7 +1262,9 @@ function CoefficientTable({ rows, hideConst = false }) {
                     // A cell the column could not read as a number keeps
                     // whatever it arrived as.
                     ? (shares[c][rowIndex] ?? formatPercentCell(r[c]))
-                    : (numeric(r[c]) ? fmt(r[c]) : (r[c] ?? '-'))}
+                    : (numeric(r[c])
+                        ? fmt(floored.has(rowIndex) && r[c] < 0 ? 0 : r[c])
+                        : (r[c] ?? '-'))}
                 </td>
               ))}
             </tr>

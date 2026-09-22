@@ -172,6 +172,13 @@ t('the coefficient table renders whatever columns came back',
   /Object\.keys\((?:list|visibleRows)\[0\]\)\.filter/.test(page), 'hardcoded columns');
 t('and hides the raw number behind the formatted percent',
   /const hidden = new Set\(\[[^\]]*'Impactable %'/.test(page), 'the same column twice');
+// Impactable Sales is hidden here per instruction. ModelOutput and
+// Optimization still read it off the same response, so it is dropped from
+// this table only, not from what the engine returns.
+t('the Impactable Sales column is hidden',
+  /const hidden = new Set\(\[[^\]]*'Impactable Sales'/s.test(page), 'still shown');
+t('and is no longer pulled to the front',
+  /const FRONT_ORDER = \['Variable', 'Impactable \(%\)'\];/.test(page), 'still ordered up front');
 // The "Hide const row" checkbox passes hideConst into the table. A merge once
 // landed the checkbox without declaring the prop, so the component read a free
 // identifier and every run threw "hideConst is not defined" on render.
@@ -233,9 +240,16 @@ eq('a non-numeric value passes through', pctFn('n/a'), 'n/a');
 t('only percent columns are floored',
   /const isPercentColumn = \(c\) => c\.trim\(\)\.endsWith\('\(%\)'\)/.test(page),
   'other columns would be clamped too');
-// Impactable Sales, Coefficient and ROI stay as the engine returned them.
-t('the other cells are untouched',
-  /numeric\(r\[c\]\) \? fmt\(r\[c\]\) : \(r\[c\] \?\? '-'\)/.test(page), 'clamped elsewhere');
+// This used to assert that Impactable Sales, Coefficient and ROI stayed
+// exactly as the engine returned them. That is no longer the rule: a row
+// whose share was floored to 0% now floors its other negatives too (11d).
+// What survives is the narrower guarantee - a cell is only ever floored
+// because of its own row's share, never rewritten on its own account.
+t('a cell on an unfloored row is left exactly as it arrived',
+  /numeric\(r\[c\]\)\s*\?\s*fmt\(floored\.has\(rowIndex\) && r\[c\] < 0 \? 0 : r\[c\]\)/.test(page),
+  'clamped elsewhere');
+t('and a non-numeric cell is never touched',
+  /:\s*\(r\[c\] \?\? '-'\)\)\}/.test(page), 'text cells rewritten');
 
 console.log('\n11c. the impactable share column totals exactly 100');
 // Two things stop the engine's shares adding up on their own: flooring the
@@ -272,6 +286,33 @@ eq('an all-negative column shows zeroes', shareTotal([-5, -3]).out, ['0.0%', '0.
 eq('a non-numeric cell is left alone', colFn([{ [COL]: 'n/a' }], COL), [null]);
 t('the column is resolved once for every row, not per cell',
   /const shares = Object\.fromEntries\(/.test(page), 'a cell cannot make a column total 100');
+
+console.log('\n11d. a floored row reads zero across the board');
+// A share floored from negative to 0% leaves the rest of the row describing
+// the same contribution in other units. A row saying 0.0% next to -18,400
+// sales contradicts itself, so every negative number on that row is floored.
+const flooredFn = new Function(
+  'return ' + page.match(/function flooredRows\(rows, column\) \{[\s\S]*?\n\}/)[0]
+)();
+const idx = (rows) => [...flooredFn(rows, COL)];
+eq('the negative row is identified',
+   idx([{ [COL]: 60 }, { [COL]: -10 }, { [COL]: 50 }]), [1]);
+eq('a zero share is not a floored one',
+   idx([{ [COL]: 0 }, { [COL]: 10 }]), []);
+eq('percent strings are read too', idx([{ [COL]: '-4.2%' }]), [0]);
+eq('blanks and text are not floored rows',
+   idx([{ [COL]: null }, { [COL]: '' }, { [COL]: 'n/a' }]), []);
+eq('several negatives are all caught',
+   idx([{ [COL]: -1 }, { [COL]: 5 }, { [COL]: -2 }]), [0, 2]);
+// The zeroing is applied at render, against the same visible row index the
+// shares use, so the two cannot disagree about which row was floored.
+t('a floored row zeroes its other negative figures',
+  /fmt\(floored\.has\(rowIndex\) && r\[c\] < 0 \? 0 : r\[c\]\)/.test(page),
+  'sales stays negative beside a 0.0% share');
+t('and the floored set is built from the visible rows',
+  /flooredRows\(visibleRows, c\)/.test(page), 'indices would not line up');
+t('a positive figure on a floored row is left alone',
+  /r\[c\] < 0 \? 0 : r\[c\]/.test(page), 'the whole row was zeroed');
 
 console.log('\n12. the reference screen, step for step');
 for (const step of ['Step 1 - Select Model Level', 'Step 3 - Model Setup',
