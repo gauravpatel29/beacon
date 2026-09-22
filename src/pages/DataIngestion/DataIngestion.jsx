@@ -167,17 +167,12 @@ function hasCommittedSpec(dataset) {
   );
 }
 
-// Guess a category from the filename the user can always override it
-// via the dropdown, this just saves them a click for the common cases.
-function suggestCategory(filename) {
-  const name = filename.toLowerCase();
-  if (name.includes('sale') || name.includes('trx') || name.includes('nrx')) return 'sales';
-  if (name.includes('call') || name.includes('sample') || name.includes('hcp') || name.includes('rep')) return 'hcp_promo';
-  if (name.includes('tv') || (name.includes('dma') && name.includes('spend'))) return 'dma_promo';
-  if (name.includes('map') || name.includes('bridge') || name.includes('crosswalk')) return 'dma_hcp_map';
-  if (name.includes('pop') || name.includes('universe')) return 'dma_pop';
-  return null;
-}
+// Nothing guesses a category from the filename any more. A guess made from a
+// substring was wrong often enough to matter - "sample" matched hcp_promo,
+// "dma" plus "spend" matched dma_promo - and because the guess was written
+// straight into the file's category it rode into the manifest as though
+// someone had chosen it. A file now carries a category only when one was
+// genuinely committed to its spec.
 
 // ─── Control totals ribbon ────────────────────────────────────────────────
 // Collapsed it answers "is this the file I think it is?" - row count and
@@ -1180,7 +1175,7 @@ function DataIngestion() {
           for (const change of updates.dtype_changes || []) typeCastMap[change.column] = change.to;
           return {
             id: `file-${++fileIdCounter}`, filename: dataset.filename, name: dataset.filename, workflowId,
-            category: spec.config_metadata?.category || suggestCategory(dataset.filename),
+            category: spec.config_metadata?.category || null,
             // Roles are stored under the renamed column name, which is what the
             // rest of the app sees; this screen works in original names, so
             // they are mapped back on the way in.
@@ -1286,7 +1281,7 @@ function DataIngestion() {
         const columns = dataset.columns || profileResponse.columns || [];
         return {
           id: `file-${++fileIdCounter}`, filename: dataset.filename, name: dataset.filename, workflowId,
-          category: suggestCategory(dataset.filename), columns, previewRows: dataset.preview || [],
+          category: null, columns, previewRows: dataset.preview || [],
           columnRoles: rolesFor(columns),
           promoSubTiers: {},
           totalRows: dataset.row_count || 0, isParsing: false, parseError: null, selectedCols: columns,

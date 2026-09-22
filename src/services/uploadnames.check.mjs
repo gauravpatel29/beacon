@@ -82,6 +82,20 @@ t('the category gate is gone',
 // demand for action.
 t('a categorised file still shows its category',
   /\{categoryInfo && \(/.test(page), 'the category is hidden too');
+// Nothing guesses a category from the filename. The guess was written
+// straight into the file's category, so it reached the manifest looking like
+// a deliberate choice - and it was made by substring, which put any file
+// named "sample" into hcp_promo.
+t('no category is guessed from the filename',
+  !/suggestCategory|guessCategory/.test(page), 'a guess remains');
+t('a fresh upload carries no category',
+  /category: null, columns,/.test(page), 'the upload path assigns one');
+t('but a category committed to the spec is still restored',
+  /category: spec\.config_metadata\?\.category \|\| null/.test(page), 'stored categories dropped');
+t('and a file without one writes nothing to the manifest',
+  /if \(file\.category\) meta\.category = file\.category;/
+    .test(readFileSync(new URL('./manifest.js', import.meta.url), 'utf8')),
+  'null would be written through');
 t('the "Edit remaps" footer note is gone',
   !page.includes('Edit remaps'), 'still present');
 const css = readFileSync(new URL('../pages/DataIngestion/DataIngestion.css', import.meta.url), 'utf8');
