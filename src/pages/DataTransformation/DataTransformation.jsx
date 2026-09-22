@@ -8,6 +8,7 @@ import {
   ensureWorkflow, listFiles, problemMessage, transformationApply,
   transformationCorrelation, transformationPreviewSingle, v2GetCsv, v2ListArds,
   edaHistogram, edaDetectOutliers,
+  correlationMatrix as fetchPreCorrelationMatrix,
 } from '../../services/api.js';
 import { recordStage } from '../../services/workflowState.js';
 import { useScreenState } from '../../services/useScreenState.js';
@@ -530,12 +531,19 @@ function DataTransformation() {
       // saturation per channel, then the optional carryover column. This is the
       // same engine the model is fitted with, so what is previewed here is what
       // gets modelled.
+      const builtTransformations = selectedList.map(toTransformation);
+      // Verify per-channel population weight is actually reaching the
+      // payload — sharedToTransformation (services/manifest.js) may or may
+      // not read cfg.popColumn yet; if "Population Column"/"pop_column" on
+      // a population-normalized row doesn't reflect what was picked per
+      // channel in Step 3, that shared function needs updating to read it.
+      console.log('[Data Transformation] built transformations (check Population Column/pop_column per row):', builtTransformations);
       const data = await transformationApply({
         csv_data: effectiveCsv,
         geo_column: geoKeys[0],
         date_column: dateKeys[0],
         dependent_variable: dependentVars[0],
-        transformations: selectedList.map(toTransformation),
+        transformations: builtTransformations,
         derived_variables: toDerivedVariables(),
         pop_column: popKeys[0] || null,
         add_carryover: carryover,
@@ -667,18 +675,18 @@ function DataTransformation() {
       }
       setIsScoringPreCorr(true);
       try {
-        const data = await transformationCorrelation({
+        // /api/correlation/matrix, not /api/transformation/correlation — the
+        // latter has no derived_variables support at all (confirmed against
+        // the API reference), which is why a derived variable never showed
+        // up here before: the parameter was being sent but silently ignored
+        // by an endpoint that doesn't accept it. This one computes derived
+        // variables from the raw data server-side before scoring, same as
+        // transformationApply does for the Post matrix.
+        const data = await fetchPreCorrelationMatrix({
           csv_data: effectiveCsv,
           columns: rawColumnsToScore,
-          // Without this, a derived variable (e.g. a combined column that
-          // only exists once the derivation formula runs) has no raw
-          // counterpart in effectiveCsv to score at all — it would silently
-          // be missing from this matrix while still showing correctly in
-          // the Post-Transformation one, which gets it from
-          // transformResult.csv (already computed server-side via the same
-          // parameter in the transformationApply call above).
           derived_variables: toDerivedVariables(),
-          threshold: 0,
+          method: 'pearson',
         });
         if (!cancelled) { setPreCorrelation(data); setPreCorrError(null); }
       } catch (err) {
@@ -1286,8 +1294,8 @@ function DataTransformation() {
                     <table className="config-table">
                       <thead>
                         <tr>
-                          <th>Variable</th><th>Category</th><th>Normalization</th><th>Adstock (Decay)</th>
-                          <th>Adstock Horizon (<span className="lag-input-unit">{granularityUnitLabel}</span>)</th><th>Lag (Shift)(<span className="lag-input-unit">{granularityUnitLabel}</span>)</th>
+                          <th>Variable</th><th>Category</th><th>Normalization &amp; Population Weight</th><th>Adstock (Decay)</th>
+                          <th>Adstock Horizon</th><th>Lag (Shift)</th>
                           <th>Saturation Curve</th><th>Param (k / p)</th><th>Guidance</th>
                         </tr>
                       </thead>
@@ -1338,14 +1346,27 @@ function DataTransformation() {
                                 <select
                                   value={cfg.normalization || 'none'}
                                   onChange={(e) => updateConfig(name, { normalization: e.target.value })}
-                                  title={!popKeys.length && (cfg.normalization === 'population')
-                                    ? 'Choose a Population column in Step 2 for this to have an effect.'
-                                    : undefined}
                                 >
                                   {NORMALIZATION_OPTIONS.map((o) => (
                                     <option key={o.value} value={o.value}>{o.label}</option>
                                   ))}
                                 </select>
+                                {cfg.normalization === 'population' && (
+                                  <div className="pop-weight-row">
+                                    <span className="pop-weight-label">Weight:</span>
+                                    {columns.length ? (
+                                      <select
+                                        className="pop-weight-select"
+                                        value={cfg.popColumn || popKeys[0] || columns[0]}
+                                        onChange={(e) => updateConfig(name, { popColumn: e.target.value })}
+                                      >
+                                        {columns.map((k) => <option key={k} value={k}>{k}</option>)}
+                                      </select>
+                                    ) : (
+                                      <span className="pop-weight-empty">No columns loaded yet</span>
+                                    )}
+                                  </div>
+                                )}
                               </td>
                               <td>
                                 <div className="lag-input-cell">
@@ -1387,7 +1408,7 @@ function DataTransformation() {
                                       });
                                     }}
                                   />
-                                  {/* <span className="lag-input-unit">{granularityUnitLabel}</span> */}
+                                  <span className="lag-input-unit">{granularityUnitLabel}(s)</span>
                                 </div>
                               </td>
                               {/* The pure shift, separate from the horizon and
@@ -1422,7 +1443,7 @@ function DataTransformation() {
                                       });
                                     }}
                                   />
-                                  {/* <span className="lag-input-unit">{granularityUnitLabel}</span> */}
+                                  <span className="lag-input-unit">{granularityUnitLabel}(s)</span>
                                 </div>
                               </td>
                               <td>
@@ -1514,7 +1535,7 @@ function DataTransformation() {
                       <div>
                         <p className="transform-section-title">Transformed Dataset Preview</p>
                         <p className="transform-section-desc">
-                          Showing first 10 rows of {transformResult.rows.length.toLocaleString()} total rows ({[...columns, ...transformResult.transformedCols.map((c) => c.transformed)].length} columns)
+                          Showing first 10 rows of {transformResult.rows.length.toLocaleString()} total rows ({transformResult.columns.length} columns)
                         </p>
                       </div>
                       <button type="button" className="download-csv-btn" onClick={downloadTransformed}>
@@ -1525,15 +1546,13 @@ function DataTransformation() {
                       <table className="transformed-preview-table">
                         <thead>
                           <tr>
-                            {columns.map((c) => <th key={c}>{c}</th>)}
-                            {transformResult.transformedCols.map((c) => <th key={c.transformed}>{c.transformed}</th>)}
+                            {transformResult.columns.map((c) => <th key={c}>{c}</th>)}
                           </tr>
                         </thead>
                         <tbody>
                           {transformResult.rows.slice(0, 10).map((r, i) => (
                             <tr key={i}>
-                              {columns.map((c) => <td key={c}>{typeof r[c] === 'number' ? r[c].toLocaleString(undefined, { maximumFractionDigits: 4 }) : r[c]}</td>)}
-                              {transformResult.transformedCols.map((c) => <td key={c.transformed}>{Number(r[c.transformed]).toFixed(4)}</td>)}
+                              {transformResult.columns.map((c) => <td key={c}>{typeof r[c] === 'number' ? r[c].toLocaleString(undefined, { maximumFractionDigits: 4 }) : r[c]}</td>)}
                             </tr>
                           ))}
                         </tbody>
