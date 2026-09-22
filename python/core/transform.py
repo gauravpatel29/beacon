@@ -240,7 +240,8 @@ def _apply_date_formats(
     return applied
 
 
-def _cast_value(value: Any, target: str, scale: Optional[int]) -> Any:
+def _cast_value(value: Any, target: str, scale: Optional[int],
+                date_format: Optional[str] = None) -> Any:
     if value is None or (isinstance(value, str) and not value.strip()):
         return None
     text = str(value).strip()
@@ -261,6 +262,24 @@ def _cast_value(value: Any, target: str, scale: Optional[int]) -> Any:
             return False
         raise ValueError(f"{text!r} is not a boolean")
     if target in ("date", "timestamp"):
+        # `date_formats` runs BEFORE this (see the order at the top of the
+        # module), so a column that has one is already written in its target
+        # format. Two things followed from ignoring that:
+        #
+        #  * the value was rewritten as ISO regardless, so the manifest said
+        #    "%d/%m/%Y" while the column held "2023-01-15" - and anything
+        #    reading it back with the declared format, granularity detection
+        #    included, found nothing that parsed;
+        #  * it was re-parsed by INFERENCE, which is the day/month
+        #    transposition this module exists to prevent. "05/01/2023" is
+        #    5 January or 1 May depending on what pandas guesses.
+        #
+        # With a declared format the cast becomes what it should always have
+        # been: a check that the value really is a date, in the format the
+        # manifest says it is.
+        if date_format:
+            ts = pd.to_datetime(text, format=date_format, errors="raise")
+            return ts.strftime(date_format)
         ts = pd.to_datetime(text, errors="raise")
         return ts.strftime("%Y-%m-%d" if target == "date" else "%Y-%m-%d %H:%M:%S")
     return text
@@ -270,12 +289,16 @@ def _apply_dtype_changes(
     filename: str, df: pd.DataFrame, lu: LiveUpdates, errors: List[Dict[str, Any]]
 ) -> Tuple[int, int]:
     applied = nulled = 0
+    # Renames land after this, so these are still the pre-rename names that
+    # `dtype_changes` refers to.
+    written_formats = {d.column: d.to for d in lu.date_formats}
     for change in lu.dtype_changes:
         out: List[Any] = []
         failed = False
+        fmt = written_formats.get(change.column) if change.to in ("date", "timestamp") else None
         for idx, value in enumerate(df[change.column].tolist()):
             try:
-                out.append(_cast_value(value, change.to, change.scale))
+                out.append(_cast_value(value, change.to, change.scale, fmt))
             except (ValueError, TypeError, ArithmeticError, InvalidOperation):
                 if change.on_error == "null_out":
                     out.append(None)

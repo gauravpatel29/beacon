@@ -37,6 +37,15 @@ import pandas as pd
 LEGACY_DATE_FORMATS = [
     "%d/%m/%Y", "%Y/%m/%d", "%Y/%d/%m", "%m/%d/%Y",
     "%m-%d-%Y", "%d-%m-%Y", "%Y-%d-%m", "%Y-%m-%d",
+    # Year-month. Every format above expects a day, so a monthly file storing
+    # its period as "2023-01" matched nothing, was left as text, and could not
+    # be cast to a date at all. This is the one deliberate widening of the
+    # original list: a NNNN-NN column is now offered date controls.
+    #
+    # Ordered last so it is only reached when no day-bearing format explains
+    # the data. A full date can never fall through to it - "2023-01-15" does
+    # not parse as %Y-%m - so no column that used to be detected changes.
+    "%Y-%m", "%Y/%m",
 ]
 LEGACY_SAMPLE_SIZE = 200
 LEGACY_THRESHOLD = 0.8
@@ -70,6 +79,10 @@ TIE_BREAK_RANK = {
     "%m-%d-%Y": 5,
     "%Y/%d/%m": 8,   # year-day-month: real, but rare
     "%Y-%d-%m": 9,
+    # Last resort. Nothing with a day in it can be explained by a year-month
+    # format, so this only wins when the column genuinely has no day.
+    "%Y-%m": 20,
+    "%Y/%m": 21,
 }
 
 DATE_MATCH_THRESHOLD = LEGACY_THRESHOLD
