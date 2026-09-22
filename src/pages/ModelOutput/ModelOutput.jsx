@@ -571,17 +571,29 @@ function ModelOutput() {
     if (deepDive.length) setResponseChannel(deepDive[0].variable);
   }, [viewingModel?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // A channel with no spend recorded has nothing to calibrate a curve
+  // against: the engine divides impactable sales by log(1 + spend), which is
+  // zero at zero spend. Sending those produced a curve of infinities, and the
+  // response died while being serialised - reaching the browser as "the
+  // backend did not respond" rather than as an error anyone could read. The
+  // engine now refuses them outright; this keeps them out of the request.
+  const pricedChannels = useMemo(
+    () => deepDive.filter((d) => Number(d.spend) > 0),
+    [deepDive]
+  );
+
   const handleGenerateCurves = async () => {
     if (!numTime || !numGeo) { setCurvesError('Enter both Number of Time Periods and Number of Geo Units.'); return; }
     setCurvesError(null);
+    if (!pricedChannels.length) return; // the empty state explains why
     setIsGeneratingCurves(true);
     try {
-      const channels = deepDive.map((d) => {
+      const channels = pricedChannels.map((d) => {
         const spendNation = d.spend || 0;
         // Guard against the documented 400 causes (invalid/zero step,
-        // non-numeric beta): a spend of 0 would otherwise produce stop=0 and
-        // step=0, and a missing/zero coefficient isn't a valid saturation
-        // slope. Floors mirror the reference implementation's fallbacks.
+        // non-numeric beta): a missing or zero coefficient isn't a valid
+        // saturation slope. Floors mirror the reference implementation's
+        // fallbacks. Spend itself is guaranteed positive by pricedChannels.
         const stop = spendNation * 2.5 || 200000;
         const step = Math.max(1000, Math.round(stop / 50));
         return {
@@ -616,6 +628,23 @@ function ModelOutput() {
 
   const currentCurve = apiCurves[responseChannel] || null;
 
+  // Why the curve area is empty, in terms the reader can act on. The old
+  // text said "generate automatically once a model is finalized" to someone
+  // looking at a finalized model, which explained nothing.
+  const curvesEmptyMessage = useMemo(() => {
+    if (isGeneratingCurves) return 'Generating response curves...';
+    if (!deepDive.length) return 'Response curves generate automatically once a model is finalized.';
+    if (!pricedChannels.length) {
+      return 'No spend recorded yet. Enter spend under Channel Spend Management above '
+        + 'to generate response curves - a channel with no spend has no return to plot.';
+    }
+    if (responseChannel && !pricedChannels.some((d) => d.variable === responseChannel)) {
+      return `No spend recorded for ${responseChannel}. Enter it under Channel Spend `
+        + 'Management above to plot its curve.';
+    }
+    return 'Response curves generate automatically once a model is finalized.';
+  }, [isGeneratingCurves, deepDive, pricedChannels, responseChannel]);
+
   // Auto-generate response curves once finalized, instead of requiring a
   // manual click. Fires once per finalized-model view (guarded so it doesn't
   // refire on every render), and again whenever the underlying channel list
@@ -626,7 +655,7 @@ function ModelOutput() {
   // eliminating the manual click, not adding a new implicit trigger surface,
   // so this fires once per (model, channel-set) and stays put until a fresh
   // finalize event changes what's being modeled.
-  const channelCount = deepDive.length;
+  const channelCount = pricedChannels.length;
   useEffect(() => {
     if (!isViewingFinalized || !channelCount || !numTime || !numGeo) return;
     if (Object.keys(apiCurves).length) return; // already generated for this view
@@ -999,7 +1028,7 @@ function ModelOutput() {
                         </div>
 
                         {!currentCurve ? (
-                          <p className="mo-empty">{isGeneratingCurves ? 'Generating response curves...' : 'Response curves generate automatically once a model is finalized.'}</p>
+                          <p className="mo-empty">{curvesEmptyMessage}</p>
                         ) : (
                           <>
                             <div className="rc-stat-row rc-stat-row-4">
