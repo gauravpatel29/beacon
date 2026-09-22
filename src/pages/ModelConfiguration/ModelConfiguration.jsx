@@ -1223,6 +1223,10 @@ function CoefficientTable({ rows, hideConst = false, weights = null }) {
   ];
   const numeric = (v) => typeof v === 'number';
   const isPercentColumn = (c) => c.trim().endsWith('(%)');
+  // A quantity of sales, in some unit. Deliberately a whitelist: anything not
+  // named here - Std Error, t-stat, P-value, the confidence bounds, the
+  // coefficient itself - is a statistic, and a statistic keeps its sign.
+  const isContributionColumn = (c) => /impactable|contribution|sales|revenue/i.test(c);
 
   // Each percentage column is resolved once, across every row, because making
   // a column total 100 is not a decision a single cell can take.
@@ -1237,9 +1241,17 @@ function CoefficientTable({ rows, hideConst = false, weights = null }) {
     ])
   );
 
-  // Once a row's share is floored to 0%, every other negative number on that
-  // row is floored too. Leaving them would show a variable contributing zero
-  // percent of sales and a negative count of them in the same row.
+  // Once a row's share is floored to 0%, its other CONTRIBUTION figures are
+  // floored too: Impactable Sales is the same quantity in another unit, so a
+  // row reading 0.0% beside a negative sales count contradicts itself.
+  //
+  // Statistics are not contributions and are never touched. This rule was
+  // briefly applied to the whole row, which showed the intercept - whose
+  // share is genuinely negative - with a t-stat of 0 and a confidence
+  // interval of [0, 0] around a coefficient of -21,121. Those are properties
+  // of the estimate, not quantities of sales; zeroing them destroyed real
+  // diagnostic information and made a significant coefficient look like
+  // nothing at all.
   const floored = new Set();
   for (const c of percentColumns) for (const i of flooredRows(visibleRows, c)) floored.add(i);
 
@@ -1259,7 +1271,7 @@ function CoefficientTable({ rows, hideConst = false, weights = null }) {
                     // whatever it arrived as.
                     ? (shares[c][rowIndex] ?? formatPercentCell(r[c]))
                     : (numeric(r[c])
-                        ? fmt(floored.has(rowIndex) && r[c] < 0 ? 0 : r[c])
+                        ? fmt(isContributionColumn(c) && floored.has(rowIndex) && r[c] < 0 ? 0 : r[c])
                         : (r[c] ?? '-'))}
                 </td>
               ))}

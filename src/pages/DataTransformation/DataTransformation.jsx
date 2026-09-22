@@ -32,16 +32,21 @@ function isNumericColumn(rows, col) {
   return rows.some((r) => typeof r[col] === 'number');
 }
 
-// Every method `normalize_series_vectorized` implements. Population scaling
-// needs a Population column chosen in Step 1; without one the engine leaves the
-// series alone, so the option says as much rather than failing quietly.
+// Population Based was removed per instruction. The engine still implements
+// it, so nothing server-side changes; it is simply no longer offered.
 const NORMALIZATION_OPTIONS = [
   { value: 'none', label: 'None (Raw Volume)' },
-  { value: 'population', label: 'Population Based (per Universe)' },
   { value: 'minmax', label: 'Min-Max Scaling [0, 1]' },
   { value: 'zscore', label: 'Z-Score (Standardized)' },
   { value: 'iqr', label: 'Robust / IQR Scaling' },
 ];
+
+// A transformation set saved before the option was withdrawn can still carry
+// normalization: 'population'. A <select> whose value matches no <option>
+// renders blank, and the first edit to any other field on that row would then
+// silently write that blank back. Reading it as 'none' keeps the row honest.
+const NORMALIZATION_VALUES = new Set(NORMALIZATION_OPTIONS.map((o) => o.value));
+const normalizationValue = (v) => (NORMALIZATION_VALUES.has(v) ? v : 'none');
 
 // Both Adstock Decay and Adstock Horizon are free-typed now (see
 // decayDrafts/horizonDrafts below) rather than picked from a fixed list -
@@ -1393,29 +1398,15 @@ function DataTransformation() {
                               </td>
                               <td>
                                 <select
-                                  value={cfg.normalization || 'none'}
+                                  value={normalizationValue(cfg.normalization)}
                                   onChange={(e) => updateConfig(name, { normalization: e.target.value })}
                                 >
                                   {NORMALIZATION_OPTIONS.map((o) => (
                                     <option key={o.value} value={o.value}>{o.label}</option>
                                   ))}
                                 </select>
-                                {cfg.normalization === 'population' && (
-                                  <div className="pop-weight-row">
-                                    <span className="pop-weight-label">Weight:</span>
-                                    {columns.length ? (
-                                      <select
-                                        className="pop-weight-select"
-                                        value={cfg.popColumn || popKeys[0] || columns[0]}
-                                        onChange={(e) => updateConfig(name, { popColumn: e.target.value })}
-                                      >
-                                        {columns.map((k) => <option key={k} value={k}>{k}</option>)}
-                                      </select>
-                                    ) : (
-                                      <span className="pop-weight-empty">No columns loaded yet</span>
-                                    )}
-                                  </div>
-                                )}
+                                {/* The Population weight picker went with the
+                                    option it belonged to. */}
                               </td>
                               <td>
                                 <div className="lag-input-cell">
@@ -1842,11 +1833,11 @@ function DataTransformation() {
                         <div className="dist-compare-row">
                           <div className="dist-chart-box">
                             <p className="dist-chart-title">Original Distribution (Raw Histogram)</p>
-                            <MiniBarChart bins={inspectDetail.histBefore} binLabels={inspectDetail.binsBefore} color="#94a3b8" xLabel={activeInspectVar} yLabel="Records" />
+                            <MiniBarChart bins={inspectDetail.histBefore} binLabels={inspectDetail.binsBefore} color="#94a3b8" xLabel={activeInspectVar} yLabel="Records" showXTicks={false} />
                           </div>
                           <div className="dist-chart-box">
                             <p className="dist-chart-title after-title">Transformed Distribution (Normalized &amp; Saturated)</p>
-                            <MiniBarChart bins={inspectDetail.histAfter} binLabels={inspectDetail.binsAfter} color="#1d4ed8" xLabel={`${activeInspectVar} (transformed)`} yLabel="Records" />
+                            <MiniBarChart bins={inspectDetail.histAfter} binLabels={inspectDetail.binsAfter} color="#1d4ed8" xLabel={`${activeInspectVar} (transformed)`} yLabel="Records" showXTicks={false} />
                           </div>
                         </div>
 

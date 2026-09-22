@@ -24,14 +24,24 @@ import { runOptimization as apiRunOptimization } from './api.js';
  *   server-side; anything else (including "Sales Goal") runs Fixed Goal mode.
  * @param {string} [params.scenarioName] - Not read by the backend at all;
  *   purely a label for the caller's own bookkeeping (e.g. scenario history).
+ * @param {number} [params.stepDollars] - Budget increment per optimizer move,
+ *   in dollars. The greedy search advances the best-marginal-ROI channel by
+ *   this much each iteration, so it sets how finely the budget is divided:
+ *   smaller means a closer allocation and more iterations. Defaults to 1000
+ *   server-side. This replaces `stepSize`, an index-step count the screen
+ *   collected and this function then dropped - it was never in the payload,
+ *   so that control did nothing at all.
  */
-export async function runOptimization({ mergedRc, optimizerDict, target, optType, scenarioName }) {
+export async function runOptimization({
+  mergedRc, optimizerDict, target, optType, scenarioName, stepDollars,
+}) {
   const data = await apiRunOptimization({
     merged_rc: mergedRc,
     optimizer_dict: optimizerDict,
     target,
     opt_type: optType,
     scenario_name: scenarioName,
+    step_dollars: Number(stepDollars) > 0 ? Number(stepDollars) : undefined,
   });
   return data;
   // Response shape (all fields real, confirmed from optimization.py):

@@ -171,7 +171,7 @@ function Optimization() {
   // ── Per-channel constraints, fully user-editable ─────────────────────────
   // Step Size (K): the increment the greedy hill-climbing pass allocates on
   // each iteration, shared across all channels.
-  const [stepSize, setStepSize] = useState(1);
+  const [stepSize, setStepSize] = useState(1000);
   const [channelBounds, setChannelBounds] = useState([]);
   useEffect(() => {
     if (!channelRows.length) return;
@@ -260,7 +260,7 @@ function Optimization() {
         target: parseFloat(targetValue),
         optType: scenarioType === 'fixed_budget' ? 'Budget Goal' : 'Sales Goal',
         scenarioName: scenarioName.trim() || 'Optimization Scenario',
-        stepSize: Number(stepSize) || 1,
+        stepDollars: Number(stepSize) || 1000,
       });
       setOptResult(data);
     } catch (err) {
@@ -489,12 +489,20 @@ function Optimization() {
           <div className="opt-card">
             <p className="opt-section-title">3. Optimization Configuration (Greedy Algorithm)</p>
             <p className="opt-section-desc">
-              Set the step size for the discrete greedy marginal-ROI search, then edit each channel's Min/Max spend bounds. Setting Min to $0 allows the optimizer to cut underperforming channels completely.
+              Set the budget increment for the discrete greedy marginal-ROI search, then edit each channel's Min/Max spend bounds. Setting Min to $0 allows the optimizer to cut underperforming channels completely.
             </p>
 
             <div className="opt-field">
               <label>Step Size ($)</label>
-              <input type="number" min="1" step="1" value={stepSize} onChange={(e) => setStepSize(e.target.value)} placeholder="1" />
+              {/* Dollars, not response-curve points. Each iteration hands this
+                  much budget to whichever channel has the best marginal ROI,
+                  so a smaller step allocates more finely and takes more
+                  iterations. */}
+              <input
+                type="number" min="1" step="1000" value={stepSize}
+                onChange={(e) => setStepSize(e.target.value)} placeholder="1000"
+                title="Budget added per optimizer iteration, in dollars"
+              />
             </div>
 
             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.8rem' }}>

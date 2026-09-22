@@ -246,7 +246,7 @@ t('only percent columns are floored',
 // What survives is the narrower guarantee - a cell is only ever floored
 // because of its own row's share, never rewritten on its own account.
 t('a cell on an unfloored row is left exactly as it arrived',
-  /numeric\(r\[c\]\)\s*\?\s*fmt\(floored\.has\(rowIndex\) && r\[c\] < 0 \? 0 : r\[c\]\)/.test(page),
+  /numeric\(r\[c\]\)\s*\?\s*fmt\(isContributionColumn\(c\) && floored\.has\(rowIndex\) && r\[c\] < 0 \? 0 : r\[c\]\)/.test(page),
   'clamped elsewhere');
 t('and a non-numeric cell is never touched',
   /:\s*\(r\[c\] \?\? '-'\)\)\}/.test(page), 'text cells rewritten');
@@ -258,15 +258,16 @@ console.log('\n11c. the impactable share column totals exactly 100');
 // screen still routes through it rather than keeping a second copy.
 const COL = 'Impactable (%)';
 t('the share calculation is the shared one',
-  /import { weightedShareColumn, weightFor } from '../../services/impactShare.js';/.test(page),
+  /import \{ weightedShareColumn, weightFor \} from '\.\.\/\.\.\/services\/impactShare\.js';/.test(page),
   'a local copy would drift from Model Output');
 t('and no local percentColumn survives',
-  !/^function percentColumn(/m.test(page), 'two copies of the same rule');
+  !/^function percentColumn\(/m.test(page), 'two copies of the same rule');
 t('each share is multiplied by its prior weight',
-  /weightedShareColumn(visibleRows, c, (r) => weightFor(weights, r.Variable))/.test(page),
+  /weightedShareColumn\(visibleRows, c, \(r\) => weightFor\(weights, r\.Variable\)\)/.test(page),
   'unweighted');
 t('the column is resolved once for every row, not per cell',
-  /const shares = Object.fromEntries(/.test(page), 'a cell cannot make a column total 100');
+  /const shares = Object\.fromEntries\(/.test(page), 'a cell cannot make a column total 100');
+
 console.log('\n11d. a floored row reads zero across the board');
 // A share floored from negative to 0% leaves the rest of the row describing
 // the same contribution in other units. A row saying 0.0% next to -18,400
@@ -286,13 +287,30 @@ eq('several negatives are all caught',
    idx([{ [COL]: -1 }, { [COL]: 5 }, { [COL]: -2 }]), [0, 2]);
 // The zeroing is applied at render, against the same visible row index the
 // shares use, so the two cannot disagree about which row was floored.
-t('a floored row zeroes its other negative figures',
-  /fmt\(floored\.has\(rowIndex\) && r\[c\] < 0 \? 0 : r\[c\]\)/.test(page),
+t('a floored row zeroes its other negative CONTRIBUTION figures',
+  /fmt\(isContributionColumn\(c\) && floored\.has\(rowIndex\) && r\[c\] < 0 \? 0 : r\[c\]\)/.test(page),
   'sales stays negative beside a 0.0% share');
 t('and the floored set is built from the visible rows',
   /flooredRows\(visibleRows, c\)/.test(page), 'indices would not line up');
 t('a positive figure on a floored row is left alone',
   /r\[c\] < 0 \? 0 : r\[c\]/.test(page), 'the whole row was zeroed');
+
+// Statistics are not contributions. Applied to the whole row, this rule
+// showed the intercept - whose share is genuinely negative - with a t-stat of
+// 0 and a confidence interval of [0, 0] around a coefficient of -21,121.
+const contribFn = new Function(
+  'return ' + page.match(/const isContributionColumn = \(c\) => [^;]+;/)[0]
+    .replace(/^const isContributionColumn = /, '').replace(/;$/, '')
+)();
+for (const col of ['Impactable Sales', 'Impactable (%)', 'Contribution', 'Incremental Revenue']) {
+  t(`"${col}" is a contribution and may be floored`, contribFn(col), col);
+}
+for (const col of [
+  'Std Error', 't-stat', 'P-value', 'CI Lower (2.5%)', 'CI Upper (97.5%)',
+  'Coefficient', 'Raw Activity', 'Modelled Activity', 'Spend', 'ROI',
+]) {
+  t(`"${col}" is a statistic and keeps its sign`, !contribFn(col), col);
+}
 
 console.log('\n12. the reference screen, step for step');
 for (const step of ['Step 1 - Select Model Level', 'Step 3 - Model Setup',

@@ -63,28 +63,80 @@ function makeEmptyStep() {
 }
 
 // All three modes call the same POST /v2/workflows/{id}/ard/build endpoint.
-// The `mapping_file`/`source_file`/`target_file` naming this comment used to
-// describe (inferred from response_format.odt's lineage shape, by analogy
-// with how the working join step's `left_file`/`right_file` come back as
-// `left`/`right`) turned out wrong for the REQUEST: a rollup step sent with
-// `source_file` got back "Step 1: Left dataset 'None' not found" - a
-// join-shaped error, on a non-join step. That only makes sense if the
-// backend checks `left_file` on every step regardless of `operation`,
-// defaulting to None when it's absent - i.e. the two primary datasets for
-// EVERY operation type go under the same `left_file`/`right_file` names a
-// join uses, not per-operation names. Fixed below for rollup (confirmed by
-// that error) and allocate (same error, same fix, on its primary dataset);
-// which of allocate's other two files (lower-grain structure vs. crosswalk)
-// belongs under `right_file` is still a guess - see the comment on that step
-// below. Everything else here (per-key field names, aggregations shape,
-// method values) is still unconfirmed the same way it always was: logged to
-// the console before every build, with any 400/422 surfaced via the error
-// banner below.
+// The field names below are no longer inferred. They are read from the
+// backend's own `StitchStep` model (routers/v2_ard.py) and the reads in
+// core/stitching.py, and they match what the reference client sends.
+//
+// The previous naming was reverse-engineered from error messages, and the
+// conclusion drawn from them was wrong. A rollup step sent as
+// `{operation: 'rollup', ...}` produced join-shaped errors, which was read as
+// "the backend checks left_file on every step regardless of operation". The
+// real cause: `StitchStep` declares `step_type` (default "join") and sets
+// `extra="ignore"`. `operation` is not a field, so it was silently dropped
+// and every rollup and allocate step ran as a plain left join - no grouping,
+// no aggregation, no grain change. Renaming the other fields to join names
+// made that join succeed, which looked like progress.
+//
+// Verified against the engine: 4 HCP rows rolled up to DMA returned 4 rows
+// still at HCP grain with the DMA column merged on, where the correct
+// payload returns 2 rows with the metrics summed. The per-column aggregation
+// rules were dropped entirely, so every numeric column was summed whatever
+// the user chose.
+//
+// The names, and why each matters:
+//   step_type         not `operation` - this is what selects the operation
+//   source_file       the dataset being rolled up      (was left_file)
+//   mapping_file      the bridge/crosswalk             (was right_file)
+//   source_entity_key key in the source               (was left_key)
+//   mapping_source_key matching key in the bridge      (was right_key)
+//   target_entity_key the grain to roll up TO          (was target_key)
+//   time_key          extra group-by column            (was date_key)
+//   agg_rules         per-column aggregation           (was aggregations)
 const OPERATION_TYPES = [
   { value: 'join', label: 'Relational Join (Same Grain)' },
-  { value: 'rollup', label: 'Rollup (Lower \u2192 Higher Grain)' },
-  { value: 'allocate', label: 'Allocate (Higher \u2192 Lower Grain)' },
+  { value: 'rollup', label: 'Rollup (Lower → Higher Grain)' },
+  { value: 'allocate', label: 'Allocate (Higher → Lower Grain)' },
 ];
+
+// The aggregations the engine implements, by the names it reads
+// (AGGREGATION_FUNCTIONS in core/stitching.py). An unknown name is not an
+// error there - `AGGREGATION_FUNCTIONS.get(rule, "sum")` falls back to sum -
+// so it is silently ignored. This screen offered "average" and
+// "weighted_average", neither of which the engine knows, so choosing either
+// quietly summed the column instead.
+const AGG_OPTIONS = [
+  { value: 'sum', label: 'Sum (Default / Conserved)' },
+  { value: 'avg', label: 'Average (Mean)' },
+  { value: 'min', label: 'Minimum' },
+  { value: 'max', label: 'Maximum' },
+  { value: 'count', label: 'Count' },
+  { value: 'distinct_count', label: 'Distinct Count' },
+  { value: 'first', label: 'First Occurrence' },
+  { value: 'last', label: 'Last Occurrence' },
+];
+const AGG_VALUES = new Set(AGG_OPTIONS.map((o) => o.value));
+// A draft saved under one of the old names would otherwise render an empty
+// dropdown. Reading it as 'sum' matches what the engine already did with it.
+const aggValue = (v) => (AGG_VALUES.has(v) ? v : 'sum');
+
+// Which columns get an aggregation rule. Only metrics do: a key or a date is
+// what the rollup groups BY, so offering to aggregate one is meaningless.
+// Mirrors the reference client's `isMetricOrPromo` name-token fallback, which
+// is also the rule the engine uses to decide what to aggregate (`id_tokens`
+// in execute_rollup_step).
+const ID_TOKENS = [
+  'npi', 'id', 'zip', 'fips', 'code', 'dma', 'state', 'account',
+  'date', 'week', 'month', 'year', 'time',
+];
+function isMetricColumn(colName) {
+  // Separators normalised to underscore first, so "NPI ID" and "npi-id" are
+  // recognised the same as "npi_id". The reference leans on the ingestion
+  // column role to catch those; this screen has no roles loaded, so the name
+  // is all there is to go on.
+  const l = String(colName || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+  return !ID_TOKENS.some((tok) => l === tok || l.startsWith(`${tok}_`) || l.endsWith(`_${tok}`));
+}
+
 function makeDefaultDraft() {
   return {
     // Blank means "use the grain-based default". Kept per tab so each ARD in
@@ -498,65 +550,52 @@ function Datastitching() {
   const payloadFor = (steps) => ({
     steps: steps.map((s) => {
       if (s.operationType === 'rollup') {
-        const payload = {
-          operation: 'rollup',
-          // Renamed from source_file/mapping_file: a dry run with those names
-          // came back "Left dataset 'None' not found" - a rollup step, not a
-          // join - which only makes sense if the backend checks `left_file`
-          // on every step regardless of operation, defaulting to None when
-          // it's absent. So the two rollup datasets go under the same
-          // left/right names a join uses, not operation-specific ones.
-          left_file: s.sourceFile,
-          right_file: s.bridgeFile,
-          // Same story, one error later: source_key/match_key came back
-          // "choose join keys for both left and right datasets" - the exact
-          // message a join gives for empty left_key/right_key. So rollup
-          // reuses those too, as arrays, not its own singular key fields -
-          // source_key -> left_key, match_key -> right_key.
-          left_key: [s.sourceKey].filter(Boolean),
-          right_key: [s.matchKey].filter(Boolean),
-          target_key: s.targetKey,
-          date_key: s.dateKey,
-          aggregations: s.aggregations || {},
+        return {
+          // `step_type`, not `operation`. This is the field that selects the
+          // operation; anything else is dropped and the step runs as a join.
+          step_type: 'rollup',
+          source_file: s.sourceFile,
+          mapping_file: s.bridgeFile,
+          // Singular in the model, not the join's key arrays.
+          source_entity_key: s.sourceKey,
+          mapping_source_key: s.matchKey,
+          target_entity_key: s.targetKey,
+          time_key: s.dateKey,
+          // Without this the engine sums every numeric column regardless of
+          // what was chosen per column.
+          agg_rules: s.aggregations || {},
         };
-        // target_key/date_key (what to group by after the join) and the
-        // aggregations shape are still unconfirmed - see the comment above
-        // OPERATION_TYPES. If this still 422s, check whether the new error
-        // is about one of those instead.
-        console.log('[Data Stitching] rollup step payload:', payload);
-        return payload;
       }
       if (s.operationType === 'allocate') {
         const isWeighted = s.allocationMethod === 'weighted_column';
-        const payload = {
-          operation: 'allocate',
-          // left_file: same reasoning as rollup above - confirmed by the
-          // identical "Left dataset 'None' not found" error on an allocate
-          // step. Which of the OTHER two allocate datasets (lower-grain
-          // structure vs. the crosswalk) the backend wants as `right_file`
-          // is not yet confirmed - crosswalk is the current guess, by
-          // analogy with rollup's bridge/mapping dataset filling that slot;
-          // watch the console log against the next error/success here.
-          left_file: s.higherGrainFile,
-          right_file: s.crosswalkFile,
+        return {
+          step_type: 'allocate',
+          // The dispatcher reads source_file for the dataset being split and
+          // target_file for the structure it is split across.
+          source_file: s.higherGrainFile,
           target_file: s.lowerGrainStructureFile,
+          mapping_file: s.crosswalkFile,
           source_grain_key: s.sourceGrainKey,
           target_grain_key: s.targetGrainKey,
-          date_key: s.dateKey,
-          method: s.allocationMethod || 'equal',
+          time_key: s.dateKey,
+          // `method` is not a field on the model: sent under that name it was
+          // dropped and every allocation silently ran as "equal", whatever
+          // was chosen.
+          allocation_method: s.allocationMethod || 'equal',
           allocated_metrics: s.metricsToAllocate || [],
-          // Only the weighted method uses a separate weights file/column —
-          // omitted otherwise, same reasoning as a cross join omitting keys.
+          // Only the weighted method uses a separate weights file/column,
+          // omitted otherwise. `weight_file`, not `weight_dataset`.
           ...(isWeighted ? {
-            weight_dataset: s.weightDatasetFile,
+            weight_file: s.weightDatasetFile,
             weight_column: s.weightColumn,
           } : {}),
         };
-        console.log('[Data Stitching] allocate step payload:', payload);
-        return payload;
       }
+      // A join worked only because `operation` was dropped and `step_type`
+      // defaults to "join". Stating it makes that intentional rather than
+      // accidental.
       const base = {
-        operation: 'join',
+        step_type: 'join',
         left_file: s.leftFile,
         right_file: s.rightFile,
         join_type: s.joinType,
@@ -1402,6 +1441,12 @@ function SingleJoinModal({ files, selectedFileList, ardLabel, mode, stepIndex, e
                 {(() => {
                   const sourceCols = columnsForDataset(step.sourceFile);
                   const bridgeCols = columnsForDataset(step.bridgeFile);
+                  // The target key is excluded too: after the bridge merge it
+                  // is a group-by column, not something to aggregate.
+                  const aggregatableCols = (sourceCols || []).filter(
+                    (c) => ![step.sourceKey, step.dateKey, step.targetKey].includes(c)
+                      && isMetricColumn(c)
+                  );
                   const keyField = (label, field, cols, placeholder) => (
                     <div className="step-key-block">
                       <p className="step-field-label">{label}</p>
@@ -1430,27 +1475,32 @@ function SingleJoinModal({ files, selectedFileList, ardLabel, mode, stepIndex, e
                         Group-By Aggregation Rules (Promotional &amp; Sales Metrics)
                         <span className="step-hint-text" style={{ float: 'right' }}>Default: Sum (Conserved)</span>
                       </p>
-                      {(sourceCols || []).filter((c) => ![step.sourceKey, step.dateKey].includes(c)).length === 0 && (
-                        <p className="step-hint-text">Pick the Lower Grain Source Dataset above to configure per-column aggregation.</p>
+                      {/* Metrics only, and never a column the rollup groups
+                          BY. This used to list every source column except the
+                          source and date keys, so IDs, geography and the
+                          target grain column all appeared, each badged
+                          "Metric" and offered an aggregation. */}
+                      {aggregatableCols.length === 0 && (
+                        <p className="step-hint-text">
+                          {sourceCols && sourceCols.length
+                            ? 'No metric columns in this dataset to aggregate.'
+                            : 'Pick the Lower Grain Source Dataset above to configure per-column aggregation.'}
+                        </p>
                       )}
-                      {(sourceCols || [])
-                        .filter((c) => ![step.sourceKey, step.dateKey].includes(c))
-                        .map((col) => (
-                          <div key={col} className="agg-rule-row">
-                            <span className="agg-rule-name">{col} <span className="source-badge">Metric</span></span>
-                            <select
-                              className="step-select"
-                              value={(step.aggregations || {})[col] || 'sum'}
-                              onChange={(e) => onChange({ aggregations: { ...(step.aggregations || {}), [col]: e.target.value } })}
-                            >
-                              <option value="sum">Sum (Default / Conserved)</option>
-                              <option value="average">Average</option>
-                              <option value="min">Min</option>
-                              <option value="max">Max</option>
-                              <option value="weighted_average">Weighted Average</option>
-                            </select>
-                          </div>
-                        ))}
+                      {aggregatableCols.map((col) => (
+                        <div key={col} className="agg-rule-row">
+                          <span className="agg-rule-name">{col} <span className="source-badge">Metric</span></span>
+                          <select
+                            className="step-select"
+                            value={aggValue((step.aggregations || {})[col])}
+                            onChange={(e) => onChange({ aggregations: { ...(step.aggregations || {}), [col]: e.target.value } })}
+                          >
+                            {AGG_OPTIONS.map((o) => (
+                              <option key={o.value} value={o.value}>{o.label}</option>
+                            ))}
+                          </select>
+                        </div>
+                      ))}
                     </>
                   );
                 })()}

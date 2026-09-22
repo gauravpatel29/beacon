@@ -438,31 +438,50 @@ function ModelOutput() {
     );
   }, [coefficientLookup]);
 
-  // ── Executive summary: four tiers, share % + units ───────────────────────
-  // sharePct here is the SUM of each row's stored `impactablePct` field
-  // (parsed from "Impactable (%)"), matching the reference implementation
-  // exactly — it is NOT recomputed as bucket sales ÷ total sales. If the
-  // stored percentages across all coefficient rows don't already sum to
-  // ~100%, these cards can show numbers that don't add to 100 either — same
-  // behavior as the reference, not a bug introduced here.
+  // ── One share per variable, for both Section 3 and Section 5 ─────────────
+  // The two used to disagree, badly. Section 3 summed each row's RAW stored
+  // `Impactable (%)`, which is a share of total sales and only adds to 100
+  // once the intercept's own (large, negative) share is counted. With the
+  // intercept floored at zero, the promotional tiers alone summed to 298%,
+  // so DTC read 174% while the same three channels in Section 5's table
+  // - renormalised to 100 - came to 58%.
+  //
+  // Both now read the same weighted, floored, renormalised share, over one
+  // pool of rows: the deep-dive channels plus the intercept/carryover rows
+  // Section 3 needs and Section 5 deliberately excludes. Tier totals are
+  // therefore exactly the sum of that tier's rows in the table.
+  const sharePool = useMemo(() => {
+    const fromDeepDive = channelRows.map((r) => ({
+      Variable: r.variable, pct: r.impactablePct, bucket: r.bucket,
+      sales: r.impactableSales,
+    }));
+    const fromBaseline = baselineRows.map((r) => ({
+      Variable: r.Variable,
+      pct: parseFloat(String(r['Impactable (%)'] ?? r['Impactable %'] ?? 0).replace('%', '')) || 0,
+      bucket: 'baseline',
+      sales: Number(r['Impactable Sales']) || 0,
+    }));
+    return [...fromDeepDive, ...fromBaseline];
+  }, [channelRows, baselineRows]);
+
+  const shareByVariable = useMemo(() => {
+    const weights = viewingModel?.priorWeights || null;
+    const pct = weightedSharePercents(sharePool, 'pct', (r) => weightFor(weights, r.Variable));
+    return Object.fromEntries(sharePool.map((r, i) => [r.Variable, pct[i] ?? 0]));
+  }, [sharePool, viewingModel]);
+
   const highLevelImpact = useMemo(() => {
-    if (!channelRows.length && !baselineRows.length) return null;
+    if (!sharePool.length) return null;
     const salesBuckets = { baseline: 0, personal: 0, npp: 0, dtc: 0 };
     const pctBuckets = { baseline: 0, personal: 0, npp: 0, dtc: 0 };
-    channelRows.forEach((r) => {
-      salesBuckets[r.bucket] = (salesBuckets[r.bucket] || 0) + r.impactableSales;
-      pctBuckets[r.bucket] = (pctBuckets[r.bucket] || 0) + r.impactablePct;
-    });
-    baselineRows.forEach((r) => {
-      const rawPct = r['Impactable (%)'] ?? r['Impactable %'] ?? 0;
-      const pct = parseFloat(String(rawPct).replace('%', '')) || 0;
-      const sales = Number(r['Impactable Sales']) || 0;
-      salesBuckets.baseline += sales;
-      pctBuckets.baseline += pct;
+    sharePool.forEach((r) => {
+      const bucket = pctBuckets[r.bucket] === undefined ? 'personal' : r.bucket;
+      salesBuckets[bucket] += r.sales;
+      pctBuckets[bucket] += shareByVariable[r.Variable] ?? 0;
     });
     const salesTotal = Object.values(salesBuckets).reduce((a, b) => a + b, 0) || 1;
     return { salesBuckets, salesTotal, pctBuckets };
-  }, [channelRows, baselineRows]);
+  }, [sharePool, shareByVariable]);
 
   // ── DEBUG: dump everything Section 3 depends on whenever the viewed model
   // changes. Remove once modelHistory[i].coefficients is confirmed populated
@@ -588,22 +607,15 @@ function ModelOutput() {
   const [isGeneratingCurves, setIsGeneratingCurves] = useState(false);
   const [curvesError, setCurvesError] = useState(null);
 
-  // Impact Share (%), computed the same way as the coefficient table on Model
-  // Configuration: each variable's impactable share multiplied by the prior
-  // weight it was modelled under, then renormalised so the column totals
-  // exactly 100. It used to be impactableSales / salesTotal, which ignored the
-  // weights entirely and so disagreed with the previous screen.
-  const impactShares = useMemo(() => {
-    const weights = viewingModel?.priorWeights || null;
-    const pct = weightedSharePercents(
-      deepDive.map((d) => ({ Variable: d.variable, pct: d.impactablePct })),
-      'pct',
-      (r) => weightFor(weights, r.Variable)
-    );
-    return Object.fromEntries(
-      deepDive.map((d, i) => [d.variable, pct[i] === null ? null : `${pct[i].toFixed(1)}%`])
-    );
-  }, [deepDive, viewingModel]);
+  // Impact Share (%) for Section 5, formatted from the SAME share map the
+  // executive summary aggregates, so a tier card is always exactly the sum of
+  // that tier's rows here.
+  const impactShares = useMemo(
+    () => Object.fromEntries(
+      deepDive.map((d) => [d.variable, `${(shareByVariable[d.variable] ?? 0).toFixed(1)}%`])
+    ),
+    [deepDive, shareByVariable]
+  );
 
   // Channels a budget can actually be bought with. Baseline demand is not
   // bought, so it has no spend to enter, no ROI, and no response curve: a
@@ -829,8 +841,10 @@ function ModelOutput() {
         return {
           channel: d.variable,
           category: BENCHMARK_TIER_LABELS[classifyBenchmarkTier(d.variable)],
-          yours: `${d.roi.toFixed(2)}x`,
-          benchmark: `${benchVal.toFixed(2)}x`,
+          // Capped like every other ROI on this screen. A channel reading
+          // 340x is a small denominator, not a comparison anyone can act on.
+          yours: formatRoi(d.roi),
+          benchmark: formatRoi(benchVal),
           status: delta >= 0.2 ? 'Above Benchmark' : delta >= -0.2 ? 'Near Benchmark' : 'Below Benchmark',
         };
       }),
@@ -1107,13 +1121,16 @@ function ModelOutput() {
                         {/* Long-Term ROI removed per instruction. It is still
                             returned by the engine and still read elsewhere;
                             only this column is gone. */}
-                        <thead><tr><th>Channel / Tactic</th><th>Tier Role</th><th>Impact (Sales Volume)</th><th>Impact Share (%)</th><th>Spend ($)</th><th>ROI</th></tr></thead>
+                        <thead><tr><th>Channel / Tactic</th><th>Tier Role</th><th>Impact Share (%)</th><th>Spend ($)</th><th>ROI</th></tr></thead>
                         <tbody>
                           {deepDive.map((d) => (
                             <tr key={d.variable}>
                               <td><strong>{d.variable}</strong></td>
                               <td><span className="tier-badge" style={{ backgroundColor: `${BUCKET_COLORS[d.bucket]}22`, color: BUCKET_COLORS[d.bucket] }}>{BUCKET_LABELS[d.bucket]}</span></td>
-                              <td>{Math.round(d.impactableSales).toLocaleString()}</td>
+                              {/* Impact (Sales Volume) removed per
+                                  instruction. impactableSales is still read
+                                  by the executive summary's unit counts and
+                                  by Optimization. */}
                               <td>{impactShares[d.variable] ?? 'NA'}</td>
                               <td>${d.spend.toLocaleString()}</td>
                               <td>{d.roi !== null ? <span className={`roi-value ${d.roi >= 1 ? 'good' : 'bad'}`}>{formatRoi(d.roi)}</span> : <span className="roi-value neutral">NA</span>}</td>

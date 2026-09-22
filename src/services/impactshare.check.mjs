@@ -122,6 +122,52 @@ t('computed from the run\'s own weights',
 t('and the old sales-over-total formula is gone',
   !/d\.impactableSales \/ highLevelImpact\.salesTotal/.test(output), 'old formula remains');
 
+console.log('\n8. the executive summary reconciles with the deep-dive table');
+// They were computed two different ways. Section 3 summed each row's RAW
+// stored Impactable (%), which only adds to 100 once the intercept's large
+// negative share is counted; with that floored to zero the promotional tiers
+// summed to 298%, so DTC read 174% while the same three channels in Section
+// 5 - renormalised to 100 - came to 58%.
+const REAL_ROWS = [
+  ['const', -198.63, 'baseline'],
+  ['Carryover_Lag1_Sales', 55.29, 'baseline'],
+  ['Calls_transformed', 32.37, 'personal'],
+  ['RTE_opens_transformed', 24.74, 'npp'],
+  ['Digital_Impressions_transformed', 67.76, 'dtc'],
+  ['Paid_Social_Impressions_transformed', 58.83, 'dtc'],
+  ['Paid_Search_Impressions_transformed', 47.47, 'dtc'],
+  ['Speaker_Attendees_transformed', 12.17, 'personal'],
+].map(([Variable, pct, bucket]) => ({ Variable, pct, bucket }));
+const realPct = weightedSharePercents(REAL_ROWS, 'pct', (r) => weightFor(null, r.Variable));
+const realShare = Object.fromEntries(REAL_ROWS.map((r, i) => [r.Variable, realPct[i]]));
+const tiers = { baseline: 0, personal: 0, npp: 0, dtc: 0 };
+REAL_ROWS.forEach((r) => { tiers[r.bucket] += realShare[r.Variable]; });
+
+const sumOfTier = (b) => REAL_ROWS.filter((r) => r.bucket === b)
+  .reduce((s, r) => s + realShare[r.Variable], 0);
+for (const b of ['baseline', 'personal', 'npp', 'dtc']) {
+  t(`the ${b} card equals the sum of its rows`,
+    Math.abs(tiers[b] - sumOfTier(b)) < 1e-9, [tiers[b], sumOfTier(b)]);
+}
+eq('the four tiers total 100.0',
+   Number(Object.values(tiers).reduce((a, b) => a + b, 0).toFixed(1)), 100);
+eq('DTC reads 58.3%, not the old 174%', Number(tiers.dtc.toFixed(1)), 58.3);
+eq('and the intercept contributes nothing rather than -198.63%',
+   realShare.const, 0);
+
+t('one pool of rows feeds both sections',
+  /const sharePool = useMemo\(/.test(output), 'two row sets');
+t('the tier cards aggregate the shared map',
+  /pctBuckets\[bucket\] \+= shareByVariable\[r\.Variable\] \?\? 0;/.test(output),
+  'summing raw percentages again');
+t('and the table formats from that same map',
+  /shareByVariable\[d\.variable\] \?\? 0\)\.toFixed\(1\)/.test(output), 'its own calculation');
+t('the intercept row is in the pool, so baseline is not forced to zero',
+  /const fromBaseline = baselineRows\.map/.test(output), 'baseline excluded');
+t('an unrecognised bucket falls into a real one rather than vanishing',
+  /pctBuckets\[r\.bucket\] === undefined \? 'personal' : r\.bucket/.test(output),
+  'a stray bucket would be dropped from every total');
+
 console.log('\n7. the ROI curve has no fabricated zero-spend point');
 // roi at spend 0 is 0/0. The engine substitutes the first step's marginal
 // ROI, which is by construction the same number it computes as the ROI at

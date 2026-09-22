@@ -97,11 +97,51 @@ t('and says so when nothing is left',
 t('the deep-dive table still shows every channel',
   /\{deepDive\.map\(\(d\) => \(/.test(output), 'deep-dive was filtered too');
 
+console.log('\n1b. Population normalization is no longer offered');
+t('the option is gone from the list',
+  !/value: 'population'/.test(transform), 'still offered');
+t('and its weight picker went with it',
+  !/pop-weight-row/.test(transform), 'orphaned control');
+t('the CSS for that control was removed too',
+  !/\.pop-weight-row \{/.test(
+    read('../pages/DataTransformation/DataTransformation.css')), 'dead rules left behind');
+// A set saved before the option was withdrawn still carries it. A <select>
+// whose value matches no <option> renders blank, and the next edit to that
+// row would write the blank back.
+t('a stored "population" value is read as none',
+  /const normalizationValue = \(v\) => \(NORMALIZATION_VALUES\.has\(v\) \? v : 'none'\);/.test(transform),
+  'the dropdown would render blank');
+t('and the dropdown uses that reader',
+  /value=\{normalizationValue\(cfg\.normalization\)\}/.test(transform), 'reads the raw value');
+t('the other four methods are untouched',
+  ['none', 'minmax', 'zscore', 'iqr'].every((v) => transform.includes(`value: '${v}'`)),
+  'a method was lost');
+
+console.log('\n1c. the distribution charts drop their x-axis values');
+const distCharts = transform.match(/<MiniBarChart bins=\{inspectDetail\.hist(Before|After)\}[^/]*\/>/g) || [];
+t('both charts are found', distCharts.length === 2, distCharts.length);
+t('the original distribution hides its ticks',
+  /bins=\{inspectDetail\.histBefore\}[^/]*showXTicks=\{false\}/.test(transform), 'still shown');
+t('the transformed distribution hides its ticks',
+  /bins=\{inspectDetail\.histAfter\}[^/]*showXTicks=\{false\}/.test(transform), 'still shown');
+t('and the transformed chart kept its axis label',
+  /xLabel=\{`\$\{activeInspectVar\} \(transformed\)`\}/.test(transform), 'label was mangled');
+
 console.log('\n7. Long-Term ROI is gone from the deep-dive table');
 t('the header no longer lists it', !/<th>Long-Term ROI<\/th>/.test(output), 'header remains');
 t('and no cell renders it', !/d\.longTermRoi !== undefined \?/.test(output), 'cell remains');
 t('but the engine still returns it for other readers',
   /longTermRoi/.test(output), 'dropped from the model entirely');
+// Impact (Sales Volume) removed per instruction, from this table only.
+t('Impact (Sales Volume) is no longer a column',
+  !/<th>Impact \(Sales Volume\)<\/th>/.test(output), 'header remains');
+t('and its cell is gone',
+  !/<td>\{Math\.round\(d\.impactableSales\)\.toLocaleString\(\)\}<\/td>/.test(output), 'cell remains');
+t('the header and body still line up at five columns',
+  (output.match(/<thead><tr><th>Channel \/ Tactic<\/th>[\s\S]*?<\/tr><\/thead>/) || [''])[0]
+    .split('<th>').length - 1 === 5, 'column count drifted');
+t('impactableSales is still read elsewhere on the screen',
+  /r\.impactableSales/.test(output), 'dropped from the model entirely');
 
 console.log('\n8. a re-run overwrites the model of the same name');
 t('an existing row is looked up by name',
@@ -117,9 +157,16 @@ t('and the warning says it will overwrite',
   /Running will overwrite that model\./.test(config), 'still calls it a duplicate');
 
 console.log('\n9. Starting Iteration is gone from Optimization');
-t('the column header is gone',
-  !/<th>Starting Iteration \(iter\)<\/th>/.test(optim), 'header remains');
-t('and the input with it', !/updateBound\(idx, 'iter'/.test(optim), 'input remains');
+// Tested against the source with comments stripped: a later merge kept the
+// markup but commented it out, which removes the column from the screen just
+// as deleting it does. What matters is that nothing RENDERS it.
+const live = optim
+  .replace(/\{\/\*[\s\S]*?\*\/\}/g, '')   // JSX comments
+  .replace(/\/\*[\s\S]*?\*\//g, '')       // block comments
+  .replace(/^\s*\/\/.*$/gm, '');          // whole-line // comments
+t('the column header is not rendered',
+  !/<th>Starting Iteration \(iter\)<\/th>/.test(live), 'header remains');
+t('and the input is not rendered', !/updateBound\(idx, 'iter'/.test(live), 'input remains');
 t('the section heading no longer promises it',
   !/Channel Constraints &amp; Starting Iteration/.test(optim), 'heading remains');
 t('nor does the description',
