@@ -69,6 +69,7 @@ function findCoefficientArray(model) {
 const MATURITY_STAGES = ['Launch (<1 Year)', 'Growth (1–3 Years)', 'Mature (3–7 Years)', 'Late Lifecycle (7+ Years)'];
 const MARKETING_DYNAMICS = ['High Competition', 'Medium Competition', 'Low / Niche Competition'];
 
+
 // Hardcoded per explicit instruction — NOT derived from /api/results/benchmarks.
 // results.py's real overall_comparison only ever returns 3 rows (Promotional
 // Lift Share, Baseline Organic Share, Average Portfolio ROI), each a single
@@ -128,6 +129,13 @@ function ModelOutput() {
   const [finalizedId, setFinalizedId] = useState('');
   const [finalizeError, setFinalizeError] = useState(null);
   const [isFinalizing, setIsFinalizing] = useState(false);
+  // Per Module 7 API Reference Section 4 (Client-Side State Schema):
+  // unitValue/unitValueLabel are real, documented app state — unitValue
+  // feeds channels[].price in the response-curves generation payload
+  // (Section 3), converting raw unit volume into actual dollar revenue/ROI.
+  const unitValueLabel = 'Revenue Per TRx ($)'; // fixed — dropdown removed per instruction
+  const [unitValue, setUnitValue] = useState(100);
+  const [unitValueDraft, setUnitValueDraft] = useState(null); // in-progress typed text, or null when not editing
   const [spendByChannel, setSpendByChannel] = useState({});
   const [spendSaveError, setSpendSaveError] = useState(null);
   // DEBUG: the full workflow.state_data, stashed so the debug probe below can
@@ -367,14 +375,20 @@ function ModelOutput() {
     return channelRows
       .map((r) => {
         const spend = Number(spendByChannel[r.variable]) || 0;
-        const roi = spend > 0 ? r.impactableSales / spend : null;
+        // Dollar ROI = Revenue / Spend, where Revenue = Incremental Units x
+        // Unit Value (Module 7 API Reference, Section 4: unitValue feeds
+        // the same economics the response-curves' own roi/mroi use via
+        // channels[].price). Previously this was impactableSales / spend
+        // alone — a unit-volume ratio that never moved when Value Per Unit
+        // changed, which was the actual bug.
+        const roi = spend > 0 ? (r.impactableSales * unitValue) / spend : null;
         const longTermRoi = (r.longTermRoi !== undefined && r.longTermRoi !== null)
           ? Number(r.longTermRoi)
           : (roi !== null ? roi * 1.35 : undefined);
         return { ...r, spend, roi, longTermRoi };
       })
       .sort((a, b) => b.impactableSales - a.impactableSales);
-  }, [channelRows, spendByChannel]);
+  }, [channelRows, spendByChannel, unitValue]);
 
   // Section 3 needs the intercept/carryover row's own Impactable Sales/(%) to
   // compute "Baseline Demand" — but channelRows deliberately excludes that
@@ -566,7 +580,7 @@ function ModelOutput() {
           start: 0,
           stop,
           step,
-          price: 1,
+          price: Number(unitValue) || 1,
           saturation_function: saturationFunction,
           power_value: Number(powerValue) || 0.5,
         };
@@ -794,6 +808,50 @@ function ModelOutput() {
                   >
                     {isFinalizing ? 'Saving...' : isViewingFinalized ? 'Re-Confirm Finalized' : 'Finalize Model'}
                   </button>
+                </div>
+              )}
+
+              {viewingModel && (
+                <div className="mo-card">
+                  <p className="mo-section-title">Economic Metric &amp; Unit Value Configuration ($)</p>
+                  <p className="mo-section-desc">
+                    Specify the monetary value generated per sales prescription (TRx) to translate
+                    incremental unit volumes into revenue and calculate true economic ROI.
+                  </p>
+                  <div className="unit-value-row">
+                    <div className="unit-value-field">
+                      <label>Economic Metric Type:</label>
+                      <p className="unit-value-fixed-text">{unitValueLabel}</p>
+                    </div>
+                    <div className="unit-value-field">
+                      <label>Value Per Unit ($ / TRx):</label>
+                      <div className="unit-value-input-wrap">
+                        <span className="unit-value-prefix">$</span>
+                        <input
+                          type="number" min="0" step="0.01"
+                          value={unitValueDraft !== null ? unitValueDraft : String(unitValue)}
+                          onChange={(e) => setUnitValueDraft(e.target.value)}
+                          onBlur={(e) => {
+                            const parsed = Math.max(0, Number(e.target.value) || 0);
+                            setUnitValue(parsed);
+                            setUnitValueDraft(null);
+                            // Curves bake `price` in at generation time, so a
+                            // changed Unit Value needs a real regeneration —
+                            // clearing apiCurves lets the existing auto-generate
+                            // effect (guarded on it being empty) pick this up,
+                            // rather than duplicating that fetch logic here.
+                            if (parsed !== unitValue) setApiCurves({});
+                          }}
+                        />
+                      </div>
+                    </div>
+                    <div className="unit-value-formula-box">
+                      <p className="unit-value-formula-label">Formula Applied:</p>
+                      <p className="unit-value-formula-text">
+                        Incremental Revenue ($) = Incremental TRx &times; ${Number(unitValue).toLocaleString()}
+                      </p>
+                    </div>
+                  </div>
                 </div>
               )}
 
