@@ -2037,11 +2037,34 @@ def build_waterfall_chart_data(combined_df: pd.DataFrame, dep_var_label: str = "
 
 
 def calc_calibration_factor(impactable_sales_nation, beta_coeff, spend_nation, saturation_function, power_value, num_time=12, num_geo=2614):
+    # A channel with no recorded spend has no curve to calibrate: the
+    # denominator below is beta * log(1 + 0) == 0, and numpy divides by it to
+    # give inf rather than raising. Every point of the curve then came back
+    # inf, and Starlette serialises responses with allow_nan=False, so the
+    # failure surfaced as a 500 raised while rendering the response - outside
+    # this module's callers and outside the router's own try/except. Rejecting
+    # it here turns that into the router's 400 with a message that says which
+    # channel and why.
     if saturation_function == "log":
-        return (impactable_sales_nation / (num_time * num_geo)) / (beta_coeff * np.log(1 + (spend_nation / (num_time * num_geo))))
+        denominator = beta_coeff * np.log(1 + (spend_nation / (num_time * num_geo)))
     elif saturation_function == "power":
-        return (impactable_sales_nation / (num_time * num_geo)) / (beta_coeff * np.power(spend_nation / (num_time * num_geo), power_value))
-    return 1.0
+        denominator = beta_coeff * np.power(spend_nation / (num_time * num_geo), power_value)
+    else:
+        return 1.0
+
+    if not np.isfinite(denominator) or denominator == 0:
+        raise ValueError(
+            "cannot calibrate a response curve without spend and a non-zero "
+            "coefficient (spend_nation=%r, beta_coeff=%r)" % (spend_nation, beta_coeff)
+        )
+
+    factor = (impactable_sales_nation / (num_time * num_geo)) / denominator
+    if not np.isfinite(factor):
+        raise ValueError(
+            "response curve calibration is not a finite number "
+            "(impactable_sales_nation=%r)" % (impactable_sales_nation,)
+        )
+    return factor
 
 
 def create_response_curve(channel_name, impactable_sales_nation, beta_coeff, spend_nation, start, stop, step, price, saturation_function, power_value, num_time=12, num_geo=2614):

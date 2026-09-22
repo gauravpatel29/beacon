@@ -35,23 +35,38 @@ async def generate_response_curves(payload: dict):
             sat_fn = ch.get("saturation_function", "log")
             power_val = float(ch.get("power_value", 0.5))
 
-            df = create_response_curve(
-                channel_name=channel_name,
-                impactable_sales_nation=impactable_sales,
-                beta_coeff=beta_coeff,
-                spend_nation=spend,
-                start=start,
-                stop=stop,
-                step=step,
-                price=price,
-                saturation_function=sat_fn,
-                power_value=power_val,
-                num_time=num_time,
-                num_geo=num_geo,
+            # Named, so a channel that cannot be calibrated says which one it
+            # is rather than failing the whole batch anonymously.
+            try:
+                df = create_response_curve(
+                    channel_name=channel_name,
+                    impactable_sales_nation=impactable_sales,
+                    beta_coeff=beta_coeff,
+                    spend_nation=spend,
+                    start=start,
+                    stop=stop,
+                    step=step,
+                    price=price,
+                    saturation_function=sat_fn,
+                    power_value=power_val,
+                    num_time=num_time,
+                    num_geo=num_geo,
+                )
+            except ValueError as exc:
+                raise ValueError(f"{channel_name}: {exc}") from exc
+
+
+            # Clean non-finite floats. This used to replace NaN only, which
+            # left inf and -inf in the frame. Starlette's JSONResponse calls
+            # json.dumps with allow_nan=False, so those raised while the
+            # response was being rendered - after this handler returned, and
+            # so past the except below. The client got a bare 500 with no CORS
+            # headers, which a browser reports as "the backend did not
+            # respond" rather than as a server error.
+            clean_records = (
+                df.replace([np.inf, -np.inf], np.nan).replace({np.nan: None})
+                  .to_dict(orient="records")
             )
-            
-            # Clean non-finite floats
-            clean_records = df.replace({np.nan: None}).to_dict(orient="records")
             results[channel_name] = clean_records
 
         return {"curves": results}
