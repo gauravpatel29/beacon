@@ -115,6 +115,7 @@ function ModelConfiguration() {
   const [priorWeights, setPriorWeights] = useState({});
 
   const [runStatus, setRunStatus] = useState('idle'); // idle | running | complete | failed
+  const [hideConstRow, setHideConstRow] = useState(false);
   const [runError, setRunError] = useState(null);
   const [stage1, setStage1] = useState(null);
   const [showSummary, setShowSummary] = useState(false);
@@ -974,6 +975,10 @@ function ModelConfiguration() {
                 <button className="run-model-btn" onClick={handleRunModel} disabled={!canRun}>
                   {isBusy ? 'Running Regression…' : 'Run Regression'}
                 </button>
+                <label className="hide-const-toggle">
+                  <input type="checkbox" checked={hideConstRow} onChange={(e) => setHideConstRow(e.target.checked)} />
+                  Hide const row
+                </label>
                 {runStatus !== 'idle' && (
                   <span className={`run-status-badge ${runStatus}`}>
                     {runStatus === 'running' && 'Running…'}
@@ -1027,7 +1032,7 @@ function ModelConfiguration() {
                   <p className="mc-card-heading" style={{ marginTop: 'var(--spacing-md)' }}>
                     Estimated Coefficients &amp; Impactable Attribution
                   </p>
-                  <CoefficientTable rows={stage1.coefficients} />
+                  <CoefficientTable rows={stage1.coefficients} hideConst={hideConstRow} />
                 </div>
 
                 {/* Which alpha won, and by how much. */}
@@ -1126,14 +1131,27 @@ function formatPercentCell(raw) {
   return `${num.toFixed(1)}%`;
 }
 
-function CoefficientTable({ rows }) {
+function CoefficientTable({ rows, hideConst }) {
   const list = Array.isArray(rows) ? rows : [];
   if (!list.length) return <p className="mc-empty">No coefficients returned.</p>;
 
+  // The model's const/baseline row (Note === 'Intercept') — hidden when the
+  // "Hide const row" checkbox next to Run Regression is checked.
+  const visibleRows = hideConst ? list.filter((r) => r.Note !== 'Intercept') : list;
+  if (!visibleRows.length) return <p className="mc-empty">No coefficients returned.</p>;
+
   // `Impactable %` is the raw number behind the formatted `Impactable (%)`;
-  // showing both would be the same column twice.
-  const hidden = new Set(['Impactable %']);
-  const columns = Object.keys(list[0]).filter((c) => !hidden.has(c));
+  // showing both would be the same column twice. Coefficient/ROI/Note/Long
+  // Term ROI are hidden per instruction — Impactable (%) and Impactable
+  // Sales are pulled to the front, right after Variable, since they're the
+  // figures that matter most in this view.
+  const hidden = new Set(['Impactable %', 'Coefficient', 'ROI', 'Note', 'Long Term ROI']);
+  const allColumns = Object.keys(list[0]).filter((c) => !hidden.has(c));
+  const FRONT_ORDER = ['Variable', 'Impactable (%)', 'Impactable Sales'];
+  const columns = [
+    ...FRONT_ORDER.filter((c) => allColumns.includes(c)),
+    ...allColumns.filter((c) => !FRONT_ORDER.includes(c)),
+  ];
   const numeric = (v) => typeof v === 'number';
   const isPercentColumn = (c) => c.trim().endsWith('(%)');
 
@@ -1144,14 +1162,10 @@ function CoefficientTable({ rows }) {
           <tr>{columns.map((c) => <th key={c}>{c}</th>)}</tr>
         </thead>
         <tbody>
-          {list.map((r) => (
+          {visibleRows.map((r) => (
             <tr key={rowKey(r)}>
               {columns.map((c) => (
-                <td
-                  key={c}
-                  className={c === 'Coefficient' && numeric(r[c])
-                    ? (r[c] >= 0 ? 'coef-positive' : 'coef-negative') : ''}
-                >
+                <td key={c}>
                   {isPercentColumn(c)
                     ? formatPercentCell(r[c])
                     : (numeric(r[c]) ? fmt(r[c]) : (r[c] ?? '-'))}

@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useRef } from 'react';
 import Papa from 'papaparse';
 import {
   Bar, BarChart, CartesianGrid, Line, LineChart,
-  ResponsiveContainer, Tooltip, XAxis, YAxis,
+  ResponsiveContainer, Scatter, ScatterChart, Tooltip, XAxis, YAxis,
 } from 'recharts';
 import {
   ensureWorkflow, listFiles, problemMessage, transformationApply,
@@ -723,6 +723,42 @@ function DataTransformation() {
       values: cols.map((c2) => Number(preCorrelation.matrix?.[c2]?.[c1] ?? 0)),
     }));
   }, [preCorrelation]);
+
+  // Scatter data for the two charts below the correlation matrices — same
+  // channel-vs-KPI pairing the single-channel inspector further down uses
+  // (raw values for Pre, _transformed for Post), capped at 500 points so a
+  // 10k-row ARD doesn't render an unreadable, sluggish point cloud.
+  // Scatter X/Y are independently selectable (any ARD column), defaulting to
+  // the inspector's current channel and the dependent variable so the charts
+  // still make sense out of the box without the user having to pick first.
+  const [scatterXVar, setScatterXVar] = useState('');
+  const [scatterYVar, setScatterYVar] = useState('');
+  const SCATTER_POINT_CAP = 500;
+  const effectiveScatterX = scatterXVar || activeInspectVar;
+  const effectiveScatterY = scatterYVar || dependentVars[0] || '';
+
+  const preScatterData = useMemo(() => {
+    if (!effectiveScatterX || !effectiveScatterY || !rows.length) return [];
+    const keptRows = excludedRowKeys.size ? rows.filter((_, idx) => !excludedRowKeys.has(idx)) : rows;
+    return keptRows
+      .slice(0, SCATTER_POINT_CAP)
+      .map((r) => ({ x: Number(r[effectiveScatterX]), y: Number(r[effectiveScatterY]) }))
+      .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+  }, [rows, excludedRowKeys, effectiveScatterX, effectiveScatterY]);
+
+  // Not every picked X column has a _transformed counterpart (e.g. a
+  // Baseline or Dimension field never gets one) — postScatterHasX flags
+  // that so the chart can say so plainly instead of silently plotting
+  // nothing or falling back to the raw column unlabeled.
+  const postScatterTransformedCol = `${effectiveScatterX}_transformed`;
+  const postScatterHasX = Boolean(transformResult?.columns?.includes(postScatterTransformedCol));
+  const postScatterData = useMemo(() => {
+    if (!effectiveScatterX || !effectiveScatterY || !postScatterHasX || !transformResult?.rows?.length) return [];
+    return transformResult.rows
+      .slice(0, SCATTER_POINT_CAP)
+      .map((r) => ({ x: Number(r[postScatterTransformedCol]), y: Number(r[effectiveScatterY]) }))
+      .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+  }, [transformResult, effectiveScatterX, effectiveScatterY, postScatterHasX, postScatterTransformedCol]);
 
   // Filtered here, from the matrix already in hand, using the same rule the
   // engine applies: upper triangle only, |r| at or above the threshold,
@@ -1571,6 +1607,21 @@ function DataTransformation() {
                       <span className="ready-badge">{selectedList.length} Features Ready for Regression</span>
                     </div>
 
+                    <div className="scatter-axis-picker-row">
+                      <div className="scatter-axis-field">
+                        <label>Scatter X Axis</label>
+                        <select value={effectiveScatterX} onChange={(e) => setScatterXVar(e.target.value)}>
+                          {columns.map((c) => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      </div>
+                      <div className="scatter-axis-field">
+                        <label>Scatter Y Axis</label>
+                        <select value={effectiveScatterY} onChange={(e) => setScatterYVar(e.target.value)}>
+                          {columns.map((c) => <option key={c} value={c}>{c}</option>)}
+                        </select>
+                      </div>
+                    </div>
+
                     <div className="corr-compare-row">
                       <div className="corr-compare-col">
                         <p className="corr-compare-title">Pre-Transformation Matrix (Raw Features)</p>
@@ -1595,6 +1646,26 @@ function DataTransformation() {
                             </tbody>
                           </table>
                         </div>
+                        {effectiveScatterX && effectiveScatterY && (
+                          <div className="dist-chart-box" style={{ marginTop: 'var(--spacing-md)' }}>
+                            <p className="dist-chart-title">Scatter: {effectiveScatterX} (Raw) vs {effectiveScatterY}</p>
+                            {preScatterData.length ? (
+                              <ResponsiveContainer width="100%" height={220}>
+                                <ScatterChart margin={{ top: 10, right: 20, bottom: 22, left: 8 }}>
+                                  <CartesianGrid stroke={GRID} />
+                                  <XAxis type="number" dataKey="x" name={effectiveScatterX} tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
+                                         label={{ value: effectiveScatterX, ...X_LABEL }} />
+                                  <YAxis type="number" dataKey="y" name={effectiveScatterY} tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
+                                         label={{ value: effectiveScatterY, ...Y_LABEL }} />
+                                  <Tooltip content={<ChartTooltip />} cursor={{ strokeDasharray: '3 3' }} />
+                                  <Scatter data={preScatterData} fill="#94a3b8" />
+                                </ScatterChart>
+                              </ResponsiveContainer>
+                            ) : (
+                              <p className="mc-empty">No numeric rows found for this X/Y pair.</p>
+                            )}
+                          </div>
+                        )}
                       </div>
 
                       <div className="corr-compare-col">
@@ -1620,6 +1691,30 @@ function DataTransformation() {
                             </tbody>
                           </table>
                         </div>
+                        {effectiveScatterX && effectiveScatterY && (
+                          <div className="dist-chart-box" style={{ marginTop: 'var(--spacing-md)' }}>
+                            <p className="dist-chart-title">Scatter: {effectiveScatterX} (Transformed) vs {effectiveScatterY}</p>
+                            {postScatterData.length ? (
+                              <ResponsiveContainer width="100%" height={220}>
+                                <ScatterChart margin={{ top: 10, right: 20, bottom: 22, left: 8 }}>
+                                  <CartesianGrid stroke={GRID} />
+                                  <XAxis type="number" dataKey="x" name={`${effectiveScatterX} (transformed)`} tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
+                                         label={{ value: `${effectiveScatterX} (transformed)`, ...X_LABEL }} />
+                                  <YAxis type="number" dataKey="y" name={effectiveScatterY} tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
+                                         label={{ value: effectiveScatterY, ...Y_LABEL }} />
+                                  <Tooltip content={<ChartTooltip />} cursor={{ strokeDasharray: '3 3' }} />
+                                  <Scatter data={postScatterData} fill="#1d4ed8" />
+                                </ScatterChart>
+                              </ResponsiveContainer>
+                            ) : !transformResult ? (
+                              <p className="mc-empty">Run Save &amp; Apply Transformation Set to see the transformed scatter.</p>
+                            ) : !postScatterHasX ? (
+                              <p className="mc-empty">"{effectiveScatterX}" has no transformed counterpart — pick a promotional channel to see this chart.</p>
+                            ) : (
+                              <p className="mc-empty">No numeric rows found for this X/Y pair.</p>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
 
