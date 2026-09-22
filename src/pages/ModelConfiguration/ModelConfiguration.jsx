@@ -600,8 +600,8 @@ function ModelConfiguration() {
                 {/* <div className="grain-detection-banner">
                   <span className="grain-detection-text">
                     Column Key Detection:{' '}
-                    {detectedGrain === 'hcp' && <strong>NPI Doctor Key detected. Recommended for HCP-level modeling.</strong>}
-                    {detectedGrain === 'dma' && <strong>DMA Geography Key detected. Recommended for DMA-level modeling.</strong>}
+                    {detectedGrain === 'hcp' && <strong>NPI Doctor Key detected. Recommended for HCP-level modelling.</strong>}
+                    {detectedGrain === 'dma' && <strong>DMA Geography Key detected. Recommended for DMA-level modelling.</strong>}
                     {detectedGrain !== 'hcp' && detectedGrain !== 'dma' && <strong>Could not determine a grain for this dataset automatically.</strong>}
                   </span>
                   <span className="grain-pill-row">
@@ -878,7 +878,7 @@ function ModelConfiguration() {
                   <div className="prior-weight-grid">
                     {selectedChannels.map((c) => (
                       <div className="mc-field" key={c}>
-                        <label title={c}>{c.replace('_transformed', '')}</label>
+                        <label title={c} className={c.endsWith('_transformed') ? 'is-transformed-label' : ''}>{c}</label>
                         <input
                           type="number" step="0.1" min="0.1"
                           value={priorWeights[c] ?? 1}
@@ -929,17 +929,18 @@ function ModelConfiguration() {
                   {' '}({selectedChannels.length} of {channelColumns.length} selected)
                 </label>
                 <div className="var-pill-box">
-                  {channelColumns.map((c) => (
-                    <span
-                      key={c}
-                      className={`var-pill${selectedChannels.includes(c) ? ' selected' : ''}`}
-                      onClick={() => toggleChannel(c)}
-                    >
-                      {/* The suffix is on every one of them, so it carries no
-                          information in this list. */}
-                      {selectedChannels.includes(c) ? '' : '+ '}{c.replace('_transformed', '')}
-                    </span>
-                  ))}
+                  {channelColumns.map((c) => {
+                    const isTransformed = c.endsWith('_transformed');
+                    return (
+                      <span
+                        key={c}
+                        className={`var-pill${selectedChannels.includes(c) ? ' selected' : ''}${isTransformed ? ' is-transformed' : ''}`}
+                        onClick={() => toggleChannel(c)}
+                      >
+                        {selectedChannels.includes(c) ? '' : '+ '}{c}
+                      </span>
+                    );
+                  })}
                   {!channelColumns.length && (
                     <span className="mc-empty">No modellable channels in this dataset.</span>
                   )}
@@ -1113,6 +1114,18 @@ function ModelConfiguration() {
  * stage 2 and the combined decomposition return overlapping but different
  * shapes, and hardcoding one of them would silently drop the others' columns.
  */
+// Any column whose header names it as a percentage (e.g. "Impactable (%)")
+// gets rounded to a consistent 1 decimal place here, rather than trusting
+// whatever precision fmt() or the backend happens to produce — handles the
+// value arriving either as a plain number or as an already "36.9276%"-style
+// string, so rounding is guaranteed either way.
+function formatPercentCell(raw) {
+  if (raw === null || raw === undefined || raw === '') return '-';
+  const num = Number(String(raw).replace('%', ''));
+  if (!Number.isFinite(num)) return String(raw);
+  return `${num.toFixed(1)}%`;
+}
+
 function CoefficientTable({ rows }) {
   const list = Array.isArray(rows) ? rows : [];
   if (!list.length) return <p className="mc-empty">No coefficients returned.</p>;
@@ -1122,6 +1135,7 @@ function CoefficientTable({ rows }) {
   const hidden = new Set(['Impactable %']);
   const columns = Object.keys(list[0]).filter((c) => !hidden.has(c));
   const numeric = (v) => typeof v === 'number';
+  const isPercentColumn = (c) => c.trim().endsWith('(%)');
 
   return (
     <div className="coef-table-wrap">
@@ -1138,7 +1152,9 @@ function CoefficientTable({ rows }) {
                   className={c === 'Coefficient' && numeric(r[c])
                     ? (r[c] >= 0 ? 'coef-positive' : 'coef-negative') : ''}
                 >
-                  {numeric(r[c]) ? fmt(r[c]) : (r[c] ?? '-')}
+                  {isPercentColumn(c)
+                    ? formatPercentCell(r[c])
+                    : (numeric(r[c]) ? fmt(r[c]) : (r[c] ?? '-'))}
                 </td>
               ))}
             </tr>

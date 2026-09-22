@@ -160,6 +160,23 @@
   color: var(--color-white);
 }
 
+/* Transformed variables get a distinct accent so a raw column and its
+   _transformed counterpart never look identical side by side. Muted lavender
+   rather than a saturated violet, so it reads as a gentle tag, not an alert. */
+.var-pill.is-transformed {
+  border-color: #ddd6f0;
+  color: #6b5b8f;
+  background-color: #f5f3fa;
+}
+.var-pill.is-transformed:hover { border-color: #a99bc7; }
+.var-pill.selected.is-transformed {
+  background-color: #8f80b3;
+  border-color: #8f80b3;
+  color: var(--color-white);
+}
+
+.is-transformed-label { color: #6b5b8f; }
+
 .selected-count-note {
   font-size: 0.72rem;
   color: var(--color-text-light);
