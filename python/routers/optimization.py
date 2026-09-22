@@ -12,8 +12,26 @@ async def run_optimization(payload: dict):
         optimizer_dict = payload.get("optimizer_dict", {})
         target = float(payload.get("target", 0.0))
         opt_type = str(payload.get("opt_type", "Budget Goal")).strip()
-        k_step = max(1, int(payload.get("k", 1)))
         is_budget_goal = opt_type in ("Budget Goal", "Fixed Budget")
+
+        # The step is a budget increment in dollars, not a number of points on
+        # the response curve. Curves are generated per channel with their own
+        # step (stop/50), so "advance 2 points" meant a different amount of
+        # money for every channel, and the same setting meant different things
+        # for the same channel once its spend changed. A dollar step is the
+        # unit the person allocating a budget actually thinks in, and it is
+        # comparable across channels - which is the whole basis of picking the
+        # best marginal ROI.
+        #
+        # An older client sending the index-based `k` is not rejected; it is
+        # ignored, and that request runs on the default dollar step.
+        #
+        # The floor matters: at a step of 0 every look-ahead would land on the
+        # index it started from, the optimizer would find no move to make, and
+        # it would stop at the first iteration reporting no allocation.
+        dollar_step = float(payload.get("step_dollars", 0.0) or 0.0)
+        if dollar_step <= 0:
+            dollar_step = 1000.0
 
         if not merged_rc:
             raise HTTPException(status_code=400, detail="No response curves provided in merged_rc.")
@@ -88,6 +106,22 @@ async def run_optimization(payload: dict):
         iteration = 0
         history = []
 
+        def next_index(ch: str, idx_now: int) -> int:
+            """The first index at least `dollar_step` of spend beyond idx_now.
+
+            Walks forward rather than jumping, because the curve's own points
+            are not evenly spaced in spend for every channel. Returns idx_now
+            unchanged when the channel is already at its ceiling, which the
+            caller reads as "this channel cannot take more".
+            """
+            sp = parsed_curves[ch]["spend"]
+            limit = max_idx[ch]
+            target_next_spend = sp[idx_now] + dollar_step
+            idx_next = idx_now
+            while idx_next < limit and sp[idx_next] < target_next_spend:
+                idx_next += 1
+            return idx_next
+
         def get_total_spend():
             return sum(parsed_curves[c]["spend"][current_idx[c]] for c in active_channels)
 
@@ -120,15 +154,19 @@ async def run_optimization(payload: dict):
 
             best_channel = None
             best_marginal_roi = -1e9
+            # The index the winner will actually move to, kept from the same
+            # look-ahead that scored it. Recomputing it after the choice would
+            # risk applying a different move from the one evaluated.
+            best_idx_next = None
 
-            # Evaluate each channel by looking ahead k index steps
+            # Evaluate each channel over the same dollar increment
             for ch in active_channels:
                 idx_now = current_idx[ch]
                 idx_limit = max_idx[ch]
                 if idx_now >= idx_limit:
                     continue
 
-                idx_next = min(idx_limit, idx_now + k_step)
+                idx_next = next_index(ch, idx_now)
                 if idx_next == idx_now:
                     continue
 
@@ -148,13 +186,15 @@ async def run_optimization(payload: dict):
                 if marginal_roi > best_marginal_roi:
                     best_marginal_roi = marginal_roi
                     best_channel = ch
+                    best_idx_next = idx_next
 
             if best_channel is None or best_marginal_roi <= 0:
                 # No channel can take more spend or marginal return is non-positive
                 break
 
-            # Advance best channel by k steps
-            current_idx[best_channel] = min(max_idx[best_channel], current_idx[best_channel] + k_step)
+            # Advance the winner by one dollar step, to the index its own
+            # look-ahead scored.
+            current_idx[best_channel] = min(max_idx[best_channel], best_idx_next)
             cur_spend = get_total_spend()
             cur_sales = get_total_sales()
 
