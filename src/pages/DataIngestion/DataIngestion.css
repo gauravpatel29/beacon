@@ -487,11 +487,6 @@
   background-color: var(--color-primary-light);
 }
 
-.file-list-item.unmapped.selected {
-  border-color: #c07a1f;
-  background-color: #fdf3e3;
-}
-
 .file-list-item.deleting {
   opacity: 0.65;
   cursor: wait;
@@ -519,10 +514,6 @@
   font-size: 0.78rem;
   color: var(--color-text-secondary);
   overflow-wrap: anywhere;
-}
-
-.file-item-status.unmapped-label {
-  color: #c07a1f;
 }
 
 .file-item-required-badge {
@@ -561,30 +552,6 @@
   background-color: var(--color-border-light);
 }
 
-/* Sits under the file list, in the same slot the footer note used to occupy,
-   and carries the amber of the unmapped rows it is counting. */
-.file-list-status {
-  font-size: 0.75rem;
-  font-weight: var(--font-weight-medium);
-  /* The same amber as .mapping-warning-banner - it is the same warning, just
-     moved next to the rows it counts. */
-  border: 1px solid #e0a940;
-  background-color: #fdf3e3;
-  color: #8a5a10;
-  border-radius: var(--radius-sm);
-  text-align: center;
-  margin-top: var(--spacing-sm);
-  padding: 0.5rem 0.6rem;
-}
-
-/* The all-clear, in the same green .mapping-success-banner used before it
-   moved here. Same line, same place - only the colour changes when the last
-   file gets a category. */
-.file-list-status.is-ready {
-  border-color: #8fce9e;
-  background-color: #eafaf0;
-  color: #1f8a4c;
-}
 
 /* ---- Right panel: mapping configuration ---- */
 .mapping-config-panel {
@@ -978,8 +945,9 @@
   font-weight: var(--font-weight-medium);
 }
 
-/* .mapping-success-banner lived here. The all-clear moved to the file list as
-   .file-list-status.is-ready, which carries these colours now. */
+/* .mapping-success-banner lived here, then moved to the file list as
+   .file-list-status.is-ready. Both are gone now: the all-clear reported a
+   category gate this screen no longer has. */
 
 /* ---- Footer actions ---- */
 .mapping-btn {

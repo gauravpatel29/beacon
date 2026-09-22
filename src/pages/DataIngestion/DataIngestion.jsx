@@ -1120,27 +1120,11 @@ function DataIngestion() {
     setTrendEndDate('');
   }, [selectedFileId]);
 
-  const unmappedCount = useMemo(
-    () => uploadedFiles.filter((f) => !f.category).length,
-    [uploadedFiles]
-  );
-
-  // At least one file must be tagged with every `required: true` category
-  // (currently just "Sales File") before Proceed is allowed.
-  const hasRequiredCategories = useMemo(() => {
-    const requiredIds = FILE_CATEGORIES.filter((c) => c.required).map((c) => c.id);
-    return requiredIds.every((id) => uploadedFiles.some((f) => f.category === id));
-  }, [uploadedFiles]);
-
-  const missingRequiredLabels = useMemo(() => {
-    const requiredCats = FILE_CATEGORIES.filter((c) => c.required);
-    return requiredCats
-      .filter((cat) => !uploadedFiles.some((f) => f.category === cat.id))
-      .map((cat) => cat.label);
-  }, [uploadedFiles]);
-
-  const canProceed = unmappedCount === 0 && hasRequiredCategories && uploadedFiles.length > 0;
-
+  // The category gate is gone with the picker. It counted unmapped files,
+  // checked that every required category had one, and blocked Proceed until
+  // both held - all of it measuring a decision this screen no longer asks
+  // anyone to make. The category itself still rides in the manifest and is
+  // still suggested from the filename on upload.
   const hasVisitedAllTabs = TAB_ORDER.every((t) => visitedTabs.has(t));
 
   const handleNext = () => {
@@ -1822,16 +1806,23 @@ function DataIngestion() {
                     key={f.id}
                     className={`file-list-item${
                       f.id === selectedFileId ? ' selected' : ''
-                    }${!f.category ? ' unmapped' : ''}${deletingFileId === f.id ? ' deleting' : ''}`}
+                    }${deletingFileId === f.id ? ' deleting' : ''}`}
                     onClick={() => deletingFileId !== f.id && setSelectedFileId(f.id)}
                   >
                     <div className="file-item-text">
                       <p className="file-item-name" title={f.name}>{f.name}</p>
-                      {/* <p className="file-item-filename">{f.name}</p> */}
-                      <p className={`file-item-status${!f.category ? ' unmapped-label' : ''}`}>
-                        {categoryInfo ? categoryInfo.label : 'Unmapped'}
-                        {categoryInfo?.required && <span className="file-item-required-badge">Required</span>}
-                      </p>
+                      {/* A file's category is shown only when it has one. The
+                          "Unmapped" label and the amber row it came with were
+                          reporting a gap against a picker this screen no
+                          longer offers. */}
+                      {categoryInfo && (
+                        <p className="file-item-status">
+                          {categoryInfo.label}
+                          {categoryInfo.required && (
+                            <span className="file-item-required-badge">Required</span>
+                          )}
+                        </p>
+                      )}
                     </div>
                     <div className="file-item-actions">
                       <button
@@ -1848,21 +1839,11 @@ function DataIngestion() {
               })}
             </div>
 
-            {/* The status belongs beside the list it describes: it counts the
-                files in this panel, and each one that needs a category is
-                already flagged in its own row above. One line, either the work
-                left or the all-clear - never both. */}
-            {unmappedCount > 0 && (
-              <p className="file-list-status" role="status">
-                {unmappedCount} file{unmappedCount > 1 ? 's' : ''} still
-                need{unmappedCount === 1 ? 's' : ''} a category
-              </p>
-            )}
-            {canProceed && (
-              <p className="file-list-status is-ready" role="status">
-                All files mapped, ready to proceed
-              </p>
-            )}
+            {/* No category status here. The picker that would let anyone act
+                on it is no longer on the Assign Category tab, so a count of
+                files "still needing a category" reported work that could not
+                be done, and the all-clear reported a gate that no longer
+                exists. */}
           </div>
 
           {/* ---- Right: mapping configuration ---- */}

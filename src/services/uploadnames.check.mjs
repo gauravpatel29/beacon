@@ -65,27 +65,27 @@ t('overwrite:false is passed explicitly', /uploadFiles\([^)]*overwrite:\s*false/
 t('the screen filters the selection before uploading',
   page.includes('partitionNewFiles('), 'not called');
 
-console.log('\n6. the labels that moved to the file list');
-t('the category status renders in the file list panel',
-  page.includes('file-list-status'), 'file-list-status missing');
-t('and no longer in the tab panel banner',
-  !/mapping-warning-banner[\s\S]{0,200}still\s*\n?\s*need/.test(page), 'still in the banner');
-// The all-clear belongs with the count it replaces: one line in one place that
-// changes colour, rather than a warning in one panel and a tick in another.
-t('the all-clear is in the file list too',
-  /file-list-status is-ready[\s\S]{0,120}All files mapped/.test(page), 'not in the panel');
-t('and is gone from the tab panel',
-  !page.includes('mapping-success-banner'), 'still rendered in the tab panel');
-t('it shows only when the screen can actually proceed',
-  /\{canProceed && \([\s\S]{0,160}file-list-status is-ready/.test(page), 'shown unconditionally');
-t('the warning and the all-clear are mutually exclusive',
-  /\{unmappedCount > 0 && \(/.test(page) && /\{canProceed && \(/.test(page)
-  && page.indexOf('canProceed = unmappedCount === 0') > 0,
-  'both could show at once');
+console.log('\n6. no category status at all');
+// The picker that would let anyone act on a category is not on the Assign
+// Category tab, so every status about one reported work that could not be
+// done: a count of unmapped files, an all-clear for a gate that no longer
+// exists, and an amber row per file.
+t('the file-list status line is gone', !page.includes('file-list-status'), 'still rendered');
+t('and the banners it replaced are still gone',
+  !page.includes('mapping-success-banner'), 'a banner came back');
+t('no Unmapped label on a row', !/>\s*Unmapped\s*</.test(page), 'label remains');
+t('and no amber unmapped row', !/unmapped-label/.test(page), 'styling remains');
+// The gate went with them; nothing computes a category count now.
+t('the category gate is gone',
+  !/const canProceed|const unmappedCount|const hasRequiredCategories/.test(page), 'dead code');
+// A file that HAS a category still says so: that is information, not a
+// demand for action.
+t('a categorised file still shows its category',
+  /\{categoryInfo && \(/.test(page), 'the category is hidden too');
 t('the "Edit remaps" footer note is gone',
   !page.includes('Edit remaps'), 'still present');
 const css = readFileSync(new URL('../pages/DataIngestion/DataIngestion.css', import.meta.url), 'utf8');
-t('the status has a style to render with', css.includes('.file-list-status'), 'no CSS rule');
+t('and its CSS went with it', !css.includes('.file-list-status {'), 'dead rule left behind');
 t('and the dead footer rule was removed too', !css.includes('.file-list-footer'), 'still in CSS');
 
 console.log('\n' + '='.repeat(60));
