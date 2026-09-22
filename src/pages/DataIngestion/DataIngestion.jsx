@@ -1940,7 +1940,7 @@ function DataIngestion() {
                   <>
                 <hr className="mapping-divider" />
 
-                <p className="mapping-section-label">Assign category</p>
+                {/* <p className="mapping-section-label">Assign category</p>
                 <select
                   className="category-select"
                   value={selectedFile.category || ''}
@@ -1970,16 +1970,16 @@ function DataIngestion() {
                       {FILE_CATEGORIES.find((c) => c.id === selectedFile.category)?.grain}
                     </p>
                   </div>
-                )}
+                )} */}
 
                 {/* The "still needs a category" count now lives in the file
                     list panel, next to the rows it is counting. */}
-                {unmappedCount === 0 && !hasRequiredCategories && (
+                {/* {unmappedCount === 0 && !hasRequiredCategories && (
                   <div className="mapping-warning-banner">
                     Please assign at least one file to:{' '}
                     {missingRequiredLabels.join(', ')}
                   </div>
-                )}
+                )} */}
 
                 {/* The all-clear now sits with the file list, next to the rows
                     it is reporting on, alongside the "still needs a category"

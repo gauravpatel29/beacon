@@ -1068,7 +1068,7 @@ function ModelOutput() {
                       <div className="diag-stat-card"><p className="diag-stat-value">{getDisplayStats(viewingModel).r2?.toFixed(4) ?? 'NA'}</p><p className="diag-stat-label">R² (Fit)</p></div>
                       <div className="diag-stat-card"><p className="diag-stat-value">{getDisplayStats(viewingModel).adjR2?.toFixed(4) ?? 'NA'}</p><p className="diag-stat-label">Adjusted R²</p></div>
                       <div className="diag-stat-card"><p className="diag-stat-value">{getDisplayStats(viewingModel).rmse?.toFixed(2) ?? 'NA'}</p><p className="diag-stat-label">RMSE</p></div>
-                      <div className="diag-stat-card"><p className="diag-stat-value">{viewingModel.type === 'ridge' ? ((viewingModel.alpha ?? viewingModel.ridgeLambda)?.toFixed?.(4) ?? String(viewingModel.alpha ?? viewingModel.ridgeLambda ?? 'NA')) : 'N/A (OLS)'}</p><p className="diag-stat-label">Alpha (λ)</p></div>
+                      {/* <div className="diag-stat-card"><p className="diag-stat-value">{viewingModel.type === 'ridge' ? ((viewingModel.alpha ?? viewingModel.ridgeLambda)?.toFixed?.(4) ?? String(viewingModel.alpha ?? viewingModel.ridgeLambda ?? 'NA')) : 'N/A (OLS)'}</p><p className="diag-stat-label">Alpha (λ)</p></div> */}
                     </div>
                     <button className="stat-summary-toggle" onClick={() => setShowStatSummary((v) => !v)}>
                       {showStatSummary ? '▾' : '▶'} View Full Statistical OLS / Ridge Summary Output
