@@ -1191,7 +1191,7 @@ function percentColumn(rows, column) {
   return tenths.map((v) => (v === null ? null : `${(v / 10).toFixed(1)}%`));
 }
 
-function CoefficientTable({ rows }) {
+function CoefficientTable({ rows, hideConst = false }) {
   const list = Array.isArray(rows) ? rows : [];
   if (!list.length) return <p className="mc-empty">No coefficients returned.</p>;
 
@@ -1206,7 +1206,7 @@ function CoefficientTable({ rows }) {
   // Sales are pulled to the front, right after Variable, since they're the
   // figures that matter most in this view.
   const hidden = new Set(['Impactable %', 'Coefficient', 'ROI', 'Note', 'Long Term ROI']);
-  const allColumns = Object.keys(list[0]).filter((c) => !hidden.has(c));
+  const allColumns = Object.keys(visibleRows[0]).filter((c) => !hidden.has(c));
   const FRONT_ORDER = ['Variable', 'Impactable (%)', 'Impactable Sales'];
   const columns = [
     ...FRONT_ORDER.filter((c) => allColumns.includes(c)),
@@ -1218,7 +1218,7 @@ function CoefficientTable({ rows }) {
   // Each percentage column is resolved once, across every row, because making
   // a column total 100 is not a decision a single cell can take.
   const shares = Object.fromEntries(
-    columns.filter(isPercentColumn).map((c) => [c, percentColumn(list, c)])
+    columns.filter(isPercentColumn).map((c) => [c, percentColumn(visibleRows, c)])
   );
 
   return (
@@ -1228,7 +1228,7 @@ function CoefficientTable({ rows }) {
           <tr>{columns.map((c) => <th key={c}>{c}</th>)}</tr>
         </thead>
         <tbody>
-          {list.map((r, rowIndex) => (
+          {visibleRows.map((r, rowIndex) => (
             <tr key={rowKey(r)}>
               {columns.map((c) => (
                 <td key={c}>

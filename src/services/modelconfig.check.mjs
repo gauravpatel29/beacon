@@ -165,10 +165,22 @@ for (const [label, re] of [
 }
 // Stage 1, stage 2 and the combined table return overlapping but different
 // shapes; a fixed column list would silently drop the others' columns.
+// These two pin the intent, not one exact expression: the column list may be
+// reordered or filtered further, and the hidden set has grown, without either
+// guarantee being weakened.
 t('the coefficient table renders whatever columns came back',
-  /const columns = Object\.keys\(list\[0\]\)\.filter/.test(page), 'hardcoded columns');
+  /Object\.keys\((?:list|visibleRows)\[0\]\)\.filter/.test(page), 'hardcoded columns');
 t('and hides the raw number behind the formatted percent',
-  /new Set\(\['Impactable %'\]\)/.test(page), 'the same column twice');
+  /const hidden = new Set\(\[[^\]]*'Impactable %'/.test(page), 'the same column twice');
+// The "Hide const row" checkbox passes hideConst into the table. A merge once
+// landed the checkbox without declaring the prop, so the component read a free
+// identifier and every run threw "hideConst is not defined" on render.
+t('the table declares the hideConst prop it reads',
+  /function CoefficientTable\(\{[^}]*hideConst/.test(page), 'reads a free identifier');
+t('and renders the filtered rows, not the raw list',
+  /\{visibleRows\.map\(\(r, rowIndex\)/.test(page), 'the checkbox would do nothing');
+t('so the shares total 100 across the rows actually shown',
+  /percentColumn\(visibleRows, c\)/.test(page), 'normalised over a hidden row');
 t('a wide table scrolls inside its own box',
   /\.coef-table-wrap \{[^}]*overflow-x: auto/.test(css), 'pushes the page sideways');
 
