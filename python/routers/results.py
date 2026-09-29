@@ -8,7 +8,7 @@ router = APIRouter()
 # ─── Exact Industry Benchmark Reference Matrix ──────────────────────────────
 DERMATOLOGY_BENCHMARK_MATRIX = {
     "Launch (<1 Year)": {
-        "Low Competition": {
+        "Low / Niche Competition": {
             "baseline_impact": "30–45%",
             "salesforce_impact": "25–35%",
             "hcp_pp_impact": "5–9%",
@@ -49,7 +49,7 @@ DERMATOLOGY_BENCHMARK_MATRIX = {
         },
     },
     "Growth (1–3 Years)": {
-        "Low Competition": {
+        "Low / Niche Competition": {
             "baseline_impact": "45–60%",
             "salesforce_impact": "25–33%",
             "hcp_pp_impact": "5–9%",
@@ -89,8 +89,8 @@ DERMATOLOGY_BENCHMARK_MATRIX = {
             "consumer_npp_roi": "3.5–5.8x",
         },
     },
-    "Maturity (3–7 Years)": {
-        "Low Competition": {
+    "Mature (3–7 Years)": {
+        "Low / Niche Competition": {
             "baseline_impact": "60–75%",
             "salesforce_impact": "25–32%",
             "hcp_pp_impact": "6–10%",
@@ -131,7 +131,7 @@ DERMATOLOGY_BENCHMARK_MATRIX = {
         },
     },
     "Late Lifecycle (7+ Years)": {
-        "Low Competition": {
+        "Low / Niche Competition": {
             "baseline_impact": "75–90%",
             "salesforce_impact": "22–29%",
             "hcp_pp_impact": "5–8%",
@@ -186,7 +186,7 @@ async def results_summary(payload: dict):
 @router.post("/benchmarks")
 async def benchmark_comparison(payload: dict):
     try:
-        disease_area = payload.get("disease_area", "Dermatology (Specialty)")
+        disease_area = payload.get("disease_area") or payload.get("therapy_type") or "Dermatology (Specialty)"
         maturity = payload.get("maturity_stage", "Launch (<1 Year)")
         competition = payload.get("competition_level", "High Competition")
         channels = payload.get("channels", [])
@@ -197,10 +197,12 @@ async def benchmark_comparison(payload: dict):
         bench_row = DERMATOLOGY_BENCHMARK_MATRIX[maturity_key][comp_key]
 
         def get_status(user_pct_val, bench_str):
+            if user_pct_val == 0.0:
+                return "Not Active in Model"
             try:
                 parts = bench_str.replace("%", "").split("–")
                 lo, hi = float(parts[0]), float(parts[1])
-                if user_pct_val >= lo and user_pct_val <= hi:
+                if lo <= user_pct_val <= hi:
                     return "Within Benchmark"
                 elif user_pct_val > hi:
                     return "Above Benchmark"
@@ -209,54 +211,35 @@ async def benchmark_comparison(payload: dict):
             except Exception:
                 return "Within Benchmark"
 
-        impact_benchmarks = [
-            {
-                "category": "Baseline Impact %",
-                "your_impact_pct": f"{float(user_impact_shares.get('baseline', 48.5)):.1f}%",
-                "benchmark": bench_row["baseline_impact"],
-                "status": get_status(float(user_impact_shares.get('baseline', 48.5)), bench_row["baseline_impact"])
-            },
-            {
-                "category": "Salesforce Impact %",
-                "your_impact_pct": f"{float(user_impact_shares.get('salesforce', 26.2)):.1f}%",
-                "benchmark": bench_row["salesforce_impact"],
-                "status": get_status(float(user_impact_shares.get('salesforce', 26.2)), bench_row["salesforce_impact"])
-            },
-            {
-                "category": "HCP PP (Personal Promo) Impact %",
-                "your_impact_pct": f"{float(user_impact_shares.get('hcp_pp', 6.4)):.1f}%",
-                "benchmark": bench_row["hcp_pp_impact"],
-                "status": get_status(float(user_impact_shares.get('hcp_pp', 6.4)), bench_row["hcp_pp_impact"])
-            },
-            {
-                "category": "Access Impact %",
-                "your_impact_pct": f"{float(user_impact_shares.get('access', 14.1)):.1f}%",
-                "benchmark": bench_row["access_impact"],
-                "status": get_status(float(user_impact_shares.get('access', 14.1)), bench_row["access_impact"])
-            },
-            {
-                "category": "HCP NPP (Non-Personal Promo) Impact %",
-                "your_impact_pct": f"{float(user_impact_shares.get('hcp_npp', 7.5)):.1f}%",
-                "benchmark": bench_row["hcp_npp_impact"],
-                "status": get_status(float(user_impact_shares.get('hcp_npp', 7.5)), bench_row["hcp_npp_impact"])
-            },
-            {
-                "category": "Consumer NPP / DTC Impact %",
-                "your_impact_pct": f"{float(user_impact_shares.get('consumer_npp', 8.3)):.1f}%",
-                "benchmark": bench_row["consumer_npp_impact"],
-                "status": get_status(float(user_impact_shares.get('consumer_npp', 8.3)), bench_row["consumer_npp_impact"])
-            },
+        # 👈 FIXED: Use real 0.0 defaults instead of fake numbers (26.2, 14.1, etc.)
+        categories = [
+            ("Baseline Impact %", "baseline", bench_row["baseline_impact"]),
+            ("Salesforce Impact %", "salesforce", bench_row["salesforce_impact"]),
+            ("HCP PP (Personal Promo) Impact %", "hcp_pp", bench_row["hcp_pp_impact"]),
+            ("Access Impact %", "access", bench_row["access_impact"]),
+            ("HCP NPP (Non-Personal Promo) Impact %", "hcp_npp", bench_row["hcp_npp_impact"]),
+            ("Consumer NPP / DTC Impact %", "consumer_npp", bench_row["consumer_npp_impact"]),
         ]
+
+        impact_benchmarks = []
+        for label, key, bench_val in categories:
+            user_val = float(user_impact_shares.get(key, 0.0))
+            impact_benchmarks.append({
+                "category": label,
+                "your_impact_pct": f"{user_val:.1f}%" if user_val > 0 else "0.0% (Not in Model)",
+                "benchmark": bench_val,
+                "status": get_status(user_val, bench_val),
+            })
 
         channel_benchmarks = []
         for ch in channels:
             ch_name = ch.get("channel", "")
-            user_roi = float(ch.get("roi", 2.0))
+            user_roi = float(ch.get("roi", 0.0))
             l = ch_name.lower()
 
             if "call" in l or "rep" in l or "detail" in l:
                 bench_roi_str = bench_row["salesforce_roi"]
-                category_label = "Personal Promotion"
+                category_label = "Salesforce Promotion"
             elif "samp" in l or "speaker" in l or "spk" in l or "event" in l:
                 bench_roi_str = bench_row["hcp_pp_roi"]
                 category_label = "Personal Promotion"

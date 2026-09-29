@@ -6,6 +6,7 @@ Endpoints:
 - GET  /v2/workflows/{id}/ard
 """
 
+import json
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
@@ -85,11 +86,28 @@ class StitchStep(BaseModel):
     target_entity_key: Any = None
     mapping_source_key: Any = None
     mapping_target_key: Any = None
+    mapping_source_grain_key: Any = None
+    crosswalk_match_key: Any = None
     time_key: Any = None
     agg_rules: Optional[Dict[str, str]] = None
     allocation_method: Optional[str] = "equal"
     weight_column: Optional[str] = None
+    weight_value_column: Optional[str] = None
     allocated_metrics: Any = None
+
+    # Rollup Multi-mapping fields
+    rollup_mapping_method: Optional[str] = "equal_split"
+    weight_match_key: Any = None
+    weight_fallback: Optional[str] = "equal_split"
+
+    # Carryover fields
+    entity_keys: Optional[Any] = None
+    metric_column: Optional[str] = None
+    output_column_name: Optional[str] = None
+    decay_rate: Optional[float] = 0.6
+    first_period_value: Optional[str] = "zero"
+    time_gap_handling: Optional[str] = "reset"
+    negative_handling: Optional[str] = "floor_zero"
 
 
 class BuildArdBody(BaseModel):
@@ -180,6 +198,14 @@ async def build_ard(
             "lineage": result["lineage"],
         }
 
+    # Collect automatic column roles for any Carryover columns generated in pipeline
+    column_roles = {}
+    for s in body.steps:
+        s_dict = s.model_dump()
+        if s_dict.get("step_type") == "carryover":
+            out_col = s_dict.get("output_column_name") or f"carryover_{s_dict.get('metric_column') or 'sales'}"
+            column_roles[out_col] = "Baseline Variables"
+
     try:
         meta = await datasets.store_derived(
             workflow_id, output, result["df"], kind="ard",
@@ -189,6 +215,24 @@ async def build_ard(
                 **result["lineage"],
             },
         )
+
+        # Persist column roles metadata into the ARD dataset spec
+        if column_roles:
+            spec = meta.get("spec") or {}
+            config_meta = spec.get("config_metadata") or {}
+            existing_roles = config_meta.get("column_roles") or {}
+            existing_roles.update(column_roles)
+            config_meta["column_roles"] = existing_roles
+            spec["config_metadata"] = config_meta
+
+            pool = await datasets._pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE workflow_files SET spec = $1::jsonb WHERE workflow_id = $2 AND filename = $3",
+                    json.dumps(spec), workflow_id, output
+                )
+            meta["spec"] = spec
+
     except DatasetError as exc:
         return problem(request, exc.status, exc.title, exc.detail, kind=f"{PROBLEM_BASE}/dataset")
 

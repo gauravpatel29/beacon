@@ -3,7 +3,7 @@ Multi-step, Grain-Aware Dataset Stitching and Analytical Record Dataset (ARD) En
 
 Supports:
 1. Sequential Relational Joins (left, inner, right, outer, cross)
-2. Grain Rollup (Lower Grain -> Higher Grain aggregation with crosswalk mappings)
+2. Grain Rollup (Lower Grain -> Higher Grain with Equal or Weighted multi-mapping distribution)
 3. Metric Allocation (Higher Grain -> Lower Grain distribution using equal or weighted strategies)
 4. Metric Conservation Verification & Lineage Auditing
 """
@@ -49,6 +49,14 @@ class StitchError(Exception):
         return out
 
 
+def _clean_str(val: Any) -> str:
+    """Prevents None or string literals 'None'/'null' from being treated as valid dataset names."""
+    if val is None or val is False:
+        return ""
+    s = str(val).strip()
+    return "" if s.lower() in ("none", "null", "undefined", "") else s
+
+
 def parse_join_type(value: Any) -> str:
     text = str(value or "").strip().lower()
     if text in JOIN_TYPES:
@@ -67,7 +75,7 @@ def clean_key_list(value: Any) -> List[str]:
     return []
 
 
-def find_column(df: pd.DataFrame, name: str) -> Optional[str]:
+def find_column(df: Optional[pd.DataFrame], name: Optional[str]) -> Optional[str]:
     if not name or df is None:
         return None
     wanted = str(name).strip().lower()
@@ -255,8 +263,10 @@ def execute_rollup_step(
     step: Dict[str, Any],
     source_df: pd.DataFrame,
     mapping_df: Optional[pd.DataFrame],
+    weight_df: Optional[pd.DataFrame],
     source_name: str,
     mapping_name: Optional[str],
+    weight_name: Optional[str],
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     source_df = source_df.loc[:, ~source_df.columns.duplicated()].copy()
     rows_in = len(source_df)
@@ -265,41 +275,48 @@ def execute_rollup_step(
     target_entity_keys = clean_key_list(step.get("target_entity_key") or step.get("target_key"))
     time_keys = clean_key_list(step.get("time_key") or step.get("date_key"))
     agg_rules = step.get("agg_rules") or step.get("numeric_aggregations") or {}
+    mapping_method = str(step.get("rollup_mapping_method", "equal_split")).lower()
+    weight_fallback = str(step.get("weight_fallback", "equal_split")).lower()
+    weight_column = step.get("weight_value_column") or step.get("weight_column")
+    weight_match_keys = clean_key_list(step.get("weight_match_key") or source_entity_keys)
 
     if not target_entity_keys:
         raise StitchError(step_idx, "target_key_missing", f"Step {step_idx} (Rollup): Target grain key is required.")
+    if not source_entity_keys:
+        raise StitchError(step_idx, "source_key_missing", f"Step {step_idx} (Rollup): Source entity key is required.")
 
     enriched_df = source_df
+    real_src = [find_column(source_df, k) for k in source_entity_keys]
+    if any(k is None for k in real_src):
+        raise StitchError(step_idx, "source_key_not_found", f"Step {step_idx} (Rollup): Source entity key not found in {source_name}.")
+
+    # Step A: Attach Target Grain using Bridge/Crosswalk Mapping
     if mapping_df is not None:
         mapping_df = mapping_df.loc[:, ~mapping_df.columns.duplicated()].copy()
         map_src_keys = clean_key_list(step.get("mapping_source_key") or source_entity_keys)
 
-        if not map_src_keys:
-            raise StitchError(step_idx, "mapping_keys_missing", f"Step {step_idx} (Rollup): Bridge mapping keys are required.")
-
-        real_src = [find_column(source_df, k) for k in source_entity_keys]
         real_map_src = [find_column(mapping_df, k) for k in map_src_keys]
+        real_m_tgt = [find_column(mapping_df, k) for k in target_entity_keys if find_column(mapping_df, k)]
 
-        if any(k is None for k in real_src) or any(k is None for k in real_map_src):
-            raise StitchError(step_idx, "key_resolution_failed", f"Step {step_idx} (Rollup): Source entity keys not found in datasets.")
+        if any(k is None for k in real_map_src) or not real_m_tgt:
+            raise StitchError(step_idx, "key_resolution_failed", f"Step {step_idx} (Rollup): Keys not found in mapping dataset {mapping_name}.")
 
         for sk, mk in zip(real_src, real_map_src):
             enriched_df[sk] = normalize_key(enriched_df[sk], looks_like_date_key(sk))
             mapping_df[mk] = normalize_key(mapping_df[mk], looks_like_date_key(mk))
 
-        # Only retain mapping keys and target grain keys from mapping dataset
-        real_m_tgt = [find_column(mapping_df, k) for k in target_entity_keys if find_column(mapping_df, k)]
+        # Retain all mapping pairs (Do not drop duplicates to allow multi-mapping)
         needed_map_cols = list(set(real_map_src + real_m_tgt))
-        mapping_clean = mapping_df[needed_map_cols].loc[:, ~mapping_df[needed_map_cols].columns.duplicated()].drop_duplicates(subset=real_map_src)
+        mapping_clean = mapping_df[needed_map_cols].drop_duplicates(subset=real_map_src + real_m_tgt)
 
         rename_map = {mk: sk for sk, mk in zip(real_src, real_map_src) if mk != sk}
         if rename_map:
             mapping_clean = mapping_clean.rename(columns=rename_map)
 
-        mapping_clean = mapping_clean.loc[:, ~mapping_clean.columns.duplicated()]
         enriched_df = pd.merge(enriched_df, mapping_clean, on=real_src, how="inner", suffixes=("", "_map"))
         enriched_df = enriched_df.loc[:, ~enriched_df.columns.duplicated()]
 
+    # Step B: Identify Group-By columns
     group_cols = []
     for k in target_entity_keys:
         real_k = find_column(enriched_df, k)
@@ -315,19 +332,17 @@ def execute_rollup_step(
             if real_tk not in group_cols:
                 group_cols.append(real_tk)
 
+    # Step C: Identify Metric Columns
     id_tokens = ["npi", "id", "zip", "fips", "code", "account", "dma", "state", "key"]
     exclude_from_agg = set(group_cols) | set(source_entity_keys)
-
     agg_dict: Dict[str, Any] = {}
     metric_cols = []
 
     for col in enriched_df.columns:
         if col in exclude_from_agg or col.endswith("_map"):
             continue
-
         col_lower = col.lower()
         is_id_col = any(tok == col_lower or col_lower.startswith(f"{tok}_") or col_lower.endswith(f"_{tok}") for tok in id_tokens)
-
         num_series = pd.to_numeric(enriched_df[col], errors="coerce")
         has_numeric_data = num_series.notna().sum() > 0
 
@@ -341,6 +356,60 @@ def execute_rollup_step(
             agg_dict[col] = "sum"
             metric_cols.append(col)
 
+    # Step D: Apply Multi-Mapping Split Weights (Equal or Weighted)
+    if mapping_method == "weighted_split":
+        if weight_df is not None:
+            weight_df = weight_df.loc[:, ~weight_df.columns.duplicated()].copy()
+            real_w_keys = [find_column(weight_df, k) for k in weight_match_keys if find_column(weight_df, k)]
+            real_e_w_keys = [find_column(enriched_df, k) for k in weight_match_keys if find_column(enriched_df, k)]
+
+            if not real_w_keys or not real_e_w_keys:
+                raise StitchError(step_idx, "weight_key_missing", f"Step {step_idx} (Rollup): Weight match key not found in weight dataset.")
+
+            for ek, wk in zip(real_e_w_keys, real_w_keys):
+                enriched_df[ek] = normalize_key(enriched_df[ek], looks_like_date_key(ek))
+                weight_df[wk] = normalize_key(weight_df[wk], looks_like_date_key(wk))
+
+            real_wgt_col = find_column(weight_df, weight_column)
+            if not real_wgt_col:
+                raise StitchError(step_idx, "weight_col_missing", f"Step {step_idx} (Rollup): Weight column '{weight_column}' not found in {weight_name}.")
+
+            needed_w_cols = list(set(real_w_keys + [real_wgt_col]))
+            w_clean = weight_df[needed_w_cols].drop_duplicates(subset=real_w_keys)
+            rename_w = {wk: ek for ek, wk in zip(real_e_w_keys, real_w_keys) if wk != ek}
+            if rename_w:
+                w_clean = w_clean.rename(columns=rename_w)
+
+            enriched_df = pd.merge(enriched_df, w_clean, on=real_e_w_keys, how="left", suffixes=("", "_wgt"))
+            raw_w_series = pd.to_numeric(enriched_df[real_wgt_col], errors="coerce")
+        else:
+            real_wgt_col = find_column(enriched_df, weight_column)
+            raw_w_series = pd.to_numeric(enriched_df[real_wgt_col], errors="coerce") if real_wgt_col else pd.Series(np.nan, index=enriched_df.index)
+
+        missing_mask = raw_w_series.isna() | (raw_w_series <= 0)
+        if weight_fallback == "exclude":
+            enriched_df = enriched_df[~missing_mask].copy()
+            raw_w_series = raw_w_series[~missing_mask]
+            group_sum = enriched_df.groupby(real_src)[real_wgt_col].transform("sum")
+            enriched_df["__split_weight__"] = np.where(group_sum > 1e-9, raw_w_series / group_sum, 0.0)
+        else:
+            target_counts = enriched_df.groupby(real_src)[group_cols[0]].transform("count")
+            equal_weights = 1.0 / np.maximum(target_counts, 1.0)
+            group_sum = enriched_df.groupby(real_src)[real_wgt_col].transform("sum")
+            normalized_wgt = np.where(group_sum > 1e-9, raw_w_series / group_sum, equal_weights)
+            enriched_df["__split_weight__"] = np.where(missing_mask, equal_weights, normalized_wgt)
+    else:
+        # Equal Distribution (1/n per mapped target)
+        target_counts = enriched_df.groupby(real_src)[group_cols[0]].transform("count")
+        enriched_df["__split_weight__"] = 1.0 / np.maximum(target_counts, 1.0)
+
+    # Multiply metrics by the split weight before grouping
+    for col in metric_cols:
+        enriched_df[col] = pd.to_numeric(enriched_df[col], errors="coerce").fillna(0.0) * enriched_df["__split_weight__"]
+
+    enriched_df.drop(columns=["__split_weight__"], inplace=True, errors="ignore")
+
+    # Step E: GroupBy Aggregation
     if not agg_dict:
         rolled_df = enriched_df[group_cols].drop_duplicates()
     else:
@@ -358,6 +427,8 @@ def execute_rollup_step(
         "type": "rollup",
         "source": source_name,
         "mapping": mapping_name,
+        "mapping_method": mapping_method,
+        "weight_dataset": weight_name if mapping_method == "weighted_split" else "1/n (Equal)",
         "source_grain": step.get("source_grain", "unknown"),
         "target_grain": step.get("target_grain", "unknown"),
         "group_by": group_cols,
@@ -413,11 +484,18 @@ def execute_allocation_step(
 
         real_m_tgt = [find_column(mapping_df, k) for k in target_grain_keys if find_column(mapping_df, k)]
         real_t_tgt = [find_column(target_structure_df, k) for k in target_grain_keys if find_column(target_structure_df, k)]
-        real_m_src = [find_column(mapping_df, k) for k in source_grain_keys if find_column(mapping_df, k)]
+        
+        map_src_grain_keys = clean_key_list(
+            step.get("mapping_source_grain_key")
+            or step.get("crosswalk_match_key")
+            or step.get("mapping_source_key")
+            or source_grain_keys
+        )
+        real_m_src = [find_column(mapping_df, k) for k in map_src_grain_keys if find_column(mapping_df, k)]
 
         if not real_m_src:
             for col in mapping_df.columns:
-                if "dma" in col.lower() or "geo" in col.lower() or "market" in col.lower():
+                if any(k.lower() in col.lower() for k in source_grain_keys) or "dma" in col.lower() or "geo" in col.lower() or "market" in col.lower():
                     real_m_src.append(col)
                     break
 
@@ -430,7 +508,6 @@ def execute_allocation_step(
             enriched_target[tk] = normalize_key(enriched_target[tk], looks_like_date_key(tk))
             mapping_df[mk] = normalize_key(mapping_df[mk], looks_like_date_key(mk))
 
-        # Select only needed mapping columns to prevent duplicate column conflicts
         needed_map_cols = list(set(real_m_tgt + real_m_src))
         clean_map = mapping_df[needed_map_cols].loc[:, ~mapping_df[needed_map_cols].columns.duplicated()].drop_duplicates(subset=real_m_tgt)
 
@@ -618,24 +695,28 @@ def execute_pipeline(
         step_type = str(step.get("step_type", step.get("type", "join"))).lower()
 
         if step_type == "rollup":
-            src_name = str(step.get("source_file") or step.get("left_file", "")).strip()
-            map_name = str(step.get("mapping_file", "")).strip()
+            src_name = _clean_str(step.get("source_file") or step.get("left_file"))
+            map_name = _clean_str(step.get("mapping_file"))
+            wgt_name = _clean_str(step.get("weight_file"))
 
             src_df = lookup(src_name)
             map_df = lookup(map_name) if map_name else None
+            wgt_df = lookup(wgt_name) if wgt_name else None
 
             if src_df is None or src_df.empty:
                 raise StitchError(idx, "source_not_found", f'Step {idx} (Rollup): Source dataset "{src_name}" not found.')
             if map_name and (map_df is None or map_df.empty):
                 raise StitchError(idx, "mapping_not_found", f'Step {idx} (Rollup): Mapping dataset "{map_name}" not found.')
+            if wgt_name and (wgt_df is None or wgt_df.empty):
+                raise StitchError(idx, "weight_not_found", f'Step {idx} (Rollup): Weight dataset "{wgt_name}" not found.')
 
-            current, entry = execute_rollup_step(idx, step, src_df, map_df, src_name, map_name)
+            current, entry = execute_rollup_step(idx, step, src_df, map_df, wgt_df, src_name, map_name, wgt_name)
 
         elif step_type == "allocate":
-            src_name = str(step.get("source_file") or step.get("right_file", "")).strip()
-            tgt_name = str(step.get("target_file") or step.get("left_file", "")).strip()
-            map_name = str(step.get("mapping_file", "")).strip()
-            wgt_name = str(step.get("weight_file", "")).strip()
+            src_name = _clean_str(step.get("source_file") or step.get("right_file"))
+            tgt_name = _clean_str(step.get("target_file") or step.get("left_file"))
+            map_name = _clean_str(step.get("mapping_file"))
+            wgt_name = _clean_str(step.get("weight_file"))
 
             src_df = lookup(src_name)
             tgt_df = lookup(tgt_name)
@@ -652,10 +733,22 @@ def execute_pipeline(
                 raise StitchError(idx, "weight_not_found", f'Step {idx} (Allocate): Weight dataset "{wgt_name}" not found.')
 
             current, entry = execute_allocation_step(idx, step, src_df, tgt_df, map_df, wgt_df, src_name, tgt_name, map_name, wgt_name)
+        
 
+        elif step_type == "carryover":
+            src_name = _clean_str(step.get("source_file") or (f"Step {idx-1} Result" if idx > 1 else ""))
+            src_df = lookup(src_name)
+            if src_df is None or src_df.empty:
+                if current is not None and not current.empty:
+                    src_df = current
+                    src_name = f"Step {idx-1} Result"
+                else:
+                    raise StitchError(idx, "source_not_found", f'Step {idx} (Carryover): Source dataset "{src_name}" not found.')
+
+            current, entry = execute_carryover_step(idx, step, src_df, src_name)
         else:
-            left_name = str(step.get("left_file", "")).strip()
-            right_name = str(step.get("right_file", "")).strip()
+            left_name = _clean_str(step.get("left_file"))
+            right_name = _clean_str(step.get("right_file"))
 
             left_df = lookup(left_name)
             right_df = lookup(right_name)
@@ -682,3 +775,90 @@ def execute_pipeline(
         "preview": out.head(preview_rows).to_dict(orient="records"),
         "lineage": {"steps_executed": lineage},
     }
+
+def execute_carryover_step(
+    step_idx: int,
+    step: Dict[str, Any],
+    source_df: pd.DataFrame,
+    source_name: str,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    df = source_df.loc[:, ~source_df.columns.duplicated()].copy()
+    rows_in = len(df)
+
+    entity_keys = clean_key_list(step.get("entity_keys") or step.get("source_entity_key"))
+    time_key = step.get("time_key") or step.get("date_key")
+    metric_col = step.get("metric_column") or step.get("sales_column")
+    output_col = step.get("output_column_name") or f"carryover_{metric_col}"
+    decay_rate = float(step.get("decay_rate", 0.6) if step.get("decay_rate") is not None else 0.6)
+    first_period_val = str(step.get("first_period_value", "zero")).lower()
+    time_gap_handling = str(step.get("time_gap_handling", "reset")).lower()
+    negative_handling = str(step.get("negative_handling", "floor_zero")).lower()
+
+    real_metric = find_column(df, metric_col)
+    real_time = find_column(df, time_key)
+    real_entities = [find_column(df, k) for k in entity_keys if find_column(df, k)]
+
+    if not real_metric:
+        raise StitchError(step_idx, "metric_not_found", f'Step {step_idx} (Carryover): Metric column "{metric_col}" not found.')
+    if not real_time:
+        raise StitchError(step_idx, "time_key_not_found", f'Step {step_idx} (Carryover): Time key "{time_key}" not found.')
+
+    parsed_dates = _parse_dates_robust(df[real_time].astype(str).str.strip())
+    df["__sort_date__"] = pd.to_datetime(parsed_dates, errors="coerce")
+
+    for ek in real_entities:
+        df[ek] = normalize_key(df[ek], looks_like_date_key(ek))
+
+    sort_cols = (real_entities + ["__sort_date__"]) if real_entities else ["__sort_date__"]
+    df = df.sort_values(by=sort_cols).reset_index(drop=True)
+
+    s = pd.to_numeric(df[real_metric], errors="coerce").fillna(0.0)
+    if negative_handling == "floor_zero":
+        s = np.maximum(0.0, s)
+
+    def _compute_carryover(sub_idx):
+        g_s = s.loc[sub_idx]
+        g_dates = df.loc[sub_idx, "__sort_date__"]
+
+        lagged = g_s.shift(1)
+
+        if time_gap_handling == "reset" and len(g_dates) > 1:
+            # ✅ FIXED: Use .dt.total_seconds() / 86400.0 instead of .dt.total_days()
+            diff_days = (g_dates - g_dates.shift(1)).dt.total_seconds() / 86400.0
+            med_days = diff_days.dropna().median()
+            if pd.notna(med_days) and med_days > 0:
+                gap_mask = diff_days > (med_days * 1.8)
+                lagged = lagged.mask(gap_mask, 0.0 if first_period_val == "zero" else np.nan)
+
+        val = lagged * decay_rate
+        if first_period_val == "zero":
+            val = val.fillna(0.0)
+        return val
+
+    if real_entities:
+        carryover_vals = pd.Series(index=df.index, dtype=float)
+        for _, grp in df.groupby(real_entities, sort=False):
+            carryover_vals.loc[grp.index] = _compute_carryover(grp.index)
+        df[output_col] = carryover_vals
+    else:
+        df[output_col] = _compute_carryover(df.index)
+
+    df.drop(columns=["__sort_date__"], inplace=True, errors="ignore")
+
+    lineage_entry = {
+        "step": step_idx,
+        "type": "carryover",
+        "source": source_name,
+        "entity_keys": real_entities,
+        "time_key": real_time,
+        "metric_column": real_metric,
+        "output_column": output_col,
+        "decay_rate": decay_rate,
+        "first_period_value": first_period_val,
+        "time_gap_handling": time_gap_handling,
+        "negative_handling": negative_handling,
+        "rows_in": rows_in,
+        "rows_out": int(len(df)),
+        "columns": [str(c) for c in df.columns],
+    }
+    return df, lineage_entry

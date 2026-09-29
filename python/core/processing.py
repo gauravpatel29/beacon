@@ -1576,69 +1576,75 @@ def optuna_params_to_transform_rows(channels_cfg: List[Dict], best_params: Dict)
 # MODELLING REGRESSION ENGINES (WITH FULL STATISTICAL INFERENCE FOR OLS & RIDGE)
 # ---------------------------------------------------------------------------
 
-def run_ols_regression(
-    transformed_df: pd.DataFrame,
-    granular_df: pd.DataFrame,
-    date_column: str,
-    geo_column: str,
+LAMBDA_CAP = 0.95  # Documented safety cap to prevent division by zero on carryover rate
+
+
+def calculate_long_term_factor(carryover_rate: float) -> float:
+    """
+    Standard MMx infinite geometric carryover multiplier: 1 / (1 - lambda).
+    Capped at LAMBDA_CAP (0.95) to prevent explosive multipliers.
+    """
+    if carryover_rate <= 0.0:
+        return 1.0
+    lam = min(float(carryover_rate), LAMBDA_CAP)
+    return 1.0 / (1.0 - lam)
+
+
+def _calculate_attribution_table(
+    params_series: pd.Series,
+    tdf: pd.DataFrame,
+    gdf: pd.DataFrame,
+    gdf_prior: pd.DataFrame,
     dependent_variable: str,
     dependent_variable_user_input: str,
-    selected_channels: List[str],
-    start_date,
-    end_date,
-    include_const: bool = True,
-) -> dict:
-    """include_const=False fits through the origin.
-
-    The screen's "Hide const row" used to drop the intercept from the table
-    only, which changed what the reader saw without changing what was fitted:
-    every other coefficient was still estimated against an intercept that was
-    no longer shown, and the contributions no longer added up to anything the
-    table explained. Passing it through to the fit is what the checkbox was
-    always taken to mean.
+    se_series: Optional[np.ndarray] = None,
+    t_stat_series: Optional[np.ndarray] = None,
+    p_val_series: Optional[np.ndarray] = None,
+    ci_lower_series: Optional[np.ndarray] = None,
+    ci_upper_series: Optional[np.ndarray] = None,
+) -> Tuple[pd.DataFrame, float, Dict[str, Any]]:
     """
-    transformed_df = transformed_df.copy()
-    granular_df = granular_df.copy()
+    Unified Attribution Engine for BOTH OLS and Ridge.
+    Guarantees standard denominators (Sum Actual Sales) and consistent units.
+    """
+    tdf_copy = tdf.copy()
+    gdf_copy = gdf.copy()
+    tdf_copy["const"] = 1.0
+    gdf_copy["const"] = 1.0
 
-    transformed_df[date_column] = _parse_dates_robust(transformed_df[date_column].astype(str).str.strip())
-    granular_df[date_column] = _parse_dates_robust(granular_df[date_column].astype(str).str.strip())
+    y_modeled = pd.to_numeric(tdf_copy[dependent_variable_user_input], errors="coerce").fillna(0.0)
+    sum_modeled_sales = float(y_modeled.sum())
 
-    start_dt = _parse_dates_robust(pd.Series([str(start_date)])).iloc[0]
-    end_dt = _parse_dates_robust(pd.Series([str(end_date)])).iloc[0]
+    # Actual observed raw sales in natural volume units (e.g. TRx)
+    if dependent_variable in gdf_copy.columns:
+        sum_raw_sales = float(pd.to_numeric(gdf_copy[dependent_variable], errors="coerce").sum())
+    else:
+        sum_raw_sales = sum_modeled_sales
 
-    modeling_duration_days = (end_dt - start_dt).days + 1
-    prior_end_date = start_dt - pd.Timedelta(days=1)
-    prior_start_date = prior_end_date - pd.Timedelta(days=modeling_duration_days - 1)
+    # Prior period raw sales
+    has_prior_data = False
+    sum_raw_sales_prior = 0.0
+    if len(gdf_prior) > 0 and dependent_variable in gdf_prior.columns:
+        raw_prior_sum = float(pd.to_numeric(gdf_prior[dependent_variable], errors="coerce").sum())
+        if raw_prior_sum > 0.0:
+            sum_raw_sales_prior = raw_prior_sum
+            has_prior_data = True
 
-    tdf = transformed_df[(transformed_df[date_column] >= start_dt) & (transformed_df[date_column] <= end_dt)]
-    gdf = granular_df[(granular_df[date_column] >= start_dt) & (granular_df[date_column] <= end_dt)]
-    gdf_prior = granular_df[(granular_df[date_column] >= prior_start_date) & (granular_df[date_column] <= prior_end_date)]
-
-    y = pd.to_numeric(tdf[dependent_variable_user_input], errors="coerce").fillna(0.0)
-    X = tdf[selected_channels].apply(pd.to_numeric, errors="coerce").fillna(0.0)
-    if include_const:
-        X = sm.add_constant(X, has_constant="add")
-    model = sm.OLS(y, X).fit()
-
-    sum_sales = float(y.sum())
-    sum_raw_sales = float(pd.to_numeric(gdf[dependent_variable], errors="coerce").sum()) if dependent_variable in gdf.columns else sum_sales
-    sum_raw_sales_prior = float(pd.to_numeric(gdf_prior[dependent_variable], errors="coerce").sum()) if (len(gdf_prior) > 0 and dependent_variable in gdf_prior.columns) else 1.0
-
-    conf_int = model.conf_int()
     coefficients = pd.DataFrame({
-        "Variable": model.params.index,
-        "Coefficient": [float(v) for v in model.params.values],
-        "Std Error": [float(v) for v in model.bse.values],
-        "t-stat": [float(v) for v in model.tvalues.values],
-        "P-value": [float(v) for v in model.pvalues.values],
-        "CI Lower (2.5%)": [float(v) for v in conf_int[0].values],
-        "CI Upper (97.5%)": [float(v) for v in conf_int[1].values],
+        "Variable": params_series.index,
+        "Coefficient": [float(v) for v in params_series.values]
     })
 
-    tdf_copy = tdf.copy()
-    tdf_copy["const"] = 1.0
-    gdf_copy = gdf.copy()
-    gdf_copy["const"] = 1.0
+    if se_series is not None:
+        coefficients["Std Error"] = [float(v) for v in se_series]
+    if t_stat_series is not None:
+        coefficients["t-stat"] = [float(v) for v in t_stat_series]
+    if p_val_series is not None:
+        coefficients["P-value"] = [float(v) for v in p_val_series]
+    if ci_lower_series is not None:
+        coefficients["CI Lower (2.5%)"] = [float(v) for v in ci_lower_series]
+    if ci_upper_series is not None:
+        coefficients["CI Upper (97.5%)"] = [float(v) for v in ci_upper_series]
 
     transformed_to_raw = {col: "const" if col == "const" else col.replace("_transformed", "") for col in coefficients["Variable"]}
     coefficients["Raw Variable"] = coefficients["Variable"].map(transformed_to_raw)
@@ -1671,38 +1677,113 @@ def run_ols_regression(
         return 0.0
 
     coefficients["Spend"] = coefficients["Raw Variable"].apply(calc_spend)
-    coefficients["Impactable %"] = coefficients.apply(
-        lambda row: (float(row["Coefficient"]) * float(row["Modelled Activity"]) * 100.0) / sum_sales if sum_sales != 0 else 0.0, axis=1
-    )
+
+    # 1. Real Mathematical Contribution (beta * Modelled Activity)
+    coefficients["Contribution"] = coefficients["Coefficient"].astype(float) * coefficients["Modelled Activity"].astype(float)
+
+    # 2. Raw Unforced Impact % = (Contribution / Sum Actual Observed Sales) * 100
+    if sum_modeled_sales != 0:
+        coefficients["Impactable %"] = (coefficients["Contribution"] / sum_modeled_sales) * 100.0
+    else:
+        coefficients["Impactable %"] = 0.0
+
     coefficients["Impactable (%)"] = coefficients["Impactable %"].apply(lambda x: f"{float(x):.2f}%")
-    coefficients["Impactable Sales"] = coefficients["Impactable %"].astype(float) * sum_raw_sales / 100.0
-    coefficients["ROI"] = coefficients.apply(lambda row: float(row["Impactable Sales"]) / float(row["Spend"]) if float(row["Spend"]) != 0 else 0.0, axis=1)
+
+    # 3. Impactable Sales in Real Units (Rescaled to natural volume)
+    coefficients["Impactable Sales"] = (coefficients["Impactable %"] / 100.0) * sum_raw_sales
+
+    # 4. Marketing ROI = Impactable Sales / Spend
+    coefficients["ROI"] = coefficients.apply(
+        lambda row: float(row["Impactable Sales"]) / float(row["Spend"]) if float(row["Spend"]) > 0 else 0.0,
+        axis=1
+    )
+
     coefficients["Note"] = coefficients["Raw Variable"].apply(
         lambda var: "Intercept" if var == "const" else ("Carryover" if var == "Carryover" else "")
     )
 
-    long_term_factor = None
-    carryover_pct = coefficients[coefficients["Note"] == "Carryover"]["Impactable %"]
-    if not carryover_pct.empty:
-        cp = float(carryover_pct.iloc[0]) / 100.0
-        carryover_rate = (cp * sum_raw_sales) / sum_raw_sales_prior if sum_raw_sales_prior != 0 else 0.0
-        long_term_factor = (3.0 + 2.0 * carryover_rate + carryover_rate ** 2) / 3.0
-        coefficients["Long Term ROI"] = long_term_factor * coefficients["ROI"]
-    else:
-        coefficients["Long Term ROI"] = 0.0
+    # 5. Long-Term ROI & Carryover Multiplier Calculation
+    long_term_factor = 1.0
+    carryover_rows = coefficients[coefficients["Note"] == "Carryover"]
+    prior_warning = None
 
-    coefficients = coefficients.drop(columns=["Raw Variable"], errors="ignore")
+    if not carryover_rows.empty:
+        if has_prior_data:
+            cp = max(0.0, float(carryover_rows["Impactable %"].iloc[0]) / 100.0)
+            carryover_rate = (cp * sum_raw_sales) / sum_raw_sales_prior
+            long_term_factor = calculate_long_term_factor(carryover_rate)
+            coefficients["Long Term ROI"] = long_term_factor * coefficients["ROI"]
+        else:
+            prior_warning = "No prior-period data available — Long Term ROI defaulted to Current ROI."
+            coefficients["Long Term ROI"] = coefficients["ROI"]
+    else:
+        coefficients["Long Term ROI"] = coefficients["ROI"]
+
+    metadata = {
+        "has_prior_data": has_prior_data,
+        "prior_warning": prior_warning,
+        "sum_raw_sales": sum_raw_sales,
+        "sum_modeled_sales": sum_modeled_sales,
+    }
+
+    coefficients = coefficients.drop(columns=["Contribution", "Raw Variable"], errors="ignore")
+    return coefficients, long_term_factor, metadata
+
+
+def run_ols_regression(
+    transformed_df: pd.DataFrame,
+    granular_df: pd.DataFrame,
+    date_column: str,
+    geo_column: str,
+    dependent_variable: str,
+    dependent_variable_user_input: str,
+    selected_channels: List[str],
+    start_date,
+    end_date,
+    include_const: bool = True,
+) -> dict:
+    tdf, gdf, gdf_prior = _filter_modelling_frames(transformed_df, granular_df, date_column, start_date, end_date)
+
+    y = pd.to_numeric(tdf[dependent_variable_user_input], errors="coerce").fillna(0.0)
+    X = tdf[selected_channels].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    if include_const:
+        X = sm.add_constant(X, has_constant="add")
+
+    model = sm.OLS(y, X).fit()
+    conf_int = model.conf_int()
+
+    params_series = model.params
+    se_series = model.bse.values
+    t_stat_series = model.tvalues.values
+    p_val_series = model.pvalues.values
+    ci_lower = conf_int[0].values
+    ci_upper = conf_int[1].values
+
+    coefficients, long_term_factor, meta = _calculate_attribution_table(
+        params_series=params_series,
+        tdf=tdf,
+        gdf=gdf,
+        gdf_prior=gdf_prior,
+        dependent_variable=dependent_variable,
+        dependent_variable_user_input=dependent_variable_user_input,
+        se_series=se_series,
+        t_stat_series=t_stat_series,
+        p_val_series=p_val_series,
+        ci_lower_series=ci_lower,
+        ci_upper_series=ci_upper,
+    )
+
     return {
         "summary": model.summary().as_text(),
         "coefficients": coefficients.to_dict(orient="records"),
         "long_term_factor": long_term_factor,
+        "meta": meta,
         "start_date": str(start_date),
         "end_date": str(end_date),
         "r_squared": float(model.rsquared),
         "adj_r_squared": float(model.rsquared_adj),
         "rmse": float(np.sqrt(model.mse_resid)),
     }
-
 
 def get_original_scale_coefficients(model, scaler, selected_channels, prior_weights, use_custom_penalties):
     coef_scaled = model.coef_[1:] if len(model.coef_) > len(selected_channels) else model.coef_
@@ -1883,26 +1964,27 @@ def _ridge_scale_and_weight(X_df, scaler_obj, channels, prior_weights, use_custo
 
 
 def run_ridge_regression(
-    transformed_df, granular_df, date_column, geo_column,
-    dependent_variable, dependent_variable_user_input,
-    selected_channels, start_date, end_date,
-    alpha_mode: str = "manual", manual_alpha: float = 1.0, cv_splits: int = 3,
-    positive_coef: bool = False, use_custom_penalties: bool = False,
-    prior_weights: Optional[Dict] = None, stage: int = 1,
-    parent_channel: Optional[str] = None, s2_channels: Optional[List[str]] = None,
+    transformed_df: pd.DataFrame,
+    granular_df: pd.DataFrame,
+    date_column: str,
+    geo_column: str,
+    dependent_variable: str,
+    dependent_variable_user_input: str,
+    selected_channels: List[str],
+    start_date,
+    end_date,
+    alpha_mode: str = "manual",
+    manual_alpha: float = 1.0,
+    cv_splits: int = 3,
+    positive_coef: bool = False,
+    use_custom_penalties: bool = False,
+    prior_weights: Optional[Dict] = None,
+    stage: int = 1,
+    parent_channel: Optional[str] = None,
+    s2_channels: Optional[List[str]] = None,
     stage1_coefficients: Optional[List[Dict]] = None,
     include_const: bool = True,
 ) -> dict:
-    """include_const=False fits through the origin - see run_ols_regression.
-
-    Ridge needs one extra thing OLS does not. The features are standardised
-    before fitting, and centring them re-introduces an intercept through the
-    back door: a model with no constant column fitted on centred data still
-    carries -sum(coef * mean). Dropping the constant alone would leave that
-    term in the rescaled coefficients. So when the constant is excluded the
-    features are scaled but NOT centred, which is what fitting through the
-    origin actually requires.
-    """
     prior_weights = prior_weights or {}
     tdf, gdf, gdf_prior = _filter_modelling_frames(transformed_df, granular_df, date_column, start_date, end_date)
 
@@ -1923,12 +2005,12 @@ def run_ridge_regression(
     intercept_orig, coef_orig = get_original_scale_coefficients(
         ridge_final, scaler_final, channels, prior_weights, use_custom_penalties
     )
-    # No constant was fitted, so no const row is reported. Carrying one at
-    # 0.0 would put an Intercept line in the table for a model that has none.
+
     if include_const:
         params_series = pd.Series([intercept_orig] + list(coef_orig), index=["const"] + channels)
     else:
         params_series = pd.Series(list(coef_orig), index=list(channels))
+
     y_pred = ridge_final.predict(X_scaled)
     residuals = y_raw - y_pred
     rmse = float(np.sqrt(mean_squared_error(y_raw, y_pred)))
@@ -1937,7 +2019,7 @@ def run_ridge_regression(
     n, k = len(y_raw), len(channels)
     adj_r2 = 1.0 - (1.0 - r2) * (n - 1) / (n - k - 1) if (n - k - 1) > 0 else float("nan")
 
-    # Full Ridge Statistical Inference
+    # Ridge Inference
     dof = max(1, n - k - 1)
     sigma_sq = float(np.sum(residuals ** 2) / dof)
     XtX = np.dot(X_scaled.T, X_scaled)
@@ -1945,9 +2027,6 @@ def run_ridge_regression(
     cov_matrix = sigma_sq * np.dot(np.dot(A_inv, XtX), A_inv)
     se_scaled = np.sqrt(np.maximum(1e-12, np.diag(cov_matrix)))
 
-    # The constant occupies row 0 of the scaled design only when one was
-    # fitted. Without this offset the no-constant path read every channel's
-    # standard error one row late and ran off the end of the array.
     offset = 1 if include_const else 0
     se_orig = np.zeros(len(params_series))
     if include_const:
@@ -1962,13 +2041,21 @@ def run_ridge_regression(
     ci_lower = params_series.values - 1.96 * se_orig
     ci_upper = params_series.values + 1.96 * se_orig
 
-    coefficients = _build_coefficients_table(
-        params_series, tdf, gdf, gdf_prior, dependent_variable, dependent_variable_user_input,
-        se_series=se_orig, t_stat_series=t_stats, p_val_series=p_values,
-        ci_lower_series=ci_lower, ci_upper_series=ci_upper
+    coefficients, long_term_factor, meta = _calculate_attribution_table(
+        params_series=params_series,
+        tdf=tdf,
+        gdf=gdf,
+        gdf_prior=gdf_prior,
+        dependent_variable=dependent_variable,
+        dependent_variable_user_input=dependent_variable_user_input,
+        se_series=se_orig,
+        t_stat_series=t_stats,
+        p_val_series=p_values,
+        ci_lower_series=ci_lower,
+        ci_upper_series=ci_upper,
     )
-    model_type = "Ridge Stage 1"
 
+    model_type = "Ridge Stage 1"
     ridge_summary = f"{model_type} Summary\n{'─' * 54}\nAlpha: {best_alpha} | R²: {r2:.4f} | Adj R²: {adj_r2:.4f} | RMSE: {rmse:,.2f}"
 
     return {
@@ -1979,13 +2066,13 @@ def run_ridge_regression(
         "r_squared": r2,
         "adj_r_squared": adj_r2,
         "rmse": rmse,
+        "meta": meta,
         "positive_coef": positive_coef,
         "prior_weights": prior_weights if use_custom_penalties else {},
         "start_date": str(start_date),
         "end_date": str(end_date),
         "params": {k: float(v) for k, v in params_series.items()},
     }
-
 
 def build_combined_table(s1_coeff_df: pd.DataFrame, s2_coeff_df: pd.DataFrame, parent_channel: str) -> pd.DataFrame:
     rows = []
@@ -2072,73 +2159,107 @@ def build_waterfall_chart_data(combined_df: pd.DataFrame, dep_var_label: str = "
     }
 
 
-def calc_calibration_factor(impactable_sales_nation, beta_coeff, spend_nation, saturation_function, power_value, num_time=12, num_geo=2614):
-    # A channel with no recorded spend has no curve to calibrate: the
-    # denominator below is beta * log(1 + 0) == 0, and numpy divides by it to
-    # give inf rather than raising. Every point of the curve then came back
-    # inf, and Starlette serialises responses with allow_nan=False, so the
-    # failure surfaced as a 500 raised while rendering the response - outside
-    # this module's callers and outside the router's own try/except. Rejecting
-    # it here turns that into the router's 400 with a message that says which
-    # channel and why.
-    if saturation_function == "log":
-        denominator = beta_coeff * np.log(1 + (spend_nation / (num_time * num_geo)))
-    elif saturation_function == "power":
-        denominator = beta_coeff * np.power(spend_nation / (num_time * num_geo), power_value)
+def calc_calibration_factor(
+    impactable_sales_nation: float,
+    beta_coeff: float,
+    spend_nation: float,
+    saturation_function: str,
+    power_value: float = 0.5,
+    log_k: float = 1.0,
+    num_time: int = 12,
+    num_geo: int = 100,
+) -> float:
+    sat = str(saturation_function or "none").lower()
+    t_g = max(1, int(num_time) * int(num_geo))
+    x_local = max(0.0, float(spend_nation)) / t_g
+
+    if sat == "log":
+        k_val = float(log_k) if log_k and float(log_k) > 0 else 1.0
+        denominator = float(beta_coeff) * np.log1p(k_val * x_local)
+    elif sat == "power":
+        p_val = float(power_value) if power_value and float(power_value) > 0 else 0.5
+        denominator = float(beta_coeff) * np.power(x_local, p_val)
     else:
+        denominator = float(beta_coeff) * x_local
+
+    if not np.isfinite(denominator) or denominator <= 0:
         return 1.0
 
-    if not np.isfinite(denominator) or denominator == 0:
-        raise ValueError(
-            "cannot calibrate a response curve without spend and a non-zero "
-            "coefficient (spend_nation=%r, beta_coeff=%r)" % (spend_nation, beta_coeff)
-        )
-
-    factor = (impactable_sales_nation / (num_time * num_geo)) / denominator
-    if not np.isfinite(factor):
-        raise ValueError(
-            "response curve calibration is not a finite number "
-            "(impactable_sales_nation=%r)" % (impactable_sales_nation,)
-        )
-    return factor
+    target_geo_time = float(impactable_sales_nation) / t_g
+    factor = target_geo_time / denominator
+    return float(factor) if np.isfinite(factor) and factor > 0 else 1.0
 
 
-def create_response_curve(channel_name, impactable_sales_nation, beta_coeff, spend_nation, start, stop, step, price, saturation_function, power_value, num_time=12, num_geo=2614):
-    calibration_factor = calc_calibration_factor(impactable_sales_nation, beta_coeff, spend_nation, saturation_function, power_value, num_time, num_geo)
-    spend_values = list(range(start, stop + 1, step))
+def create_response_curve(
+    channel_name: str,
+    impactable_sales_nation: float,
+    beta_coeff: float,
+    spend_nation: float,
+    start: int,
+    stop: int,
+    step: int,
+    price: float,
+    saturation_function: str,
+    power_value: float = 0.5,
+    log_k: float = 1.0,
+    num_time: int = 12,
+    num_geo: int = 100,
+) -> pd.DataFrame:
+    sat = str(saturation_function or "none").lower()
+    k_val = float(log_k) if log_k and float(log_k) > 0 else 1.0
+    p_val = float(power_value) if power_value and float(power_value) > 0 else 0.5
+    t_g = max(1, int(num_time) * int(num_geo))
+
+    calibration_factor = calc_calibration_factor(
+        impactable_sales_nation=impactable_sales_nation,
+        beta_coeff=beta_coeff,
+        spend_nation=spend_nation,
+        saturation_function=saturation_function,
+        power_value=p_val,
+        log_k=k_val,
+        num_time=num_time,
+        num_geo=num_geo,
+    )
+
+    spend_values = list(range(int(start), int(stop) + 1, max(1, int(step))))
     rows = []
     prev_impactable = None
-    
-    first_step_mroi = 0.0
-    if len(spend_values) > 1 and step > 0:
-        if saturation_function == "log":
-            s1_imp = calibration_factor * beta_coeff * np.log(1 + (step / (num_time * num_geo))) * num_time * num_geo
-        else:
-            s1_imp = calibration_factor * beta_coeff * np.power(step / (num_time * num_geo), power_value) * num_time * num_geo
-        first_step_mroi = float((s1_imp * price) / step)
 
-    for i, spend in enumerate(spend_values):
-        if saturation_function == "log":
-            impactable_geo_time = calibration_factor * beta_coeff * np.log(1 + (spend / (num_time * num_geo)))
+    # First-step marginal ROI baseline
+    x_first = max(1.0, float(step)) / t_g
+    if sat == "log":
+        s1_imp = calibration_factor * float(beta_coeff) * np.log1p(k_val * x_first) * t_g
+    elif sat == "power":
+        s1_imp = calibration_factor * float(beta_coeff) * np.power(x_first, p_val) * t_g
+    else:
+        s1_imp = calibration_factor * float(beta_coeff) * x_first * t_g
+    first_step_mroi = float((s1_imp * float(price)) / max(1.0, float(step)))
+
+    for spend in spend_values:
+        x_loc = float(spend) / t_g
+        if sat == "log":
+            impactable_geo_time = calibration_factor * float(beta_coeff) * np.log1p(k_val * x_loc)
+        elif sat == "power":
+            impactable_geo_time = calibration_factor * float(beta_coeff) * np.power(max(0.0, x_loc), p_val)
         else:
-            impactable_geo_time = calibration_factor * beta_coeff * np.power(spend / (num_time * num_geo), power_value)
-        
-        impactable_nation = impactable_geo_time * num_time * num_geo
-        impactable_nation_currency = impactable_nation * price
-        roi = impactable_nation_currency / spend if spend > 0 else first_step_mroi
-        
-        if prev_impactable is not None and spend > 0:
-            mroi = ((impactable_nation - prev_impactable) * price / step)
+            impactable_geo_time = calibration_factor * float(beta_coeff) * x_loc
+
+        impactable_nation = impactable_geo_time * t_g
+        impactable_nation_currency = impactable_nation * float(price)
+        roi = impactable_nation_currency / float(spend) if float(spend) > 0 else first_step_mroi
+
+        if prev_impactable is not None and float(spend) > 0:
+            mroi = ((impactable_nation - prev_impactable) * float(price)) / float(step)
         else:
             mroi = first_step_mroi
 
         rows.append({
-            "spend": spend,
-            "impactable_geo_time": impactable_geo_time,
-            "impactable_nation": impactable_nation,
-            "impactable_nation_currency": impactable_nation_currency,
-            "roi": roi,
-            "mroi": mroi
+            "spend": int(spend),
+            "impactable_geo_time": float(impactable_geo_time),
+            "impactable_nation": float(impactable_nation),
+            "impactable_nation_currency": float(impactable_nation_currency),
+            "roi": float(roi),
+            "mroi": float(mroi),
         })
         prev_impactable = impactable_nation
 
