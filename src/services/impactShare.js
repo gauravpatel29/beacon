@@ -23,20 +23,15 @@
  */
 
 /** Reads "12.40%", "12.4" or 12.4 alike; null for anything that is not a number. */
+/**
+ * Reads signed percentage numbers directly.
+ */
 export function parsePercent(raw) {
   if (raw === null || raw === undefined || raw === '') return null;
   const num = Number(String(raw).replace('%', ''));
   return Number.isFinite(num) ? num : null;
 }
 
-/**
- * A variable's weight. Absent means 1: an unweighted model then reduces to
- * plain normalisation, which is what every OLS run needs. The engine uses the
- * same default (`prior_weights.get(col, 1.0)`), so the two agree.
- *
- * The suffix is stripped because weights are keyed by the name the user
- * chose, while coefficients come back as `<name>_transformed`.
- */
 export function weightFor(weights, variable) {
   if (!weights) return 1;
   const name = String(variable ?? '');
@@ -47,14 +42,11 @@ export function weightFor(weights, variable) {
 }
 
 /**
- * Shares as numbers in tenths of a percent, summing to exactly 1000.
- * null for rows whose percentage could not be read.
+ * Normalizes positive contributions into a 100.0% Commercial Share of Voice.
  */
 export function weightedShareTenths(values, weights) {
   const weighted = values.map((v, i) => {
     if (v === null) return null;
-    // The floor happens before weighting: a negative contribution is not
-    // evidence about the weight, it is a contribution of nothing.
     return (Math.max(0, v) / 100) * (weights[i] ?? 1);
   });
 
@@ -65,8 +57,6 @@ export function weightedShareTenths(values, weights) {
   const floors = exact.map((v) => (v === null ? null : Math.floor(v)));
   const assigned = floors.reduce((sum, v) => sum + (v || 0), 0);
 
-  // Largest remainder: the tenths left over by flooring go to the rows that
-  // were cut by the most, so the column totals 100.0 exactly.
   const order = exact
     .map((v, i) => ({ i, frac: v === null ? -1 : v - Math.floor(v) }))
     .filter((e) => e.frac >= 0)
@@ -80,10 +70,6 @@ export function weightedShareTenths(values, weights) {
   return tenths;
 }
 
-/**
- * One column of a coefficient table, formatted.
- * `weightOf(row)` supplies the weight; omit it for an unweighted share.
- */
 export function weightedShareColumn(rows, column, weightOf) {
   const list = Array.isArray(rows) ? rows : [];
   const values = list.map((r) => parsePercent(r[column]));

@@ -2,13 +2,10 @@ import { useState, useEffect, useMemo } from 'react';
 import {
   ensureWorkflow,
   getWorkflow,
-  getCsv,
   problemMessage,
-  runRegression,
-  runRidge,
 } from '../../services/api.js';
 import { generateResponseCurves, fetchBenchmarks, fetchResultsSummary, updateWorkflowState } from '../../services/modelOutputApi.js';
-import { ResponsiveContainer, CartesianGrid, XAxis, YAxis, Tooltip, Legend, LineChart, Line, BarChart, Bar } from 'recharts';
+import { ResponsiveContainer, CartesianGrid, XAxis, YAxis, Tooltip, BarChart, Bar, LineChart, Line } from 'recharts';
 import { ChartTooltip } from '../../components/charts/ChartTooltip.jsx';
 import { AXIS_TICK, CHART_COLORS, GRID, LINE_TYPE, X_LABEL, Y_LABEL } from '../../components/charts/chartTheme.js';
 import PageFooterNav from '../../components/PageFooterNav/PageFooterNav.jsx';
@@ -16,54 +13,40 @@ import { formatRoi } from '../../services/formatRoi.js';
 import { weightedSharePercents, weightFor } from '../../services/impactShare.js';
 import './ModelOutput.css';
 
-// ─── Tier / bucket classification (exact rules from the integration spec) ───
-// Prefer the per-column category recorded during ingestion
-// (spec.config_metadata.column_roles) where it answers the question; the
-// name-pattern rules below are the fallback, not the primary source.
-// column_roles records one of the five INGESTION roles - 'Baseline
-// Variables', 'Independent Promotions', and so on. Those are not these four
-// output buckets, and returning one straight through filed rows under keys
-// like 'Baseline Variables' that nothing on this screen reads. The damage
-// showed up in Baseline Demand: the real baseline variables vanished into an
-// unrendered bucket, leaving the tier to be the intercept alone, which is
-// routinely negative even in a model whose baseline contribution is
-// positive. Only 'Baseline Variables' maps cleanly onto a bucket;
-// 'Independent Promotions' still has to be split into personal/npp/dtc,
-// which only the name rules can do.
-const ROLE_TO_BUCKET = { 'Baseline Variables': 'baseline' };
+const ROLE_TO_BUCKET = {
+  'Baseline Variables': 'baseline',
+  'Cross-sectional Variable': 'baseline',
+};
 
 function classifyChannel(variable, columnRoles) {
-  const mapped = ROLE_TO_BUCKET[columnRoles?.[variable]];
+  const v = String(variable || '').replace(/_transformed$/, '');
+  const mapped = ROLE_TO_BUCKET[columnRoles?.[v]] || ROLE_TO_BUCKET[columnRoles?.[variable]];
   if (mapped) return mapped;
 
-  const n = variable.toLowerCase();
-  if (/const|baseline|intercept|carryover/.test(n)) return 'baseline';
+  const n = v.toLowerCase();
+  // Any baseline, carryover, constant, competitor spend, macro, or population is strictly Baseline
+  if (/const|baseline|intercept|carryover|competitor|comp_|comp\b|macro|pop|universe|trend/.test(n)) return 'baseline';
   if (/rte|email|portal|npp|hcp_web/.test(n)) return 'npp';
-  if (/tv|dtc|digital|search|social|media|disp/.test(n)) return 'dtc';
-  if (/call|det|sample|speaker|f2f|rep/.test(n)) return 'personal';
-  return 'personal'; // unmatched falls into Personal Promotion, per spec
+  if (/tv|dtc|digital|search|social|media|disp|broadcast/.test(n)) return 'dtc';
+  if (/call|det|sample|speaker|f2f|rep|attendee/.test(n)) return 'personal';
+  return 'personal';
 }
+
 const BUCKET_LABELS = { baseline: 'Baseline', personal: 'Personal Promotion', npp: 'NPP Promotion', dtc: 'DTC Promotion' };
-// Section 3 (Executive Summary) stat-card labels use slightly different
-// wording than the Tier Role badges in Section 5's deep-dive table.
 const EXEC_LABELS = { baseline: 'Baseline Demand', personal: 'Personal Promotion', npp: 'NPP Promotion', dtc: 'DTC / Media' };
 const BUCKET_COLORS = { baseline: '#001E96', personal: '#1ABC9C', npp: '#F59E0B', dtc: '#8B5CF6' };
 
-// Section 7's own classification — 6 tiers, not the 4 buckets Sections 3/5
-// use, per the confirmed benchmarking API doc's Stage 2 keyword rules.
-// Kept fully separate from classifyChannel above rather than replacing it,
-// since Sections 3/5 are an established, working system this doesn't need
-// to touch.
 function classifyBenchmarkTier(variable) {
-  const n = variable.toLowerCase();
-  if (/const|intercept|baseline|macro|trend/.test(n)) return 'baseline';
+  const n = String(variable || '').replace(/_transformed$/, '').toLowerCase();
+  if (/const|intercept|baseline|macro|trend|carryover|competitor|comp_/.test(n)) return 'baseline';
   if (/call|rep_f2f|detail/.test(n)) return 'salesforce';
-  if (/speaker|dinner|sample/.test(n)) return 'hcp_pp';
+  if (/speaker|dinner|sample|attendee/.test(n)) return 'hcp_pp';
   if (/co.?pay|copay|patient_assist|voucher/.test(n)) return 'access';
-  if (/rte|portal|hcp_web|web_detail/.test(n)) return 'hcp_npp';
+  if (/rte|portal|hcp_web|web_detail|email/.test(n)) return 'hcp_npp';
   if (/tv|broadcast|digital|search|social|media|disp/.test(n)) return 'consumer_npp';
-  return 'hcp_pp'; // unmatched falls back to the same tier classifyChannel defaults to (personal)
+  return 'hcp_pp';
 }
+
 const BENCHMARK_TIER_LABELS = {
   baseline: 'Baseline Impact %',
   salesforce: 'Salesforce Impact %',
@@ -73,25 +56,17 @@ const BENCHMARK_TIER_LABELS = {
   consumer_npp: 'Consumer NPP / DTC Impact %',
 };
 
-// The coefficient array is documented (MODEL_OUTPUT_API.md) to live at
-// `coefficients` on each stored model run. Sections 3/4/5 read it entirely
-// client-side — there's no endpoint for them by design. But real runs have
-// come through with that array empty/missing while still having valid
-// r2/rmse, so this checks a handful of plausible alternate key names before
-// giving up, and reports back which one (if any) actually worked so the UI
-// can show a useful diagnostic instead of just silently rendering nothing.
 const COEFFICIENT_KEY_CANDIDATES = [
   'coefficients', 'coefficient_table', 'coeffs', 'coefficientTable',
   'regression_output', 'regressionOutput', 'model_output', 'modelOutput',
   'results', 'output',
 ];
+
 function findCoefficientArray(model) {
   if (!model) return { rows: null, foundKey: null };
   for (const key of COEFFICIENT_KEY_CANDIDATES) {
     const val = model[key];
     if (Array.isArray(val) && val.length) return { rows: val, foundKey: key };
-    // A couple of these candidates are objects that might themselves nest a
-    // `coefficients` array one level down (e.g. model.results.coefficients).
     if (val && typeof val === 'object' && Array.isArray(val.coefficients) && val.coefficients.length) {
       return { rows: val.coefficients, foundKey: `${key}.coefficients` };
     }
@@ -99,20 +74,10 @@ function findCoefficientArray(model) {
   return { rows: null, foundKey: null };
 }
 
-// Must match results.py's BENCHMARK_DATABASE keys EXACTLY — the backend does
-// a silent dict .get(value, default) fallback on mismatch, not an error, so a
-// wrong string here doesn't fail, it just quietly benchmarks against the
-// wrong (or default) cohort with no visible sign anything's off. Note the en
-// dash (–, U+2013) in the maturity stages, not a plain hyphen.
 const DISEASE_AREAS = ['Dermatology (Specialty)'];
 const MATURITY_STAGES = ['Launch (<1 Year)', 'Growth (1–3 Years)', 'Mature (3–7 Years)', 'Late Lifecycle (7+ Years)'];
 const MARKETING_DYNAMICS = ['High Competition', 'Medium Competition', 'Low / Niche Competition'];
 
-
-// Older assumed format carried emoji (🟢🟡🔴); the confirmed API doc shows
-// plain text instead ("Below Benchmark", "Within Benchmark", "Above
-// Benchmark", "Within/Above Benchmark"). Handles both: emoji wins if
-// present, otherwise tone is read from the words themselves.
 function parseStatus(raw) {
   if (!raw) return { text: '', tone: 'neutral' };
   let tone = 'neutral';
@@ -129,16 +94,6 @@ function parseStatus(raw) {
   return { text, tone };
 }
 
-function mean(nums) { return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : 0; }
-function toNumberRoi(str) {
-  // "1.24x" -> 1.24
-  if (typeof str === 'number') return str;
-  const n = parseFloat(String(str).replace(/[^0-9.\-]/g, ''));
-  return Number.isFinite(n) ? n : null;
-}
-
-// Chart axis tick formatters — reference UI shows spend as "$0k"/"$125k" and
-// impact volume compacted the same way (e.g. "105,000").
 function formatSpendTick(v) {
   return v === 0 ? '$0k' : `$${Math.round(v / 1000)}k`;
 }
@@ -149,35 +104,30 @@ function formatCompactNumber(v) {
 function ModelOutput() {
   const [modelHistory, setModelHistory] = useState([]);
   const [columnRoles, setColumnRoles] = useState(null);
-
   const [isLoadingWorkflow, setIsLoadingWorkflow] = useState(true);
   const [workflowError, setWorkflowError] = useState(null);
 
   const [viewingId, setViewingId] = useState('');
-  // Finalization + spend now persist via PATCH /v1/workflows/{workflow_id}
-  // (see handleFinalize / the spend-autosave effect below), so they survive
-  // navigation and are visible beyond this browser. Seeded from the
-  // workflow's own state_data on load, below.
   const [workflowId, setWorkflowId] = useState(null);
   const [finalizedId, setFinalizedId] = useState('');
   const [finalizeError, setFinalizeError] = useState(null);
   const [isFinalizing, setIsFinalizing] = useState(false);
-  // Per Module 7 API Reference Section 4 (Client-Side State Schema):
-  // unitValue/unitValueLabel are real, documented app state — unitValue
-  // feeds channels[].price in the response-curves generation payload
-  // (Section 3), converting raw unit volume into actual dollar revenue/ROI.
-  const unitValueLabel = 'Revenue Per TRx ($)'; // fixed — dropdown removed per instruction
+
+  const unitValueLabel = 'Revenue Per TRx ($)';
   const [unitValue, setUnitValue] = useState(100);
-  const [unitValueDraft, setUnitValueDraft] = useState(null); // in-progress typed text, or null when not editing
+  const [unitValueDraft, setUnitValueDraft] = useState(null);
+
+  // Toggle for Chart 1: Revenue ($) vs. Volume (TRx)
+  const [responseMetricView, setResponseMetricView] = useState('revenue'); // 'revenue' | 'volume'
+
+  // User input for Long-Term Carryover Lambda
+  const [userLambda, setUserLambda] = useState(0.52);
+  const [lambdaDraft, setLambdaDraft] = useState(null);
+
   const [spendByChannel, setSpendByChannel] = useState({});
   const [spendSaveError, setSpendSaveError] = useState(null);
-  // DEBUG: the full workflow.state_data, stashed so the debug probe below can
-  // search it for a real transformed_csv wherever it turns out to live —
-  // we've now confirmed the raw ARD (`ard` field) is NOT that file (its
-  // header has none of the "_transformed" columns run-regression needs).
   const [workflowStateData, setWorkflowStateData] = useState(null);
 
-  // ── Load model runs from workflow state (modelling.modelHistory), not localStorage ──
   useEffect(() => {
     (async () => {
       setIsLoadingWorkflow(true);
@@ -193,37 +143,6 @@ function ModelOutput() {
         setFinalizedId(workflow?.state_data?.finalizedModelId || '');
         setSpendByChannel(workflow?.state_data?.channelSpendMap || {});
         setWorkflowStateData(workflow?.state_data || null);
-        // DEBUG: dump the shape of state_data so we can see every module's
-        // keys in one place, and specifically hunt for anything CSV-shaped
-        // (a long string containing commas/newlines) that could be the real
-        // transformed_csv, wherever the Transformation module actually put it.
-        console.groupCollapsed('[Workflow debug] state_data top-level modules');
-        console.log('Top-level keys under state_data:', Object.keys(workflow?.state_data || {}));
-        console.log('Full state_data (expand to browse manually):', workflow?.state_data);
-        console.log('state_data.transformation (expand to browse manually):', workflow?.state_data?.transformation);
-        console.log('state_data.transformation keys:', Object.keys(workflow?.state_data?.transformation || {}));
-        console.log('state_data.modelling (expand to browse manually):', workflow?.state_data?.modelling);
-        console.log('state_data.modelling keys:', Object.keys(workflow?.state_data?.modelling || {}));
-        console.log('state_data.ingestion keys:', Object.keys(workflow?.state_data?.ingestion || {}));
-        console.log('state_data.stitching keys:', Object.keys(workflow?.state_data?.stitching || {}));
-        const findCsvLike = (obj, path = '') => {
-          if (!obj || typeof obj !== 'object') return;
-          const entries = Array.isArray(obj) ? obj.map((v, i) => [String(i), v]) : Object.entries(obj);
-          for (const [k, v] of entries) {
-            const p = path ? `${path}.${k}` : k;
-            if (typeof v === 'string' && v.length > 200 && v.includes(',') && v.includes('\n')) {
-              console.log(`Possible CSV found at state_data.${p} — length ${v.length}, first 200 chars:`, v.slice(0, 200));
-            } else if (v && typeof v === 'object') {
-              // Now recurses into arrays too — the previous version's
-              // `!Array.isArray(v)` guard meant anything stored inside an
-              // array (e.g. transformation.results[0].csv_data) was silently
-              // skipped, which could easily explain finding nothing.
-              findCsvLike(v, p);
-            }
-          }
-        };
-        findCsvLike(workflow?.state_data);
-        console.groupEnd();
       } catch (err) {
         setWorkflowError(problemMessage(err, 'Could not load model runs from this workflow.'));
       } finally {
@@ -232,10 +151,6 @@ function ModelOutput() {
     })();
   }, []);
 
-  // ── Section 1 & 8: formatted diagnostics from /api/results/summary ───────
-  // Per module7-api-reference.md (not in MODEL_OUTPUT_API.md, wired in per
-  // instruction). Treated as a display nicety: on failure we keep showing
-  // the stored r2/adjR2/rmse fields rather than blocking either section.
   const [resultsSummaryById, setResultsSummaryById] = useState({});
   const [summaryError, setSummaryError] = useState(null);
 
@@ -261,8 +176,6 @@ function ModelOutput() {
     })();
   }, [modelHistory]);
 
-  // Prefer the server-formatted stats where available; fall back to the
-  // stored run's own fields otherwise.
   const getDisplayStats = (m) => {
     const s = m ? resultsSummaryById[m.id] : null;
     return {
@@ -279,103 +192,88 @@ function ModelOutput() {
     const previous = finalizedId;
     setFinalizeError(null);
     setIsFinalizing(true);
-    setFinalizedId(modelId); // optimistic — Response Curves/Benchmarks unlock immediately
+    setFinalizedId(modelId);
     try {
       await updateWorkflowState(workflowId, { state_data: { finalizedModelId: modelId } });
     } catch (err) {
-      setFinalizedId(previous); // revert; the unlock wasn't actually saved
+      setFinalizedId(previous);
       setFinalizeError(problemMessage(err, 'Could not save the finalized model. Please try again.'));
     } finally {
       setIsFinalizing(false);
     }
   };
 
-  // ── Coefficient rows: real fields from Model Configuration, as-is ────────
-  // Note is "Intercept" for the constant row and "Carryover" for the lagged
-  // KPI — neither is a channel, so both are filtered out of every table.
   const coefficientLookup = useMemo(() => findCoefficientArray(viewingModel), [viewingModel]);
 
-  const channelRows = useMemo(() => {
-    if (!viewingModel || !coefficientLookup.rows) {
-      console.log('[channelRows guard] bailing out early', {
-        viewingModelPresent: !!viewingModel,
-        viewingModelName: viewingModel?.name ?? null,
-        'coefficientLookup.rows': coefficientLookup.rows,
-        'coefficientLookup.foundKey': coefficientLookup.foundKey,
-        reason: !viewingModel
-          ? 'no viewingModel selected at all'
-          : 'viewingModel exists, but coefficientLookup.rows is null or empty no usable coefficients array found under any checked key',
-      });
-      return [];
-    }
-    const mapped = coefficientLookup.rows
-      .filter((r) => r.Note !== 'Intercept' && r.Note !== 'Carryover' && r.Variable !== 'const')
-      .map((r) => {
-        // Per MODEL_OUTPUT_API.md's own example row ("calls_transformed"),
-        // raw variable names can carry a "_transformed" suffix that isn't
-        // meant for display/keys — strip it, matching the reference impl.
-        const variable = (r.Variable || '').replace(/_transformed$/, '');
-        // Impactable (%) sometimes arrives as "12.40%" (string) rather than
-        // a number, and under either "Impactable (%)" or "Impactable %".
-        const rawPct = r['Impactable (%)'] ?? r['Impactable %'] ?? 0;
-        const impactablePct = parseFloat(String(rawPct).replace('%', '')) || 0;
-        return {
-          variable,
-          isTransformedVariant: /_transformed$/.test(r.Variable || ''),
-          coefficient: r.Coefficient,
-          impactablePct,
-          impactableSales: r['Impactable Sales'],
-          storedSpend: r.Spend,
-          storedRoi: r.ROI,
-          longTermRoi: r['Long Term ROI'],
-          rawActivity: r['Raw Activity'],
-          modelledActivity: r['Modelled Activity'],
-          bucket: classifyChannel(variable, columnRoles),
-        };
-      });
+  const transformationConfigs = useMemo(() => {
+    return workflowStateData?.transformation?.configs || {};
+  }, [workflowStateData]);
 
-    // De-duplicate: a channel selected as BOTH its raw and _transformed
-    // variant (confirmed happening — see the duplicate, simultaneously-
-    // "selected" pills in Section 6's screenshot, e.g. two identical
-    // "sample_quantity_ad" pills) collapses to the same `variable` string
-    // above. Left as-is, every downstream sum (Section 3's tier totals,
-    // Section 5's Impact Share, spend defaults) would silently double-count
-    // that channel. Keep only the _transformed row per variable — that's the
-    // one MODEL_OUTPUT_API.md's own example treats as canonical — and drop
-    // the raw duplicate rather than summing both.
+  // Map ALL coefficients including const so table matches Executive Summary 100%
+  const allCoefficients = useMemo(() => {
+    if (!viewingModel || !coefficientLookup.rows) return [];
+
+    return coefficientLookup.rows.map((r) => {
+      const rawVar = r.Variable || '';
+      const variable = rawVar === 'const' ? 'const' : rawVar.replace(/_transformed$/, '');
+      const rawPct = r['Impactable %'] ?? r['Impactable (%)'] ?? 0;
+      const impactablePct = parseFloat(String(rawPct).replace('%', '')) || 0;
+      
+      const chConfig = transformationConfigs[variable] || transformationConfigs[rawVar] || {};
+
+      return {
+        variable,
+        rawVar,
+        isConst: rawVar === 'const' || r.Note === 'Intercept',
+        isTransformedVariant: /_transformed$/.test(rawVar),
+        coefficient: Number(r.Coefficient) || 0,
+        impactablePct,
+        impactableSales: Number(r['Impactable Sales']) || 0,
+        storedSpend: Number(r.Spend) || 0,
+        storedRoi: r.ROI,
+        longTermRoi: r['Long Term ROI'],
+        rawActivity: r['Raw Activity'],
+        modelledActivity: r['Modelled Activity'],
+        bucket: rawVar === 'const' ? 'baseline' : classifyChannel(variable, columnRoles),
+        config: chConfig,
+      };
+    });
+  }, [viewingModel, coefficientLookup, columnRoles, transformationConfigs]);
+
+  // Deduped channels
+  const channelRows = useMemo(() => {
     const byVariable = new Map();
-    for (const row of mapped) {
+    for (const row of allCoefficients) {
       const existing = byVariable.get(row.variable);
       if (!existing || row.isTransformedVariant) byVariable.set(row.variable, row);
     }
-    const deduped = [...byVariable.values()];
-    if (deduped.length !== mapped.length) {
-      console.warn(
-        `[channelRows] Collapsed ${mapped.length} coefficient rows down to ${deduped.length} unique channels` +
-        `some channels were selected as BOTH their raw and _transformed variant in Model Configuration. ` +
-        'Kept the _transformed row, dropped the raw duplicate for each.'
-      );
-    }
-    return deduped;
-  }, [viewingModel, coefficientLookup, columnRoles]);
+    return [...byVariable.values()];
+  }, [allCoefficients]);
 
-  // Nothing renderable for Sections 3/4/5 — surface exactly what fields ARE
-  // present on this run so the gap can be diagnosed from the UI itself,
-  // without needing DevTools.
+  // Initialize Lambda from carryover coefficient if present
+  useEffect(() => {
+    const carryoverRow = channelRows.find((r) => /carryover/i.test(r.variable));
+    if (carryoverRow && carryoverRow.coefficient > 0) {
+      const initLambda = Math.min(0.95, Math.max(0.0, Number(carryoverRow.coefficient.toFixed(2))));
+      setUserLambda(initLambda);
+    }
+  }, [channelRows]);
+
   const coefficientDiagnostic = useMemo(() => {
     if (!viewingModel || channelRows.length) return null;
     return `No usable coefficient data found on "${viewingModel.name}". Checked: ${COEFFICIENT_KEY_CANDIDATES.join(', ')}. ` +
       `Fields actually present on this run: ${Object.keys(viewingModel).join(', ')}.`;
   }, [viewingModel, channelRows]);
 
-  // Seed spend inputs from the row's own Spend (fallback 50000 if zero),
-  // exactly once per newly-viewed model.
+  // Only assign spend defaults to promotional (non-baseline) channels
   useEffect(() => {
     if (!channelRows.length) return;
     setSpendByChannel((prev) => {
       const next = { ...prev };
       channelRows.forEach((r) => {
-        if (next[r.variable] === undefined) {
+        if (r.bucket === 'baseline') {
+          next[r.variable] = 0;
+        } else if (next[r.variable] === undefined) {
           next[r.variable] = r.storedSpend > 0 ? r.storedSpend : 50000;
         }
       });
@@ -387,8 +285,6 @@ function ModelOutput() {
     setSpendByChannel((prev) => ({ ...prev, [variable]: value }));
   };
 
-  // Debounced persistence of the spend map — waits for a pause in typing
-  // rather than firing a PATCH on every keystroke.
   useEffect(() => {
     if (!workflowId || !Object.keys(spendByChannel).length) return;
     const timer = setTimeout(() => {
@@ -400,69 +296,51 @@ function ModelOutput() {
     return () => clearTimeout(timer);
   }, [spendByChannel, workflowId]);
 
-  // Deep-dive rows: ROI recomputed live from the EDITED spend, not the
-  // stored Spend — sorted by Impactable Sales descending. Long-Term ROI
-  // falls back to roi * 1.35 when the stored value is missing, rather than
-  // showing a dash whenever the regression output didn't include it.
+  // Effective Long-Term Multiplier: 1 / (1 - userLambda)
+  const longTermMultiplier = useMemo(() => {
+    const l = Math.min(0.95, Math.max(0.0, Number(userLambda) || 0.0));
+    return 1.0 / (1.0 - l);
+  }, [userLambda]);
+
+  // Deep-dive table: displays const and all channels with exact raw ROI and Long-Term ROI
   const deepDive = useMemo(() => {
     return channelRows
       .map((r) => {
-        const spend = Number(spendByChannel[r.variable]) || 0;
-        // Dollar ROI = Revenue / Spend, where Revenue = Incremental Units x
-        // Unit Value (Module 7 API Reference, Section 4: unitValue feeds
-        // the same economics the response-curves' own roi/mroi use via
-        // channels[].price). Previously this was impactableSales / spend
-        // alone — a unit-volume ratio that never moved when Value Per Unit
-        // changed, which was the actual bug.
-        const roi = spend > 0 ? (r.impactableSales * unitValue) / spend : null;
-        const longTermRoi = (r.longTermRoi !== undefined && r.longTermRoi !== null)
-          ? Number(r.longTermRoi)
-          : (roi !== null ? roi * 1.35 : undefined);
-        return { ...r, spend, roi, longTermRoi };
+        const isBaseline = r.bucket === 'baseline';
+        const spend = isBaseline ? 0 : (Number(spendByChannel[r.variable]) || 0);
+        const roi = (!isBaseline && spend > 0) ? (r.impactableSales * unitValue) / spend : null;
+        const longTermRoi = roi !== null ? roi * longTermMultiplier : null;
+
+        if (r.variable === 'Calls' || r.variable === 'Calls_transformed') {
+          console.group('🔍 [Complete End-to-End Model Trace: Calls]');
+          console.log('1. Regression Coefficient (β):', r.coefficient);
+          console.log('2. Modelled Activity (∑ X):', r.modelledActivity);
+          console.log('3. Calculated Contribution:', r.coefficient * r.modelledActivity);
+          console.log('4. Raw Impact %:', `${r.impactablePct.toFixed(2)}%`);
+          console.log('5. Final Impactable Sales (Units):', r.impactableSales);
+          console.log('6. Revenue Per Unit ($/TRx):', `$${Number(unitValue).toLocaleString()}`);
+          console.log('7. Incremental Revenue ($):', `$${(r.impactableSales * unitValue).toLocaleString()}`);
+          console.log('8. Actual Spend ($):', `$${spend.toLocaleString()}`);
+          console.log('9. Computed Dollar ROI (x):', `${roi?.toFixed(3)}x`);
+          console.log('10. Carryover Lambda (λ):', userLambda);
+          console.log('11. Long-Term Multiplier 1/(1-λ):', `${longTermMultiplier.toFixed(4)}x`);
+          console.log('12. Final Long-Term ROI (x):', `${longTermRoi?.toFixed(3)}x`);
+          console.groupEnd();
+        }
+
+        return { ...r, isBaseline, spend, roi, longTermRoi };
       })
       .sort((a, b) => b.impactableSales - a.impactableSales);
-  }, [channelRows, spendByChannel, unitValue]);
+  }, [channelRows, spendByChannel, unitValue, longTermMultiplier, userLambda]);
 
-  // Section 3 needs the intercept/carryover row's own Impactable Sales/(%) to
-  // compute "Baseline Demand" — but channelRows deliberately excludes that
-  // row (correctly, since it isn't a spendable channel for Sections 4/5).
-  // Left as channelRows-only, Baseline is structurally forced to 0% every
-  // time, regardless of the actual model. Pull it back in here, straight
-  // from the raw coefficient array — this matches the reference
-  // implementation, which computes executiveImpactBreakdown from the FULL
-  // unfiltered coefficients list, not from the already-filtered deep-dive data.
-  const baselineRows = useMemo(() => {
-    if (!coefficientLookup.rows) return [];
-    return coefficientLookup.rows.filter(
-      (r) => r.Note === 'Intercept' || r.Note === 'Carryover' || r.Variable === 'const'
-    );
-  }, [coefficientLookup]);
-
-  // ── One share per variable, for both Section 3 and Section 5 ─────────────
-  // The two used to disagree, badly. Section 3 summed each row's RAW stored
-  // `Impactable (%)`, which is a share of total sales and only adds to 100
-  // once the intercept's own (large, negative) share is counted. With the
-  // intercept floored at zero, the promotional tiers alone summed to 298%,
-  // so DTC read 174% while the same three channels in Section 5's table
-  // - renormalised to 100 - came to 58%.
-  //
-  // Both now read the same weighted, floored, renormalised share, over one
-  // pool of rows: the deep-dive channels plus the intercept/carryover rows
-  // Section 3 needs and Section 5 deliberately excludes. Tier totals are
-  // therefore exactly the sum of that tier's rows in the table.
   const sharePool = useMemo(() => {
-    const fromDeepDive = channelRows.map((r) => ({
-      Variable: r.variable, pct: r.impactablePct, bucket: r.bucket,
+    return channelRows.map((r) => ({
+      Variable: r.variable,
+      pct: r.impactablePct,
+      bucket: r.bucket,
       sales: r.impactableSales,
     }));
-    const fromBaseline = baselineRows.map((r) => ({
-      Variable: r.Variable,
-      pct: parseFloat(String(r['Impactable (%)'] ?? r['Impactable %'] ?? 0).replace('%', '')) || 0,
-      bucket: 'baseline',
-      sales: Number(r['Impactable Sales']) || 0,
-    }));
-    return [...fromDeepDive, ...fromBaseline];
-  }, [channelRows, baselineRows]);
+  }, [channelRows]);
 
   const shareByVariable = useMemo(() => {
     const weights = viewingModel?.priorWeights || null;
@@ -470,6 +348,7 @@ function ModelOutput() {
     return Object.fromEntries(sharePool.map((r, i) => [r.Variable, pct[i] ?? 0]));
   }, [sharePool, viewingModel]);
 
+  // Executive Summary: 100% aligned with Deep Dive Table
   const highLevelImpact = useMemo(() => {
     if (!sharePool.length) return null;
     const salesBuckets = { baseline: 0, personal: 0, npp: 0, dtc: 0 };
@@ -483,133 +362,14 @@ function ModelOutput() {
     return { salesBuckets, salesTotal, pctBuckets };
   }, [sharePool, shareByVariable]);
 
-  // ── DEBUG: dump everything Section 3 depends on whenever the viewed model
-  // changes. Remove once modelHistory[i].coefficients is confirmed populated
-  // upstream — this is purely a diagnostic aid, nothing here affects render.
-  useEffect(() => {
-    if (!viewingModel) return;
-    console.groupCollapsed(`[Section 3 debug] model = "${viewingModel.name}" (id: ${viewingModel.id})`);
-    console.log('viewingModel (raw, full object as stored in modelHistory):', viewingModel);
-    console.log('viewingModel keys:', Object.keys(viewingModel));
-    console.log('coefficientLookup (which key matched, if any):', coefficientLookup);
-    console.log('channelRows (post-filter, post-classify):', channelRows);
-    console.log('highLevelImpact (Section 3 tiers):', highLevelImpact);
-    if (!channelRows.length) {
-      console.warn(
-        'channelRows is empty Sections 3/4/5 will render nothing. ' +
-        'This model has no usable coefficients array under any checked key. ' +
-        'See coefficientDiagnostic for the exact field list.'
-      );
-    }
-    console.groupEnd();
-  }, [viewingModel, coefficientLookup, channelRows, highLevelImpact]);
-
-  // ── DEBUG: manual probe against /api/modelling/run-regression or
-  // /run-ridge, using the best payload we can reconstruct from the fields
-  // actually stored on this model run (dependentVariable, selectedChannels,
-  // level, dmaMode, startDate/endDate, ard, residualSourceId). This is NOT
-  // wired into any real data flow — run-regression's own doc comment says it
-  // needs the full transformed_csv + granular_csv to fit, which this page
-  // does not have. This exists only so the request/response (or the error
-  // explaining what's actually missing) shows up in the console for
-  // inspection — triggered by the "Debug: Test Regression Endpoint" button
-  // in Section 3, only when channelRows is empty.
-  const [isDebugProbing, setIsDebugProbing] = useState(false);
-  const handleDebugRunRegression = async () => {
-    if (!viewingModel) return;
-    setIsDebugProbing(true);
-    console.groupCollapsed(`[Debug probe] ${viewingModel.type === 'ridge' ? 'run-ridge' : 'run-regression'} for "${viewingModel.name}"`);
-    try {
-      let ardCsv = null;
-      let dateColumnGuess = null;
-      let entityColumnGuess = null;
-      if (viewingModel.ard && workflowId) {
-        console.log(`Fetching ARD "${viewingModel.ard}" via getCsv(workflowId, ard)...`);
-        ardCsv = await getCsv(workflowId, viewingModel.ard);
-        console.log('ARD fetched, length:', ardCsv?.length ?? 0, 'chars. First 300 chars:', String(ardCsv).slice(0, 300));
-        const headerCols = String(ardCsv).split('\n')[0].split(',').map((c) => c.trim());
-        dateColumnGuess = headerCols.find((c) => /date/i.test(c)) || null;
-        entityColumnGuess = headerCols.find((c) => /npi|hcp_id|^id$|entity/i.test(c)) || null;
-        console.log('ARD header columns:', headerCols);
-      } else {
-        console.warn('No ard filename on this model, or no workflowId yet cannot fetch a CSV at all.');
-      }
-
-      // Confirmed from the last run: hcp_level_ard.csv's own header has NONE
-      // of the "_transformed" columns run-regression needs, so it cannot be
-      // the real transformed_csv. Check a few plausible locations in
-      // workflow.state_data (logged at page load — see "[Workflow debug]"
-      // console group) before falling back to the ARD, which we now expect
-      // to fail again with the same 'not in index' error.
-      const guessedTransformedCsv =
-        workflowStateData?.transformation?.transformed_csv ||
-        workflowStateData?.transformation?.csv_data ||
-        workflowStateData?.transformation?.output_csv ||
-        null;
-      if (guessedTransformedCsv) {
-        console.log('Found a candidate transformed_csv in workflow.state_data.transformation using that instead of the raw ARD.');
-      } else {
-        console.warn(
-          'No transformed_csv found under state_data.transformation.{transformed_csv,csv_data,output_csv}. ' +
-          'Falling back to the raw ARD, which we already know is missing the _transformed columns' +
-          'expect the same "not in index" error. Check the "[Workflow debug]" console group above for ' +
-          'where a real transformed CSV might actually be stored.'
-        );
-      }
-
-      const payload = {
-        // Best-guess field names — api.js's run-regression/run-ridge JSDoc
-        // only documents transformed_csv/granular_csv as required; everything
-        // else below is inferred from what's actually stored on this model.
-        transformed_csv: guessedTransformedCsv || ardCsv,
-        granular_csv: ardCsv,
-        dependent_variable: viewingModel.dependentVariable,
-        channels: viewingModel.selectedChannels || viewingModel.channels,
-        selected_channels: viewingModel.selectedChannels || viewingModel.channels,
-        level: viewingModel.level,
-        dma_mode: viewingModel.dmaMode,
-        start_date: viewingModel.startDate,
-        end_date: viewingModel.endDate,
-        residual_source_id: viewingModel.residualSourceId,
-        // Added after a 'date_column' KeyError from the backend — parsed
-        // from the ARD's own header row rather than hardcoded, since a
-        // different ARD could name these differently. Sending several
-        // plausible key-name aliases for the same concept since we don't
-        // know which one the backend actually reads yet.
-        date_column: dateColumnGuess,
-        dateColumn: dateColumnGuess,
-        geo_column: entityColumnGuess,
-        entity_column: entityColumnGuess,
-        id_column: entityColumnGuess,
-      };
-      console.log('Detected date/entity columns from ARD header:', { dateColumnGuess, entityColumnGuess });
-      console.log('Request payload:', payload);
-      const fn = viewingModel.type === 'ridge' ? runRidge : runRegression;
-      const result = await fn(payload);
-      console.log('Response:', result);
-      console.log('Response has coefficients?', Array.isArray(result?.coefficients), result?.coefficients?.length ?? 0, 'rows');
-    } catch (err) {
-      console.error('Request failed the error/detail below should say exactly which field is missing or wrong:', err);
-      console.log('problemMessage(err):', problemMessage(err, 'no message'));
-    } finally {
-      console.groupEnd();
-      setIsDebugProbing(false);
-    }
-  };
-
-  // ── Section 6: response curves (locked until finalized) ─────────────────
+  // ── Response Curves ───────────────────────────────────────────────────────
   const [numTime, setNumTime] = useState('12');
   const [numGeo, setNumGeo] = useState('100');
-  const [saturationFunction, setSaturationFunction] = useState('log');
-  const [powerValue, setPowerValue] = useState(0.5);
   const [apiCurves, setApiCurves] = useState({});
   const [responseChannel, setResponseChannel] = useState('');
   const [isGeneratingCurves, setIsGeneratingCurves] = useState(false);
   const [curvesError, setCurvesError] = useState(null);
 
-  // Impact Share (%) for Section 5, formatted from the SAME share map the
-  // executive summary aggregates, so a tier card is always exactly the sum of
-  // that tier's rows here.
   const impactShares = useMemo(
     () => Object.fromEntries(
       deepDive.map((d) => [d.variable, `${(shareByVariable[d.variable] ?? 0).toFixed(1)}%`])
@@ -617,12 +377,9 @@ function ModelOutput() {
     [deepDive, shareByVariable]
   );
 
-  // Channels a budget can actually be bought with. Baseline demand is not
-  // bought, so it has no spend to enter, no ROI, and no response curve: a
-  // saturation curve answers "what would more spend buy", which is not a
-  // question unpromoted demand has an answer to.
+  // Spendable channels are strictly non-baseline marketing channels
   const spendableChannels = useMemo(
-    () => deepDive.filter((d) => d.bucket !== 'baseline'),
+    () => deepDive.filter((d) => !d.isBaseline),
     [deepDive]
   );
 
@@ -630,12 +387,6 @@ function ModelOutput() {
     if (spendableChannels.length) setResponseChannel(spendableChannels[0].variable);
   }, [viewingModel?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // A channel with no spend recorded has nothing to calibrate a curve
-  // against: the engine divides impactable sales by log(1 + spend), which is
-  // zero at zero spend. Sending those produced a curve of infinities, and the
-  // response died while being serialised - reaching the browser as "the
-  // backend did not respond" rather than as an error anyone could read. The
-  // engine now refuses them outright; this keeps them out of the request.
   const pricedChannels = useMemo(
     () => spendableChannels.filter((d) => Number(d.spend) > 0),
     [spendableChannels]
@@ -644,17 +395,26 @@ function ModelOutput() {
   const handleGenerateCurves = async () => {
     if (!numTime || !numGeo) { setCurvesError('Enter both Number of Time Periods and Number of Geo Units.'); return; }
     setCurvesError(null);
-    if (!pricedChannels.length) return; // the empty state explains why
+    if (!pricedChannels.length) return;
     setIsGeneratingCurves(true);
     try {
       const channels = pricedChannels.map((d) => {
         const spendNation = d.spend || 0;
-        // Guard against the documented 400 causes (invalid/zero step,
-        // non-numeric beta): a missing or zero coefficient isn't a valid
-        // saturation slope. Floors mirror the reference implementation's
-        // fallbacks. Spend itself is guaranteed positive by pricedChannels.
         const stop = spendNation * 2.5 || 200000;
         const step = Math.max(1000, Math.round(stop / 50));
+
+        // Explicit parameter lookup per channel
+        const chCfg = d.config || {};
+        const satMethod = String(chCfg.saturation || chCfg['Saturation Function'] || 'log').toLowerCase();
+
+        const pVal = Number(
+          chCfg['Power (k)'] ?? chCfg.power ?? chCfg.p ?? (satMethod === 'power' ? chCfg.param : 0.5)
+        ) || 0.5;
+
+        const kVal = Number(
+          chCfg['Log (k)'] ?? chCfg.log_k ?? chCfg.k ?? (satMethod === 'log' ? chCfg.param : 1.0)
+        ) || 1.0;
+
         return {
           name: d.variable,
           impactable_sales_nation: d.impactableSales,
@@ -664,16 +424,20 @@ function ModelOutput() {
           stop,
           step,
           price: Number(unitValue) || 1,
-          saturation_function: saturationFunction,
-          power_value: Number(powerValue) || 0.5,
+          saturation_function: satMethod,
+          power_value: pVal,
+          log_k: kVal,
         };
       });
-      const data = await generateResponseCurves({ channels, numTime: Number(numTime), numGeo: Number(numGeo) });
+
+      const data = await generateResponseCurves({
+        channels,
+        numTime: Number(numTime) || 12,
+        numGeo: Number(numGeo) || 100,
+      });
+
       const curves = data.curves || {};
       setApiCurves(curves);
-      // If the channel currently selected in the pill row has no curve in
-      // this response (e.g. it's the first generation, or the channel list
-      // changed), fall back to the first channel that does.
       const returnedKeys = Object.keys(curves);
       if (returnedKeys.length && !returnedKeys.includes(responseChannel)) {
         setResponseChannel(returnedKeys[0]);
@@ -686,66 +450,30 @@ function ModelOutput() {
   };
 
   const currentCurve = apiCurves[responseChannel] || null;
-
-  // The ROI chart drops the zero-spend point. There is no return on no
-  // investment: the engine cannot divide by zero there, so it substitutes the
-  // FIRST STEP's marginal ROI - which is, by construction, the very number it
-  // then computes as the ROI at that first step. Two points carrying one
-  // value drew a flat shoulder before the decay, which is the kink at the top
-  // left. The x-axis is anchored at 0 in its own right, so the curve still
-  // starts from zero spend.
   const roiCurve = useMemo(
     () => (currentCurve || []).filter((p) => Number(p.spend) > 0),
     [currentCurve]
   );
 
-  // Why the curve area is empty, in terms the reader can act on. The old
-  // text said "generate automatically once a model is finalized" to someone
-  // looking at a finalized model, which explained nothing.
   const curvesEmptyMessage = useMemo(() => {
     if (isGeneratingCurves) return 'Generating response curves...';
     if (!spendableChannels.length) return 'Response curves generate automatically once a model is finalized.';
     if (!pricedChannels.length) {
-      return 'No spend recorded yet. Enter spend under Channel Spend Management above '
-        + 'to generate response curves - a channel with no spend has no return to plot.';
-    }
-    if (responseChannel && !pricedChannels.some((d) => d.variable === responseChannel)) {
-      return `No spend recorded for ${responseChannel}. Enter it under Channel Spend `
-        + 'Management above to plot its curve.';
+      return 'No spend recorded yet. Enter spend under Channel Spend Management above to generate response curves.';
     }
     return 'Response curves generate automatically once a model is finalized.';
-  }, [isGeneratingCurves, spendableChannels, pricedChannels, responseChannel]);
+  }, [isGeneratingCurves, spendableChannels, pricedChannels]);
 
-  // Auto-generate response curves once finalized, instead of requiring a
-  // manual click, and regenerate whenever an input to the curve changes.
-  //
-  // This used to fire once per (model, channel-set) and then never again.
-  // Value Per Unit tried to force a refresh by emptying apiCurves and leaning
-  // on the effect's "already generated" guard - but apiCurves was not one of
-  // the effect's dependencies, so clearing it re-ran nothing. The price
-  // changed and the curve did not. The saturation function, the power value
-  // and the period counts were all stale for the same reason.
-  // Everything the engine bakes into a generated curve. Any change here makes
-  // the curves on screen stale, so this - not the presence or absence of a
-  // previous result - is what decides when to regenerate.
   const curveInputs = JSON.stringify({
     price: Number(unitValue) || 1,
-    saturation: saturationFunction,
-    power: Number(powerValue) || 0.5,
     numTime: Number(numTime) || 0,
     numGeo: Number(numGeo) || 0,
-    // Spend sets spend_nation, stop and step, so it belongs here too. The
-    // note above said a debounce would be needed before spend could trigger
-    // this; the debounce below is that debounce.
     channels: pricedChannels.map((d) => [d.variable, Number(d.spend) || 0]),
   });
 
   const channelCount = pricedChannels.length;
   useEffect(() => {
     if (!isViewingFinalized || !channelCount || !numTime || !numGeo) return;
-    // Debounced: price and spend are typed, and every keystroke would
-    // otherwise be its own request. The cleanup cancels the pending run, so
-    // a burst of typing sends exactly one.
     const timer = setTimeout(() => handleGenerateCurves(), 600);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -760,21 +488,34 @@ function ModelOutput() {
       Math.abs(p.spend - currentSpend) < Math.abs(best.spend - currentSpend) ? p : best,
       currentCurve[0]);
 
-    const maxImpactable = Math.max(...currentCurve.map((p) => p.impactable_nation));
-    // Optimal spend: first point reaching 80% of max impact, per spec.
-    const optimalPoint = currentCurve.find((p) => p.impactable_nation >= 0.8 * maxImpactable) || currentCurve[currentCurve.length - 1];
-    const saturationPct = maxImpactable ? (nearest.impactable_nation / maxImpactable) * 100 : 0;
+    // 1. Break-Even Economic Optimization (mROI = 1.0x cutoff)
+    const breakEvenPoint = currentCurve.find((p) => p.spend > 0 && p.mroi <= 1.0);
+    let optimalSpendDisplay = '';
+
+    if (breakEvenPoint) {
+      optimalSpendDisplay = `$${Math.round(breakEvenPoint.spend).toLocaleString()}`;
+    } else {
+      const maxSimulated = currentCurve[currentCurve.length - 1].spend;
+      optimalSpendDisplay = `> $${Math.round(maxSimulated).toLocaleString()} (Unsaturated)`;
+    }
+
+    // 2. Relative Saturation % (Drop from initial efficiency)
+    const mroiInitial = currentCurve[1]?.mroi || currentCurve[0]?.mroi || 1.0;
+    const mroiCurrent = nearest.mroi || 0.0;
+    const saturationPct = mroiInitial > 0
+      ? Math.max(0, Math.min(100, ((mroiInitial - mroiCurrent) / mroiInitial) * 100))
+      : 0;
 
     return {
       currentSpend,
       currentRoi: nearest.roi,
       currentMroi: nearest.mroi,
       saturationPct,
-      optimalSpend: optimalPoint.spend,
+      optimalSpendDisplay,
     };
   }, [currentCurve, deepDive, responseChannel]);
 
-  // ── Section 7: benchmarks (locked until finalized) ───────────────────────
+  // ── Benchmarks ────────────────────────────────────────────────────────────
   const [diseaseArea, setDiseaseArea] = useState('');
   const [maturityStage, setMaturityStage] = useState('');
   const [marketingDynamic, setMarketingDynamic] = useState('');
@@ -782,40 +523,22 @@ function ModelOutput() {
   const [isLoadingBenchmark, setIsLoadingBenchmark] = useState(false);
   const [benchmarkError, setBenchmarkError] = useState(null);
 
-  const avgPortfolioRoi = useMemo(() => {
-    const withRoi = deepDive.filter((d) => d.roi !== null);
-    return withRoi.length ? mean(withRoi.map((d) => d.roi)) : null;
-  }, [deepDive]);
-
-  // Stage 1 (per-channel Impactable %) already exists on every channelRows
-  // entry — the regression output provides it, nothing to recompute. This is
-  // Stage 2 only: aggregating those existing values into the 6 commercial
-  // tiers the confirmed benchmarking API doc specifies, reusing the same
-  // baseline/intercept handling highLevelImpact above already established
-  // (channelRows excludes the const/Carryover row on purpose, so it's pulled
-  // back in from baselineRows here too).
+  // Map your model's real Impact Shares (%) to the 6 benchmark categories
   const userImpactShares = useMemo(() => {
-    if (!channelRows.length && !baselineRows.length) return null;
+    if (!channelRows.length) return null;
     const shares = { baseline: 0, salesforce: 0, hcp_pp: 0, access: 0, hcp_npp: 0, consumer_npp: 0 };
+    
     channelRows.forEach((r) => {
       const tier = classifyBenchmarkTier(r.variable);
-      shares[tier] = (shares[tier] || 0) + r.impactablePct;
+      const shareVal = shareByVariable[r.variable] ?? 0;
+      shares[tier] = (shares[tier] || 0) + shareVal;
     });
-    baselineRows.forEach((r) => {
-      const rawPct = r['Impactable (%)'] ?? r['Impactable %'] ?? 0;
-      shares.baseline += parseFloat(String(rawPct).replace('%', '')) || 0;
-    });
+
     return shares;
-  }, [channelRows, baselineRows]);
+  }, [channelRows, shareByVariable]);
 
   const [benchmarkIsFallback, setBenchmarkIsFallback] = useState(false);
 
-  // If the live benchmark service is unavailable, compute a rough local
-  // comparison instead of leaving the section blank. Clearly labeled as an
-  // estimate via benchmarkIsFallback — never presented as real industry data.
-  // Benchmark ranges here are the same illustrative values already used
-  // elsewhere for this purpose, just reshaped to the confirmed response
-  // format (your_impact_pct + status per category, category on each channel row).
   const FALLBACK_TIER_RANGES = {
     baseline: [40, 55], salesforce: [22, 30], hcp_pp: [4, 8],
     access: [12, 19], hcp_npp: [5, 10], consumer_npp: [6, 12],
@@ -835,14 +558,12 @@ function ModelOutput() {
           status: statusForRange(value, range),
         };
       }),
-      channel_benchmarks: deepDive.filter((d) => d.roi !== null).map((d) => {
+      channel_benchmarks: deepDive.filter((d) => !d.isBaseline && d.roi !== null).map((d) => {
         const benchVal = Number((d.roi * 0.85 + 0.3).toFixed(2));
         const delta = d.roi - benchVal;
         return {
           channel: d.variable,
           category: BENCHMARK_TIER_LABELS[classifyBenchmarkTier(d.variable)],
-          // Capped like every other ROI on this screen. A channel reading
-          // 340x is a small denominator, not a comparison anyone can act on.
           yours: formatRoi(d.roi),
           benchmark: formatRoi(benchVal),
           status: delta >= 0.2 ? 'Above Benchmark' : delta >= -0.2 ? 'Near Benchmark' : 'Below Benchmark',
@@ -860,28 +581,18 @@ function ModelOutput() {
         diseaseArea,
         maturityStage,
         competitionLevel: marketingDynamic,
-        channels: deepDive.filter((d) => d.roi !== null).map((d) => ({ channel: d.variable, roi: d.roi })),
+        channels: deepDive.filter((d) => !d.isBaseline && d.roi !== null).map((d) => ({ channel: d.variable, roi: d.roi })),
         userImpactShares,
       });
       setBenchmarkResult(data);
       setBenchmarkIsFallback(false);
     } catch (err) {
-      setBenchmarkError(problemMessage(err, 'Live benchmark service unavailable showing an estimated comparison instead.'));
+      setBenchmarkError(problemMessage(err, 'Live benchmark service unavailable — showing an estimated comparison instead.'));
       setBenchmarkResult(buildFallbackBenchmark());
       setBenchmarkIsFallback(true);
     } finally {
       setIsLoadingBenchmark(false);
     }
-  };
-
-  // The server does not compute overall_comparison[].yours — it returns the
-  // literal string "Calculated from Model" and expects the frontend to fill
-  // it in. Only "Average Portfolio ROI" has a clear client-side source; any
-  // other placeholder metric falls back to "—" rather than guessing.
-  const resolveYours = (metric, yours) => {
-    if (yours !== 'Calculated from Model') return yours;
-    if (/average portfolio roi/i.test(metric)) return avgPortfolioRoi !== null ? formatRoi(avgPortfolioRoi) : '';
-    return '';
   };
 
   const [showStatSummary, setShowStatSummary] = useState(false);
@@ -905,7 +616,7 @@ function ModelOutput() {
           {workflowError && <div className="mo-error">{workflowError}</div>}
 
           {modelHistory.length === 0 ? (
-            <p className="mo-empty">No models have been run yet go to Model Configuration to run one first.</p>
+            <p className="mo-empty">No models have been run yet — go to Model Configuration to run one first.</p>
           ) : (
             <>
               {/* ---- 1. Model Registry ---- */}
@@ -997,12 +708,6 @@ function ModelOutput() {
                             const parsed = Math.max(0, Number(e.target.value) || 0);
                             setUnitValue(parsed);
                             setUnitValueDraft(null);
-                            // Curves bake `price` in at generation time, so a
-                            // changed Unit Value needs a real regeneration.
-                            // The effect above does that, keyed on the price
-                            // itself; clearing here only empties the chart so
-                            // the reader sees "Generating..." rather than the
-                            // old curve sitting there looking current.
                             if (parsed !== unitValue) setApiCurves({});
                           }}
                         />
@@ -1023,28 +728,11 @@ function ModelOutput() {
                   {/* ---- 3. Executive Summary ---- */}
                   <div className="mo-card">
                     <p className="mo-section-title">Executive Summary (High-Level Promotional Impact Breakdown)</p>
-                    <p className="mo-section-desc">High-level aggregation of total commercial sales volume decomposed into Baseline unpromoted demand, Personal promotion, Non-Personal promotion (NPP), and Direct-to-Consumer (DTC) media.</p>
-                    {coefficientDiagnostic && (
-                      <>
-                        <div className="mo-error">{coefficientDiagnostic}</div>
-                        <button
-                          className="registry-action-btn"
-                          style={{ marginBottom: '1rem' }}
-                          onClick={handleDebugRunRegression}
-                          disabled={isDebugProbing}
-                        >
-                          {isDebugProbing ? 'Probing...' : '🐛 Debug: Test Regression Endpoint (check console)'}
-                        </button>
-                      </>
-                    )}
+                    <p className="mo-section-desc">High-level aggregation of total commercial sales volume decomposed into Baseline unpromoted demand (Constant Intercept + Carryover + Competitor/Macro), Personal promotion, Non-Personal promotion (NPP), and Direct-to-Consumer (DTC) media.</p>
                     {highLevelImpact && (
                       <div className="exec-summary-row">
                         {['baseline', 'personal', 'npp', 'dtc'].map((bucket) => {
                           const sales = highLevelImpact.salesBuckets[bucket] || 0;
-                          // Floored at zero, matching the share chart beside
-                          // it - which already did this - and the coefficient
-                          // table on Model Configuration. A tier cannot
-                          // contribute a negative share of total volume.
                           const pct = Math.max(0, highLevelImpact.pctBuckets[bucket] || 0);
                           return (
                             <div key={bucket} className="exec-stat-card">
@@ -1086,15 +774,42 @@ function ModelOutput() {
                     )}
                   </div>
 
-                  {/* ---- 4. Channel Spend Management ---- */}
+                  {/* ---- 4. Channel Spend Management & Long-Term Lambda Input ---- */}
                   <div className="mo-card">
                     <p className="mo-section-title">Channel Spend Management &amp; ROI Engine</p>
-                    <p className="mo-section-desc">Enter or adjust actual budget spend per promotional channel. Spend inputs immediately update channel ROIs, Long-Term ROIs, and downstream response curves.</p>
+                    <p className="mo-section-desc">
+                      Enter actual budget spend per promotional channel and set the carryover decay rate (&lambda;) to compute live ROI and Long-Term ROI.
+                    </p>
                     {spendSaveError && <div className="mo-error">{spendSaveError}</div>}
-                    {/* Baseline tiers are dropped here per instruction: a
-                        baseline variable is unpromoted demand, so there is no
-                        budget to enter against it and no ROI to compute. They
-                        remain in the deep-dive table and the tier summary. */}
+
+                    {/* ── User input for Carryover Lambda ── */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', padding: '0.8rem 1rem', backgroundColor: '#f7f9fc', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border-light)', marginBottom: '1.2rem', flexWrap: 'wrap' }}>
+                      <div>
+                        <span style={{ fontSize: '0.72rem', fontWeight: 'var(--font-weight-bold)', color: 'var(--color-text-light)', textTransform: 'uppercase' }}>
+                          Carryover Decay Rate (&lambda; for Long-Term Multiplier):
+                        </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.25rem' }}>
+                          <input
+                            type="number" step="0.01" min="0" max="0.95"
+                            style={{ width: '110px', padding: '0.45rem 0.65rem', border: '1px solid var(--color-primary)', borderRadius: '6px', fontSize: '0.85rem', fontWeight: 'var(--font-weight-bold)' }}
+                            value={lambdaDraft !== null ? lambdaDraft : String(userLambda)}
+                            onChange={(e) => setLambdaDraft(e.target.value)}
+                            onBlur={(e) => {
+                              const parsed = Math.min(0.95, Math.max(0.0, Number(e.target.value) || 0.0));
+                              setUserLambda(parsed);
+                              setLambdaDraft(null);
+                            }}
+                          />
+                          <span style={{ fontSize: '0.8rem', color: 'var(--color-text-secondary)' }}>
+                            &bull; Multiplier: <strong>{longTermMultiplier.toFixed(2)}x</strong> (<code>1 / (1 - &lambda;)</code>)
+                          </span>
+                        </div>
+                      </div>
+                      <div style={{ marginLeft: 'auto', fontSize: '0.75rem', color: 'var(--color-text-light)' }}>
+                        Long-Term ROI = Current ROI &times; {longTermMultiplier.toFixed(2)}
+                      </div>
+                    </div>
+
                     <div className="spend-cards-row">
                       {spendableChannels.map((d) => (
                         <div key={d.variable} className="spend-card">
@@ -1103,7 +818,11 @@ function ModelOutput() {
                           <input type="number" min="0" value={spendByChannel[d.variable] ?? ''} onChange={(e) => updateSpend(d.variable, e.target.value)} />
                           <div className="spend-card-roi-row">
                             <span>Current ROI:</span>
-                            <span className="spend-card-roi-value">{formatRoi(d.roi, { fallback: 'Na' })}</span>
+                            <span className="spend-card-roi-value">{formatRoi(d.roi, { fallback: 'NA' })}</span>
+                          </div>
+                          <div className="spend-card-roi-row" style={{ marginTop: '0.2rem' }}>
+                            <span>Long-Term ROI:</span>
+                            <span className="spend-card-roi-value" style={{ color: '#16a34a' }}>{formatRoi(d.longTermRoi, { fallback: 'NA' })}</span>
                           </div>
                         </div>
                       ))}
@@ -1113,27 +832,49 @@ function ModelOutput() {
                     </div>
                   </div>
 
-                  {/* ---- 5. Channel Performance Deep-Dive ---- */}
+                  {/* ---- 5. Channel Performance Deep-Dive Table ---- */}
                   <div className="mo-card">
                     <p className="mo-section-title">Channel Performance Deep-Dive Table</p>
+                    <p className="mo-section-desc">
+                      Detailed breakdown of every variable in the model (including unpromoted baseline intercept). Percentages sum to 100% matching the Executive Summary.
+                    </p>
                     <div className="deep-dive-table-wrapper">
                       <table className="deep-dive-table">
-                        {/* Long-Term ROI removed per instruction. It is still
-                            returned by the engine and still read elsewhere;
-                            only this column is gone. */}
-                        <thead><tr><th>Channel / Tactic</th><th>Tier Role</th><th>Impact Share (%)</th><th>Spend ($)</th><th>ROI</th></tr></thead>
+                        <thead>
+                          <tr>
+                            <th>Channel / Variable</th>
+                            <th>Tier Role</th>
+                            <th>Impact Share (%)</th>
+                            <th>Spend ($)</th>
+                            <th>ROI</th>
+                            <th>Long-Term ROI ({longTermMultiplier.toFixed(2)}x)</th>
+                          </tr>
+                        </thead>
                         <tbody>
                           {deepDive.map((d) => (
-                            <tr key={d.variable}>
-                              <td><strong>{d.variable}</strong></td>
+                            <tr key={d.variable} style={d.isBaseline ? { backgroundColor: '#fcfdff' } : {}}>
+                              <td><strong>{d.isConst ? 'const (Unpromoted Base)' : d.variable}</strong></td>
                               <td><span className="tier-badge" style={{ backgroundColor: `${BUCKET_COLORS[d.bucket]}22`, color: BUCKET_COLORS[d.bucket] }}>{BUCKET_LABELS[d.bucket]}</span></td>
-                              {/* Impact (Sales Volume) removed per
-                                  instruction. impactableSales is still read
-                                  by the executive summary's unit counts and
-                                  by Optimization. */}
                               <td>{impactShares[d.variable] ?? 'NA'}</td>
-                              <td>${d.spend.toLocaleString()}</td>
-                              <td>{d.roi !== null ? <span className={`roi-value ${d.roi >= 1 ? 'good' : 'bad'}`}>{formatRoi(d.roi)}</span> : <span className="roi-value neutral">NA</span>}</td>
+                              <td>{d.isBaseline ? '—' : `$${d.spend.toLocaleString()}`}</td>
+                              <td>
+                                {!d.isBaseline && d.roi !== null ? (
+                                  <span className={`roi-value ${d.roi >= 1 ? 'good' : d.roi < 0 ? 'bad' : 'neutral'}`}>
+                                    {formatRoi(d.roi)}
+                                  </span>
+                                ) : (
+                                  <span className="roi-value neutral">—</span>
+                                )}
+                              </td>
+                              <td>
+                                {!d.isBaseline && d.longTermRoi !== null ? (
+                                  <span className={`roi-value ${d.longTermRoi >= 1 ? 'good' : d.longTermRoi < 0 ? 'bad' : 'neutral'}`}>
+                                    {formatRoi(d.longTermRoi)}
+                                  </span>
+                                ) : (
+                                  <span className="roi-value neutral">—</span>
+                                )}
+                              </td>
                             </tr>
                           ))}
                         </tbody>
@@ -1156,9 +897,6 @@ function ModelOutput() {
 
                         <div className="channel-pill-row">
                           <span className="channel-pill-row-label">SELECT CHANNEL:</span>
-                          {/* Baseline tiers are not offered here per
-                              instruction: there is no spend to vary, so there
-                              is no curve. */}
                           {spendableChannels.map((d) => (
                             <span key={d.variable} className={`channel-pill${responseChannel === d.variable ? ' selected' : ''}`} onClick={() => setResponseChannel(d.variable)}>{d.variable}</span>
                           ))}
@@ -1170,44 +908,118 @@ function ModelOutput() {
                           <>
                             <div className="rc-stat-row rc-stat-row-4">
                               <div className="rc-stat-card grey"><p className="rc-stat-value">${Math.round(responseCurveDerived.currentSpend).toLocaleString()}</p><p className="rc-stat-label">Current Spend</p></div>
-                              <div className="rc-stat-card green"><p className="rc-stat-value">${Math.round(responseCurveDerived.optimalSpend).toLocaleString()}</p><p className="rc-stat-label">Optimal Target Spend</p></div>
-                              <div className="rc-stat-card blue"><p className="rc-stat-value">{responseCurveDerived.saturationPct.toFixed(0)}%</p><p className="rc-stat-label">Current Saturation</p></div>
+                              <div className="rc-stat-card green"><p className="rc-stat-value" style={{ fontSize: '0.92rem' }}>{responseCurveDerived.optimalSpendDisplay}</p><p className="rc-stat-label">Optimal Target Spend (mROI &ge; 1.0x)</p></div>
+                              <div className="rc-stat-card blue"><p className="rc-stat-value">{responseCurveDerived.saturationPct.toFixed(1)}%</p><p className="rc-stat-label">Current Saturation</p></div>
                               <div className="rc-stat-card purple"><p className="rc-stat-value">{formatRoi(responseCurveDerived.currentMroi)}</p><p className="rc-stat-label">Marginal ROI (mROI)</p></div>
                             </div>
                             <div className="rc-chart-row">
+                              
+                              {/* ── Chart 1: Spend vs. Revenue / Sales Volume with Toggle ── */}
                               <div className="rc-chart-box">
-                                <p className="rc-chart-title">Spend vs. Sales Response Curve ({responseChannel.toUpperCase()})</p>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                                  <p className="rc-chart-title" style={{ marginBottom: 0 }}>
+                                    Spend vs. {responseMetricView === 'revenue' ? 'Revenue' : 'Sales'} Response Curve ({responseChannel.toUpperCase()})
+                                  </p>
+                                  
+                                  <div style={{ display: 'flex', gap: '0.3rem', backgroundColor: '#eef1f6', padding: '0.2rem', borderRadius: '6px' }}>
+                                    <button
+                                      type="button"
+                                      style={{
+                                        padding: '0.25rem 0.6rem',
+                                        fontSize: '0.72rem',
+                                        fontWeight: 'bold',
+                                        borderRadius: '4px',
+                                        border: 'none',
+                                        backgroundColor: responseMetricView === 'revenue' ? '#1e3a8a' : 'transparent',
+                                        color: responseMetricView === 'revenue' ? '#fff' : '#64748b',
+                                        cursor: 'pointer',
+                                      }}
+                                      onClick={() => setResponseMetricView('revenue')}
+                                    >
+                                      Revenue ($)
+                                    </button>
+                                    <button
+                                      type="button"
+                                      style={{
+                                        padding: '0.25rem 0.6rem',
+                                        fontSize: '0.72rem',
+                                        fontWeight: 'bold',
+                                        borderRadius: '4px',
+                                        border: 'none',
+                                        backgroundColor: responseMetricView === 'volume' ? '#1e3a8a' : 'transparent',
+                                        color: responseMetricView === 'volume' ? '#fff' : '#64748b',
+                                        cursor: 'pointer',
+                                      }}
+                                      onClick={() => setResponseMetricView('volume')}
+                                    >
+                                      Volume (TRx)
+                                    </button>
+                                  </div>
+                                </div>
+
                                 <ResponsiveContainer width="100%" height={260}>
                                   <LineChart data={currentCurve} margin={{ top: 10, right: 20, bottom: 22, left: 8 }}>
                                     <CartesianGrid stroke={GRID} vertical={false} />
-                                    <XAxis dataKey="spend" tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
-                                           tickFormatter={formatSpendTick} minTickGap={24}
-                                           label={{ value: 'Spend', ...X_LABEL }} />
-                                    <YAxis tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
-                                           tickFormatter={formatCompactNumber}
-                                           label={{ value: 'Impactable Sales', ...Y_LABEL }} />
-                                    <Tooltip content={<ChartTooltip title={(label) => formatSpendTick(Number(label))} />} cursor={{ stroke: '#c7d2e5', strokeWidth: 1 }} />
-                                    <Line type={LINE_TYPE} dataKey="impactable_nation" name="Impactable Sales" stroke={CHART_COLORS[0]} strokeWidth={2} dot={false} activeDot={{ r: 4, strokeWidth: 1.5, stroke: '#fff' }} />
+                                    <XAxis
+                                      dataKey="spend" tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
+                                      tickFormatter={formatSpendTick} minTickGap={24}
+                                      label={{ value: 'Spend ($)', ...X_LABEL }}
+                                    />
+                                    <YAxis
+                                      tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
+                                      tickFormatter={(v) =>
+                                        responseMetricView === 'revenue'
+                                          ? `$${Math.round(v / 1000000)}M`
+                                          : formatCompactNumber(v)
+                                      }
+                                      label={{
+                                        value: responseMetricView === 'revenue' ? 'Incremental Revenue ($)' : 'Impactable Sales (TRx)',
+                                        ...Y_LABEL,
+                                      }}
+                                    />
+                                    <Tooltip
+                                      content={
+                                        <ChartTooltip
+                                          title={(label) => formatSpendTick(Number(label))}
+                                          rows={(label, payload) => [
+                                            {
+                                              label: responseMetricView === 'revenue' ? 'Incremental Revenue' : 'Impactable Sales',
+                                              value: responseMetricView === 'revenue'
+                                                ? `$${Number(payload[0]?.value || 0).toLocaleString()}`
+                                                : `${Math.round(Number(payload[0]?.value || 0)).toLocaleString()} TRx`,
+                                              color: CHART_COLORS[0],
+                                            },
+                                          ]}
+                                        />
+                                      }
+                                      cursor={{ stroke: '#c7d2e5', strokeWidth: 1 }}
+                                    />
+                                    <Line
+                                      type={LINE_TYPE}
+                                      dataKey={responseMetricView === 'revenue' ? 'impactable_nation_currency' : 'impactable_nation'}
+                                      name={responseMetricView === 'revenue' ? 'Incremental Revenue ($)' : 'Impactable Sales (TRx)'}
+                                      stroke={CHART_COLORS[0]}
+                                      strokeWidth={2}
+                                      dot={false}
+                                      activeDot={{ r: 4, strokeWidth: 1.5, stroke: '#fff' }}
+                                    />
                                   </LineChart>
                                 </ResponsiveContainer>
                               </div>
+
+                              {/* ── Chart 2: Average ROI vs. Marginal ROI Curve ── */}
                               <div className="rc-chart-box">
                                 <p className="rc-chart-title">Average ROI vs. Marginal ROI (mROI) Curve</p>
                                 <ResponsiveContainer width="100%" height={260}>
                                   <LineChart data={roiCurve} margin={{ top: 10, right: 20, bottom: 22, left: 8 }}>
                                     <CartesianGrid stroke={GRID} vertical={false} />
-                                    {/* Numeric, anchored at zero. As a category
-                                        axis it spaced points by index and took
-                                        its first tick from the first row, so
-                                        the scale neither started at 0 nor used
-                                        round numbers. */}
                                     <XAxis type="number" dataKey="spend" domain={[0, 'dataMax']}
                                            tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
                                            tickFormatter={formatSpendTick} minTickGap={24}
-                                           label={{ value: 'Spend', ...X_LABEL }} />
+                                           label={{ value: 'Spend ($)', ...X_LABEL }} />
                                     <YAxis tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
-                                           tickFormatter={(v) => v.toFixed(2)}
-                                           label={{ value: 'ROI', ...Y_LABEL }} />
+                                           tickFormatter={(v) => formatRoi(v)}
+                                           label={{ value: 'ROI Multiple (x)', ...Y_LABEL }} />
                                     <Tooltip content={<ChartTooltip title={(label) => formatSpendTick(Number(label))} />} cursor={{ stroke: '#c7d2e5', strokeWidth: 1 }} />
                                     <Line type={LINE_TYPE} dataKey="roi" name="Average ROI" stroke={CHART_COLORS[0]} strokeWidth={2} dot={false} activeDot={{ r: 4, strokeWidth: 1.5, stroke: '#fff' }} />
                                     <Line type={LINE_TYPE} dataKey="mroi" name="Marginal ROI" stroke={CHART_COLORS[1]} strokeWidth={2} dot={false} activeDot={{ r: 4, strokeWidth: 1.5, stroke: '#fff' }} />
@@ -1218,6 +1030,7 @@ function ModelOutput() {
                                   <div className="rc-chart-legend-item"><span className="rc-chart-legend-swatch" style={{ backgroundColor: CHART_COLORS[1] }} />Marginal ROI</div>
                                 </div>
                               </div>
+
                             </div>
                           </>
                         )}
@@ -1315,7 +1128,6 @@ function ModelOutput() {
                       <div className="diag-stat-card"><p className="diag-stat-value">{getDisplayStats(viewingModel).r2?.toFixed(4) ?? 'NA'}</p><p className="diag-stat-label">R² (Fit)</p></div>
                       <div className="diag-stat-card"><p className="diag-stat-value">{getDisplayStats(viewingModel).adjR2?.toFixed(4) ?? 'NA'}</p><p className="diag-stat-label">Adjusted R²</p></div>
                       <div className="diag-stat-card"><p className="diag-stat-value">{getDisplayStats(viewingModel).rmse?.toFixed(2) ?? 'NA'}</p><p className="diag-stat-label">RMSE</p></div>
-                      {/* <div className="diag-stat-card"><p className="diag-stat-value">{viewingModel.type === 'ridge' ? ((viewingModel.alpha ?? viewingModel.ridgeLambda)?.toFixed?.(4) ?? String(viewingModel.alpha ?? viewingModel.ridgeLambda ?? 'NA')) : 'N/A (OLS)'}</p><p className="diag-stat-label">Alpha (λ)</p></div> */}
                     </div>
                     <button className="stat-summary-toggle" onClick={() => setShowStatSummary((v) => !v)}>
                       {showStatSummary ? '▾' : '▶'} View Full Statistical OLS / Ridge Summary Output

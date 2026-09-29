@@ -75,6 +75,8 @@ export const roleMeta = (id) => ROLE_BY_ID[id] || null;
  */
 export function guessColumnRole(colName) {
   const l = String(colName || '').toLowerCase();
+  // Carryover matches Baseline Variables first before any generic sales match
+  if (/carryover/.test(l)) return 'Baseline Variables';
   if (/sale|trx|nrx|crx|nbrx|revenue|kpi/.test(l)) return 'Dependent Variable';
   if (/date|week|month|period|year|time/.test(l)) return 'Time Variable';
   if (/npi|hcp|dma|zip|geo|account|(^|_)id($|_)/.test(l)) return 'Cross-sectional Variable';

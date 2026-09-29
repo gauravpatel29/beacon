@@ -1080,3 +1080,43 @@
 .stitching-tab-error button:hover {
   background-color: #f7d6d1;
 }
+
+
+.add-carryover-btn {
+  padding: 0.85rem 1.4rem;
+  border-radius: var(--radius-sm);
+  border: 1.5px solid var(--color-primary);
+  background-color: var(--color-white);
+  color: var(--color-primary);
+  font-size: 0.82rem;
+  font-weight: var(--font-weight-bold);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: var(--transition-base);
+}
+
+.add-carryover-btn:hover:not(:disabled) {
+  background-color: var(--color-primary-light);
+}
+
+.add-carryover-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  border-color: var(--color-border);
+  color: var(--color-text-light);
+}
+
+.carryover-modal {
+  max-width: 760px;
+}
+
+.carryover-pill-box {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-white);
+  min-height: 42px;
+}

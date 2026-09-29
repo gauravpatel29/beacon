@@ -1202,79 +1202,87 @@ function CoefficientTable({ rows, hideConst = false, weights = null }) {
   const list = Array.isArray(rows) ? rows : [];
   if (!list.length) return <p className="mc-empty">No coefficients returned.</p>;
 
-  // The model's const/baseline row (Note === 'Intercept') — hidden when the
-  // "Hide const row" checkbox next to Run Regression is checked.
   const visibleRows = hideConst ? list.filter((r) => r.Note !== 'Intercept') : list;
   if (!visibleRows.length) return <p className="mc-empty">No coefficients returned.</p>;
 
-  // `Impactable %` is the raw number behind the formatted `Impactable (%)`;
-  // showing both would be the same column twice. Coefficient/ROI/Note/Long
-  // Term ROI and Impactable Sales are hidden per instruction, leaving
-  // Impactable (%) pulled to the front, right after Variable, as the figure
-  // that matters most in this view.
   const hidden = new Set([
-    'Impactable %', 'Impactable Sales', 'Coefficient', 'ROI', 'Note', 'Long Term ROI',
+    'Note', 'Raw Variable', 'Long Term ROI', 'ROI', 'Spend'
   ]);
+
   const allColumns = Object.keys(visibleRows[0]).filter((c) => !hidden.has(c));
-  const FRONT_ORDER = ['Variable', 'Impactable (%)'];
+
+  // Explicit, transparent column order
+  const FRONT_ORDER = [
+    'Variable',
+    'Coefficient',
+    'Modelled Activity',
+    'Impactable Sales',
+    'Impactable %',     // 👈 Pure Real Math Percentage (Signed)
+    'Impactable (%)',   // 👈 100% Normalized Impact Share
+    'Std Error',
+    't-stat',
+    'P-value',
+    'CI Lower (2.5%)',
+    'CI Upper (97.5%)'
+  ];
+
   const columns = [
     ...FRONT_ORDER.filter((c) => allColumns.includes(c)),
     ...allColumns.filter((c) => !FRONT_ORDER.includes(c)),
   ];
+
   const numeric = (v) => typeof v === 'number';
-  const isPercentColumn = (c) => c.trim().endsWith('(%)');
-  // A quantity of sales, in some unit. Deliberately a whitelist: anything not
-  // named here - Std Error, t-stat, P-value, the confidence bounds, the
-  // coefficient itself - is a statistic, and a statistic keeps its sign.
-  const isContributionColumn = (c) => /impactable|contribution|sales|revenue/i.test(c);
 
-  // Each percentage column is resolved once, across every row, because making
-  // a column total 100 is not a decision a single cell can take.
-  // Each share is multiplied by the variable's prior weight, then the column
-  // is renormalised so it totals exactly 100.0. A model with no weights uses
-  // 1 throughout, which reduces to plain renormalisation.
-  const percentColumns = columns.filter(isPercentColumn);
-  const shares = Object.fromEntries(
-    percentColumns.map((c) => [
-      c,
-      weightedShareColumn(visibleRows, c, (r) => weightFor(weights, r.Variable)),
-    ])
-  );
-
-  // Once a row's share is floored to 0%, its other CONTRIBUTION figures are
-  // floored too: Impactable Sales is the same quantity in another unit, so a
-  // row reading 0.0% beside a negative sales count contradicts itself.
-  //
-  // Statistics are not contributions and are never touched. This rule was
-  // briefly applied to the whole row, which showed the intercept - whose
-  // share is genuinely negative - with a t-stat of 0 and a confidence
-  // interval of [0, 0] around a coefficient of -21,121. Those are properties
-  // of the estimate, not quantities of sales; zeroing them destroyed real
-  // diagnostic information and made a significant coefficient look like
-  // nothing at all.
-  const floored = new Set();
-  for (const c of percentColumns) for (const i of flooredRows(visibleRows, c)) floored.add(i);
+  // Compute 100% normalized commercial share
+  const normalizedShares = weightedShareColumn(visibleRows, 'Impactable %', (r) => weightFor(weights, r.Variable));
 
   return (
     <div className="coef-table-wrap">
       <table className="coef-table">
         <thead>
-          <tr>{columns.map((c) => <th key={c}>{c}</th>)}</tr>
+          <tr>
+            {columns.map((c) => {
+              let headerLabel = c;
+              if (c === 'Impactable %') headerLabel = 'Raw Impact % (Real Math)';
+              if (c === 'Impactable (%)') headerLabel = 'Impact Share % (100% Normalized)';
+              if (c === 'Impactable Sales') headerLabel = 'Impactable Sales (Units)';
+              return <th key={c}>{headerLabel}</th>;
+            })}
+          </tr>
         </thead>
         <tbody>
           {visibleRows.map((r, rowIndex) => (
             <tr key={rowKey(r)}>
-              {columns.map((c) => (
-                <td key={c}>
-                  {isPercentColumn(c)
-                    // A cell the column could not read as a number keeps
-                    // whatever it arrived as.
-                    ? (shares[c][rowIndex] ?? formatPercentCell(r[c]))
-                    : (numeric(r[c])
-                        ? fmt(isContributionColumn(c) && floored.has(rowIndex) && r[c] < 0 ? 0 : r[c])
-                        : (r[c] ?? '-'))}
-                </td>
-              ))}
+              {columns.map((c) => {
+                let cellValue = '-';
+
+                if (c === 'Impactable %') {
+                  // Real signed mathematical decomposition percentage
+                  const rawVal = r['Impactable %'] ?? r['Impactable (%)'];
+                  const numVal = Number(String(rawVal).replace('%', ''));
+                  cellValue = Number.isFinite(numVal) ? `${numVal.toFixed(2)}%` : '-';
+                } else if (c === 'Impactable (%)') {
+                  // 100% Normalized Share
+                  cellValue = normalizedShares[rowIndex] || '-';
+                } else if (c === 'Coefficient') {
+                  cellValue = numeric(r[c]) ? num(r[c], 5) : (r[c] ?? '-');
+                } else if (c === 'P-value') {
+                  cellValue = numeric(r[c]) ? num(r[c], 4) : (r[c] ?? '-');
+                } else if (numeric(r[c])) {
+                  cellValue = fmt(r[c]);
+                } else {
+                  cellValue = r[c] ?? '-';
+                }
+
+                const isNeg = c === 'Coefficient' && r[c] < 0;
+                const isNegImpact = c === 'Impactable %' && (Number(String(r['Impactable %']).replace('%', '')) < 0);
+
+                return (
+                  <td key={c} className={isNeg || isNegImpact ? 'coef-negative' : ''}>
+                    {cellValue}
+                  </td>
+                );
+              })}
             </tr>
           ))}
         </tbody>

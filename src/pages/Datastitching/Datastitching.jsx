@@ -5,14 +5,8 @@ import GranularityPanel from '../../components/Granularity/GranularityPanel.jsx'
 import './Datastitching.css';
 import PageFooterNav from '../../components/PageFooterNav/PageFooterNav.jsx';
 
-// No ARD until the user adds one. The screen used to open with an HCP and a
-// DMA tab already present, claiming two ARDs nobody had asked for and which
-// could not be removed.
 const DEFAULT_TABS = [];
 
-// The five join_type values the build endpoint accepts. Labels deliberately
-// carry no file name - the guide warns that a label like "Left Join (Keep all
-// crosswalk.csv rows)" is ambiguous - and only `value` is ever sent.
 const JOIN_TYPES = [
   { value: 'left', label: 'Left Join | keep every left row' },
   { value: 'inner', label: 'Inner Join | keep only rows matching on both sides' },
@@ -25,8 +19,6 @@ const JOIN_LABELS = Object.fromEntries(
   JOIN_TYPES.map((j) => [j.value, j.label.split(' | ')[0]])
 );
 
-
-/** A tab title as a filename: "ARD 1" -> "ard_1". */
 function slugify(title) {
   return String(title || '')
     .toLowerCase()
@@ -36,74 +28,38 @@ function slugify(title) {
 
 function makeEmptyStep() {
   return {
-    // 'join' | 'rollup' | 'allocate' — see OPERATION_TYPES below.
     operationType: 'join',
-    // Join fields
     leftFile: '', rightFile: '', joinType: 'left',
-    // Positional pairs: keyPairs[n].left joins to keyPairs[n].right. A date key
-    // is simply a second pair rather than a dedicated field.
     keyPairs: [{ left: '', right: '' }],
-    // Rollup fields (Lower Grain -> Higher Grain, via a bridge/crosswalk)
     sourceFile: '', bridgeFile: '',
+    rollupMappingMethod: 'equal_split',
+    weightFile: '', weightMatchKey: '', weightColumn: '', weightFallback: 'equal_split',
     sourceKey: '', matchKey: '', targetKey: '', dateKey: '',
-    aggregations: {}, // { [metricColumn]: 'sum'|'average'|'min'|'max'|'weighted_average' }
-    // Allocate fields (Higher Grain -> Lower Grain, via a crosswalk + method)
+    aggregations: {},
     higherGrainFile: '', lowerGrainStructureFile: '',
     sourceGrainKey: '', targetGrainKey: '', crosswalkFile: '',
+    crosswalkMatchKey: '',
     allocationMethod: 'equal',
-    metricsToAllocate: [], // column names from higherGrainFile
-    // Only meaningful (and only sent) when allocationMethod === 'weighted_column'.
-    // Confirmed as its own dataset + column by the build endpoint's response
-    // format doc: an allocate lineage entry reports `weight_dataset` and
-    // `weight_column` as separate fields from `mapping` (the crosswalk), so
-    // "weighted" allocation reads its weights from a third file, not from a
-    // column already present in one of the other three.
+    metricsToAllocate: [],
     weightDatasetFile: '', weightColumn: '',
+    // Carryover fields
+    entityKeys: [],
+    metricColumn: '',
+    outputColumnName: '',
+    decayRateMethod: 'manual',
+    decayRate: 0.6,
+    firstPeriodValue: 'zero',
+    timeGapHandling: 'reset',
+    negativeHandling: 'floor_zero',
   };
 }
 
-// All three modes call the same POST /v2/workflows/{id}/ard/build endpoint.
-// The field names below are no longer inferred. They are read from the
-// backend's own `StitchStep` model (routers/v2_ard.py) and the reads in
-// core/stitching.py, and they match what the reference client sends.
-//
-// The previous naming was reverse-engineered from error messages, and the
-// conclusion drawn from them was wrong. A rollup step sent as
-// `{operation: 'rollup', ...}` produced join-shaped errors, which was read as
-// "the backend checks left_file on every step regardless of operation". The
-// real cause: `StitchStep` declares `step_type` (default "join") and sets
-// `extra="ignore"`. `operation` is not a field, so it was silently dropped
-// and every rollup and allocate step ran as a plain left join - no grouping,
-// no aggregation, no grain change. Renaming the other fields to join names
-// made that join succeed, which looked like progress.
-//
-// Verified against the engine: 4 HCP rows rolled up to DMA returned 4 rows
-// still at HCP grain with the DMA column merged on, where the correct
-// payload returns 2 rows with the metrics summed. The per-column aggregation
-// rules were dropped entirely, so every numeric column was summed whatever
-// the user chose.
-//
-// The names, and why each matters:
-//   step_type         not `operation` - this is what selects the operation
-//   source_file       the dataset being rolled up      (was left_file)
-//   mapping_file      the bridge/crosswalk             (was right_file)
-//   source_entity_key key in the source               (was left_key)
-//   mapping_source_key matching key in the bridge      (was right_key)
-//   target_entity_key the grain to roll up TO          (was target_key)
-//   time_key          extra group-by column            (was date_key)
-//   agg_rules         per-column aggregation           (was aggregations)
 const OPERATION_TYPES = [
   { value: 'join', label: 'Relational Join (Same Grain)' },
   { value: 'rollup', label: 'Rollup (Lower → Higher Grain)' },
   { value: 'allocate', label: 'Allocate (Higher → Lower Grain)' },
 ];
 
-// The aggregations the engine implements, by the names it reads
-// (AGGREGATION_FUNCTIONS in core/stitching.py). An unknown name is not an
-// error there - `AGGREGATION_FUNCTIONS.get(rule, "sum")` falls back to sum -
-// so it is silently ignored. This screen offered "average" and
-// "weighted_average", neither of which the engine knows, so choosing either
-// quietly summed the column instead.
 const AGG_OPTIONS = [
   { value: 'sum', label: 'Sum (Default / Conserved)' },
   { value: 'avg', label: 'Average (Mean)' },
@@ -115,32 +71,19 @@ const AGG_OPTIONS = [
   { value: 'last', label: 'Last Occurrence' },
 ];
 const AGG_VALUES = new Set(AGG_OPTIONS.map((o) => o.value));
-// A draft saved under one of the old names would otherwise render an empty
-// dropdown. Reading it as 'sum' matches what the engine already did with it.
 const aggValue = (v) => (AGG_VALUES.has(v) ? v : 'sum');
 
-// Which columns get an aggregation rule. Only metrics do: a key or a date is
-// what the rollup groups BY, so offering to aggregate one is meaningless.
-// Mirrors the reference client's `isMetricOrPromo` name-token fallback, which
-// is also the rule the engine uses to decide what to aggregate (`id_tokens`
-// in execute_rollup_step).
 const ID_TOKENS = [
   'npi', 'id', 'zip', 'fips', 'code', 'dma', 'state', 'account',
   'date', 'week', 'month', 'year', 'time',
 ];
 function isMetricColumn(colName) {
-  // Separators normalised to underscore first, so "NPI ID" and "npi-id" are
-  // recognised the same as "npi_id". The reference leans on the ingestion
-  // column role to catch those; this screen has no roles loaded, so the name
-  // is all there is to go on.
   const l = String(colName || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
   return !ID_TOKENS.some((tok) => l === tok || l.startsWith(`${tok}_`) || l.endsWith(`_${tok}`));
 }
 
 function makeDefaultDraft() {
   return {
-    // Blank means "use the grain-based default". Kept per tab so each ARD in
-    // the workflow can be named separately.
     ardName: '',
     selectedFiles: new Set(),
     steps: [],
@@ -151,36 +94,22 @@ function makeDefaultDraft() {
     pipelineError: null,
     isGenerating: false,
     generateError: null,
-    activePreview: null, // { cardIndex, data, isLoading, error }
-    generatedArd: null,  // the committed build: { filename, version, row_count, columns, preview }
-    // Which dataset this tab has written, name only. The build above is
-    // deliberately not persisted - it is rebuildable, and a stored preview
-    // would outlive the data it described - but the name has to survive a
-    // resume, otherwise deleting the tab later leaves the ARD orphaned.
+    activePreview: null,
+    generatedArd: null,
     generatedArdName: null,
   };
 }
 
-// Starts at zero so the first ARD added is "ARD 1". It began at one when two
-// tabs already existed and the counter only ever named the extras.
 let tabCounter = 0;
 
 function Datastitching() {
   const [workflowId, setWorkflowId] = useState(null);
-  // Saves are armed only after the restore has run, so the blank initial
-  // state cannot overwrite work being fetched.
   const hasRestored = useRef(false);
   const [files, setFiles] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
-  // A problem with one tab, shown above the tab bar. Kept apart from
-  // `loadError`, which stands in for the whole screen.
   const [tabError, setTabError] = useState(null);
 
-  // Every ARD ever built in this workflow, not just the one open in the
-  // active tab's draft — GET /v2/workflows/{id}/ard, listed in a section of
-  // its own (see the JSX near PageFooterNav) so a previously-generated ARD
-  // is still visible and downloadable after switching tabs or reloading.
   const [savedArds, setSavedArds] = useState([]);
   const [isLoadingArds, setIsLoadingArds] = useState(false);
   const [ardListError, setArdListError] = useState(null);
@@ -190,21 +119,13 @@ function Datastitching() {
   const [activeTabId, setActiveTabId] = useState('');
   const [drafts, setDrafts] = useState({});
 
-  // Modal now edits exactly ONE step at a time.
-  const [modal, setModal] = useState(null); // { mode: 'add'|'edit', stepIndex, step }
-
-  // The name being typed into the tab that is currently being renamed. Only
-  // one tab can be in edit mode, so a single value is enough - and holding it
-  // here is what lets a button outside the input submit it.
+  const [modal, setModal] = useState(null);
+  const [carryoverModal, setCarryoverModal] = useState(null);
   const [renameValue, setRenameValue] = useState('');
 
-  // Null until an ARD is added. Everything below either guards on it or is
-  // rendered only when it exists.
   const activeTab = tabs.find((t) => t.id === activeTabId) || tabs[0] || null;
   const draft = drafts[activeTab?.id] || makeDefaultDraft();
 
-  // No-ops with no ARD open, rather than creating a draft under an empty key
-  // that nothing would ever render.
   const setDraft = (updates) => {
     if (!activeTab) return;
     setDrafts((prev) => ({ ...prev, [activeTab.id]: { ...prev[activeTab.id], ...updates } }));
@@ -215,27 +136,16 @@ function Datastitching() {
     setDrafts((prev) => ({ ...prev, [activeTab.id]: updaterFn(prev[activeTab.id]) }));
   };
 
-  // The build endpoint requires a target_grain and validates it, but never
-  // passes it to the join: `execute_pipeline` takes only the steps, the frames
-  // and a preview size. It is a label, so it is no longer asked for - the tab's
-  // own name identifies the ARD instead.
   const targetGrain = 'hcp';
   const ardLabel = activeTab?.title || 'this ARD';
 
-  // What gets written to the workflow: the recipe, not the rendered result.
-  // Join cards, previews and row counts are all things the server can rebuild
-  // from the steps, and storing them would mean a stale copy of a preview
-  // outliving the data it described.
   const persistableState = () => ({
     activeTabId,
     tabs: tabs.map(({ id, title, grain, removable }) => ({ id, title, grain, removable })),
     drafts: Object.fromEntries(Object.entries(drafts).map(([id, d]) => [id, {
       ardName: d.ardName,
       steps: d.steps,
-      // A Set does not survive JSON.
       selectedFiles: Array.from(d.selectedFiles || []),
-      // Whichever is known: the live build this session, or the name carried
-      // over from the last one.
       generatedArdName: d.generatedArd?.filename || d.generatedArdName || null,
     }])),
   });
@@ -243,17 +153,11 @@ function Datastitching() {
   const restoreDrafts = (saved) => {
     if (!saved || !Array.isArray(saved.tabs) || !saved.tabs.length) return false;
 
-    // Sessions saved while the screen still opened with fixed HCP and DMA tabs
-    // carry those two in `state_data`, so they would come straight back however
-    // empty the defaults are now. An unused one is dropped; one holding real
-    // joins is kept, because that is work the user did.
     const isUnusedLegacyTab = (tab) => tab.removable === false
       && !(saved.drafts?.[tab.id]?.steps || []).length;
 
     const tabsToKeep = saved.tabs
       .filter((tab) => !isUnusedLegacyTab(tab))
-      // A kept legacy tab becomes an ordinary one: removable and renameable
-      // like any other. Its stored grain is dropped along with the picker.
       .map((tab) => ({ ...tab, removable: true, editing: false }));
 
     if (!tabsToKeep.length) return false;
@@ -319,18 +223,9 @@ function Datastitching() {
       if (isCancelled()) return;
       setFiles((filesData.items || []).filter((f) => f.kind !== 'ard'));
 
-      // Non-blocking on purpose: a failure listing ARDs shouldn't take down
-      // the whole screen, only leave that one section showing its own error.
       loadArdList(id);
 
-      // Joins the user added last time. Restored before the save effect is
-      // armed, so an empty starting state is never written over real work.
       const saved = await loadScreenState('stitching');
-      // A second restore would rebuild every draft from makeDefaultDraft(),
-      // which resets `joinCards` - so cards already replayed from these steps
-      // would blank out, and the rebuild effect would not fire again because
-      // the step count had not changed. That is what made restored joins flash
-      // up and vanish.
       if (isCancelled()) return;
       restoreDrafts(saved);
     } catch (err) {
@@ -343,13 +238,8 @@ function Datastitching() {
     }
   };
 
-  // Remember where the user got to, so Resume reopens this screen instead
-  // of always returning to Data Ingestion.
   useEffect(() => { recordStage('stitching'); }, []);
 
-  // Cancelled on unmount, which under StrictMode's deliberate double-mount
-  // means only the second pass restores. Without this both passes did, and the
-  // second wiped the cards the first had just built.
   useEffect(() => {
     let cancelled = false;
     loadEverything(() => cancelled);
@@ -357,10 +247,6 @@ function Datastitching() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Save the recipe whenever it changes, debounced so dragging through a
-  // multi-step join is one write rather than one per keystroke. Gated on the
-  // restore having finished: without that, the empty initial state would be
-  // saved over the joins still being fetched.
   useEffect(() => {
     if (!hasRestored.current) return undefined;
     const timer = setTimeout(() => { saveScreenState('stitching', persistableState()); }, 600);
@@ -368,19 +254,8 @@ function Datastitching() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabs, drafts, activeTabId]);
 
-  // Rebuild the join cards for whichever tab is open. The steps are restored
-  // from the workflow; the cards, row counts and previews come from replaying
-  // them against the current files, so a card can never describe a dataset
-  // that has changed underneath it.
   useEffect(() => {
     if (!workflowId || !hasRestored.current) return;
-    // `joinCards.length` is a dependency, not just a condition: a draft whose
-    // cards get cleared while its steps stand must rebuild them. Keying only
-    // on the step count left that state stuck, because the count had not moved.
-    // Not while one is in flight, and not after one has failed: a failed
-    // rebuild leaves the cards empty, which would otherwise satisfy this
-    // condition again and retry forever. The error stays on screen and editing
-    // a step clears it, which is the retry.
     if (draft.steps.length && !draft.joinCards.length
         && !draft.isSavingPipeline && !draft.pipelineError) {
       rebuildCardsFromSteps(draft.steps);
@@ -399,8 +274,6 @@ function Datastitching() {
     ]);
     setDrafts((prev) => ({ ...prev, [newId]: makeDefaultDraft() }));
     setActiveTabId(newId);
-    // Seeds the name box with the suggestion, so Enter or the tick accepts it
-    // and typing replaces it.
     setRenameValue(suggested);
   };
 
@@ -417,8 +290,6 @@ function Datastitching() {
     )));
   };
 
-  // Leaves the name as it was. Used by Escape, so an accidental edit can be
-  // abandoned without having to remember what the tab was called.
   const cancelRenameTab = (tabId) => {
     setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, editing: false } : t)));
   };
@@ -426,13 +297,9 @@ function Datastitching() {
   const removeTab = async (tabId, e) => {
     e.stopPropagation();
 
-    // Deleting a tab discards the joins in it, and the save that follows takes
-    // them out of the workflow too - so an ARD with work in it asks first. An
-    // empty one goes without ceremony, since there is nothing to lose.
     const tab = tabs.find((t) => t.id === tabId);
     const tabDraft = drafts[tabId] || {};
     const stepCount = (tabDraft.steps || []).length;
-    // The dataset this tab produced, from this session or a previous one.
     const builtArd = tabDraft.generatedArd?.filename || tabDraft.generatedArdName || null;
 
     if (stepCount > 0 || builtArd) {
@@ -440,8 +307,6 @@ function Datastitching() {
       const joins = stepCount === 1 ? '1 join' : `${stepCount} joins`;
       const lines = [`Delete ${label}?`, ''];
       if (stepCount > 0) lines.push(`Its ${joins} will be removed from this workflow.`);
-      // The tab is where an ARD is built and named, so leaving the dataset
-      // behind left a file nothing on this screen could reach again.
       if (builtArd) lines.push(`The generated dataset "${builtArd}" will be deleted too.`);
       if (!window.confirm(lines.join('\n'))) return;
     }
@@ -453,21 +318,13 @@ function Datastitching() {
       delete next[tabId];
       return next;
     });
-    // Fall back to whatever is left, which may be nothing at all.
     if (activeTabId === tabId) setActiveTabId(remaining[0]?.id || '');
 
     if (!builtArd || !workflowId) return;
     try {
       await deleteFile(workflowId, builtArd);
-      // Only after the delete lands: a failed one must not prune the state of
-      // a dataset that is still there. This also clears the selection on Data
-      // Review and Data Transformation, which held it by name.
       await forgetFile(builtArd);
     } catch (err) {
-      // The tab is already gone, and re-adding it would be more confusing than
-      // saying what is left over.
-      // Not `loadError`: that one replaces the whole screen, and the screen is
-      // still perfectly usable - one dataset just outlived its tab.
       setTabError(problemMessage(err, `Removed ${tab?.title || 'the ARD'}, but "${builtArd}" could not be deleted.`));
     }
   };
@@ -481,19 +338,30 @@ function Datastitching() {
 
   const selectedFileList = files.filter((f) => draft.selectedFiles.has(f.filename));
 
-  // Rollup and Allocate steps were falling through this validator's
-  // join-only checks — `leftFile`/`rightFile` are never filled in for them,
-  // so every rollup/allocate step failed with "Choose both a left and right
-  // dataset" no matter what was actually configured, and could never be
-  // added. Branches per operationType now, checking the fields that step
-  // type's own form actually collects.
   const validateStep = (step) => {
+    if (step.operationType === 'carryover') {
+      if (!step.sourceFile) return 'Select a Stitched ARD Table as the Source Dataset.';
+      if (!step.metricColumn) return 'Select a Sales / Metric Column to compute carryover from.';
+      if (!step.dateKey) return 'Select a Time / Date Key.';
+      if (!(step.entityKeys || []).length) return 'Select at least one Entity / Grain Key.';
+      if (step.decayRate === '' || Number.isNaN(Number(step.decayRate))) return 'Enter a valid Decay Rate.';
+      return null;
+    }
+
     if (step.operationType === 'rollup') {
       if (!step.sourceFile || !step.bridgeFile) {
         return 'Choose both a Lower Grain Source Dataset and a Bridge/Crosswalk Mapping Dataset.';
       }
+      if (!step.rollupMappingMethod) {
+        return 'Please choose a Mapping Method for multi-mapped records.';
+      }
+      if (step.rollupMappingMethod === 'weighted_split') {
+        if (!step.weightFile || !step.weightMatchKey || !step.weightColumn) {
+          return 'Weighted Distribution requires Weight Source File, Weight Match Key, and Weight Value Column.';
+        }
+      }
       if (!step.sourceKey || !step.matchKey || !step.targetKey || !step.dateKey) {
-        return 'Source Key, Match Key, Target Key and Time/Date Key are all required.';
+        return 'Source Key, Match Key, Target Key, and Time/Date Key are all required.';
       }
       return null;
     }
@@ -502,8 +370,11 @@ function Datastitching() {
       if (!step.higherGrainFile || !step.lowerGrainStructureFile) {
         return 'Choose both a Higher Grain Spend/Media Dataset and a Target Lower Grain Structure Dataset.';
       }
-      if (!step.sourceGrainKey || !step.targetGrainKey || !step.dateKey || !step.crosswalkFile) {
-        return 'Source Grain Key, Target Grain Key, Time/Date Key and the Crosswalk Mapping Dataset are all required.';
+      if (!step.crosswalkFile || !step.crosswalkMatchKey) {
+        return 'Crosswalk Mapping Dataset and Crosswalk Match Key are required.';
+      }
+      if (!step.sourceGrainKey || !step.targetGrainKey || !step.dateKey) {
+        return 'Source Grain Key, Target Grain Key, and Time/Date Key are required.';
       }
       if (!(step.metricsToAllocate || []).length) {
         return 'Select at least one media metric to allocate down.';
@@ -514,19 +385,16 @@ function Datastitching() {
       return null;
     }
 
-    // join
     if (!step.leftFile || !step.rightFile) {
       return 'Choose both a left and right dataset.';
     }
-    if (step.joinType === 'cross') return null; // cross takes no keys
+    if (step.joinType === 'cross') return null;
 
     const pairs = step.keyPairs || [];
     const filled = pairs.filter((p) => p.left && p.right);
     if (!filled.length) {
       return 'At least one key pair is required.';
     }
-    // The API pairs keys positionally and rejects a count mismatch, so a
-    // half-filled row has to be caught before it is sent.
     if (pairs.some((p) => Boolean(p.left) !== Boolean(p.right))) {
       return 'Every key pair needs a column on both sides, or remove the row.';
     }
@@ -537,71 +405,70 @@ function Datastitching() {
     return null;
   };
 
-  // Shown as the placeholder and used when the field is left blank. Matches
-  // what the API would pick on its own, so the two never disagree.
-  // Derived from the tab name rather than the grain: with no grain to vary,
-  // every ARD would otherwise default to the same filename and the second
-  // build would replace the first.
-  // Derived from the tab name rather than the grain. With no grain to vary,
-  // every ARD would otherwise default to the same filename and the second
-  // build would replace the first.
   const defaultArdName = `${slugify(activeTab?.title) || 'ard'}.csv`;
 
   const payloadFor = (steps) => ({
-    steps: steps.map((s) => {
-      if (s.operationType === 'rollup') {
+    steps: steps.map((s, sIdx) => {
+      if (s.operationType === 'carryover') {
+        const metric = s.metricColumn || 'sales';
         return {
-          // `step_type`, not `operation`. This is the field that selects the
-          // operation; anything else is dropped and the step runs as a join.
+          step_type: 'carryover',
+          source_file: s.sourceFile,
+          entity_keys: s.entityKeys || [],
+          time_key: s.dateKey,
+          metric_column: metric,
+          output_column_name: s.outputColumnName || `carryover_${metric}`,
+          decay_rate: Number(s.decayRate ?? 0.6),
+          first_period_value: s.firstPeriodValue || 'zero',
+          time_gap_handling: s.timeGapHandling || 'reset',
+          negative_handling: s.negativeHandling || 'floor_zero',
+        };
+      }
+      if (s.operationType === 'rollup') {
+        const isWeighted = s.rollupMappingMethod === 'weighted_split';
+        return {
           step_type: 'rollup',
           source_file: s.sourceFile,
           mapping_file: s.bridgeFile,
-          // Singular in the model, not the join's key arrays.
           source_entity_key: s.sourceKey,
           mapping_source_key: s.matchKey,
           target_entity_key: s.targetKey,
           time_key: s.dateKey,
-          // Without this the engine sums every numeric column regardless of
-          // what was chosen per column.
           agg_rules: s.aggregations || {},
+          rollup_mapping_method: s.rollupMappingMethod || 'equal_split',
+          ...(isWeighted ? {
+            weight_file: s.weightFile || null,
+            weight_match_key: s.weightMatchKey || null,
+            weight_value_column: s.weightColumn || null,
+            weight_fallback: s.weightFallback || 'equal_split',
+          } : {}),
         };
       }
       if (s.operationType === 'allocate') {
         const isWeighted = s.allocationMethod === 'weighted_column';
         return {
           step_type: 'allocate',
-          // The dispatcher reads source_file for the dataset being split and
-          // target_file for the structure it is split across.
           source_file: s.higherGrainFile,
           target_file: s.lowerGrainStructureFile,
           mapping_file: s.crosswalkFile,
+          mapping_source_grain_key: s.crosswalkMatchKey || null,
           source_grain_key: s.sourceGrainKey,
           target_grain_key: s.targetGrainKey,
           time_key: s.dateKey,
-          // `method` is not a field on the model: sent under that name it was
-          // dropped and every allocation silently ran as "equal", whatever
-          // was chosen.
           allocation_method: s.allocationMethod || 'equal',
           allocated_metrics: s.metricsToAllocate || [],
-          // Only the weighted method uses a separate weights file/column,
-          // omitted otherwise. `weight_file`, not `weight_dataset`.
           ...(isWeighted ? {
-            weight_file: s.weightDatasetFile,
-            weight_column: s.weightColumn,
+            weight_file: s.weightDatasetFile || null,
+            weight_column: s.weightColumn || null,
           } : {}),
         };
       }
-      // A join worked only because `operation` was dropped and `step_type`
-      // defaults to "join". Stating it makes that intentional rather than
-      // accidental.
       const base = {
         step_type: 'join',
         left_file: s.leftFile,
         right_file: s.rightFile,
         join_type: s.joinType,
       };
-      // Omit the key arrays entirely on a cross join; the other four 422 with
-      // keys_missing without them.
       if (s.joinType === 'cross') return base;
       const filled = (s.keyPairs || []).filter((p) => p.left && p.right);
       return {
@@ -611,14 +478,9 @@ function Datastitching() {
       };
     }),
     target_grain: targetGrain,
-    // Only sent when the user typed one; otherwise the API applies its own
-    // grain-based default. A name without .csv gets the extension server-side.
     ...(draft.ardName.trim() ? { output: draft.ardName.trim() } : {}),
   });
 
-  // Re-runs the whole pipeline (dry run) for a given steps array and turns
-  // the result into joinCards - used after add/edit/delete so the cards
-  // and final row/column counts always reflect what's really configured.
   const rebuildCardsFromSteps = async (steps) => {
     if (steps.length === 0) {
       setDraft({ steps: [], joinCards: [], finalRowCount: null, finalColumnCount: null, activePreview: null, generatedArd: null });
@@ -629,20 +491,11 @@ function Datastitching() {
       const data = await v2BuildArd(workflowId, payloadFor(steps), { dryRun: true });
       const cards = (data.lineage?.steps_executed || []).map((s) => ({
         step: s.step,
-        // `type` ("join" | "rollup" | "allocate") is the authoritative
-        // discriminator per response_format.odt, present on every lineage
-        // entry - more reliable than inferring the step kind from which of
-        // `left`/`source` happens to be set.
         type: s.type,
         left: s.left,
         right: s.right,
         join: s.join,
-        // The lineage already reports the resolved key names, which is the
-        // authoritative answer once the server has matched them case-insensitively.
         keys: s.keys || [],
-        // Rollup/allocate-specific fields, straight from the documented
-        // response shape - used so the card can describe what the server
-        // actually did instead of only ever echoing the client's own draft.
         source: s.source,
         target: s.target,
         mapping: s.mapping,
@@ -651,12 +504,13 @@ function Datastitching() {
         weightDataset: s.weight_dataset,
         weightColumn: s.weight_column,
         allocatedMetrics: s.allocated_metrics || [],
+        entityKeys: s.entity_keys || [],
+        timeKey: s.time_key,
+        metricColumn: s.metric_column,
+        outputColumn: s.output_column,
+        decayRate: s.decay_rate,
         rows_in: s.rows_in ?? 0,
         rows_out: s.rows_out ?? 0,
-        // What this step produced. A later step joining on "Step N Result"
-        // needs these to offer real key columns, and they cannot be derived
-        // client-side: a name clash is suffixed ("month_step1") and duplicate
-        // right-hand keys are collapsed before the join.
         columns: s.columns || [],
       }));
       setDraft({
@@ -666,7 +520,6 @@ function Datastitching() {
         finalColumnCount: data.columns?.length ?? 0,
         isSavingPipeline: false,
         activePreview: null,
-        // The steps changed, so the last build no longer describes them.
         generatedArd: null,
       });
       return true;
@@ -682,18 +535,36 @@ function Datastitching() {
     }
   };
 
-  // ---- Modal open/close for a single step ----
   const openAddJoinModal = () => {
     if (draft.selectedFiles.size === 0) return;
     setModal({ mode: 'add', stepIndex: draft.steps.length, step: makeEmptyStep(), error: null });
   };
 
   const openEditJoinModal = (cardIndex) => {
-    setModal({ mode: 'edit', stepIndex: cardIndex, step: { ...draft.steps[cardIndex] }, error: null });
+    const existing = draft.steps[cardIndex];
+    if (existing?.operationType === 'carryover') {
+      setCarryoverModal({ mode: 'edit', stepIndex: cardIndex, step: { ...existing }, error: null });
+    } else {
+      setModal({ mode: 'edit', stepIndex: cardIndex, step: { ...existing }, error: null });
+    }
+  };
+
+  const openCarryoverModal = () => {
+    const defaultSource = savedArds[0]?.filename || (draft.joinCards.length > 0 ? `Step ${draft.joinCards.length} Result` : (selectedFileList[0]?.filename || ''));
+    const step = {
+      ...makeEmptyStep(),
+      operationType: 'carryover',
+      sourceFile: defaultSource,
+    };
+    setCarryoverModal({ mode: 'add', stepIndex: draft.steps.length, step, error: null });
   };
 
   const handleModalStepChange = (updates) => {
     setModal((prev) => ({ ...prev, step: { ...prev.step, ...updates } }));
+  };
+
+  const handleCarryoverModalStepChange = (updates) => {
+    setCarryoverModal((prev) => ({ ...prev, step: { ...prev.step, ...updates } }));
   };
 
   const handleModalDone = async () => {
@@ -708,7 +579,22 @@ function Datastitching() {
 
     const ok = await rebuildCardsFromSteps(newSteps);
     if (ok) setModal(null);
-    else setModal((prev) => ({ ...prev, error: 'See error below  pipeline could not be validated.' }));
+    else setModal((prev) => ({ ...prev, error: 'See error below — pipeline could not be validated.' }));
+  };
+
+  const handleCarryoverDone = async () => {
+    const err = validateStep(carryoverModal.step);
+    if (err) {
+      setCarryoverModal((prev) => ({ ...prev, error: err }));
+      return;
+    }
+    const newSteps = carryoverModal.mode === 'add'
+      ? [...draft.steps, carryoverModal.step]
+      : draft.steps.map((s, i) => (i === carryoverModal.stepIndex ? carryoverModal.step : s));
+
+    const ok = await rebuildCardsFromSteps(newSteps);
+    if (ok) setCarryoverModal(null);
+    else setCarryoverModal((prev) => ({ ...prev, error: 'See error below — carryover calculation failed.' }));
   };
 
   const handleDeleteJoin = async (cardIndex) => {
@@ -741,9 +627,6 @@ function Datastitching() {
     setDraft({ generateError: null, isGenerating: true, generatedArd: null, activePreview: null });
     try {
       const built = await v2BuildArd(workflowId, payloadFor(draft.steps), { dryRun: false });
-      // Keep the steps and cards rather than resetting the draft: the user
-      // needs to see what produced this ARD, and may want to adjust and
-      // rebuild. The preview panel picks `built` up via shownPreview.
       setDraft({ generatedArd: built });
       loadArdList(workflowId);
     } catch (err) {
@@ -759,9 +642,6 @@ function Datastitching() {
     setDraft({ isGenerating: false });
   };
 
-  // "Step N Result" is a virtual name - it is never a dataset, so it is not in
-  // `files`. The dry run reports what each step produced, so the modal can look
-  // its columns up here instead of falling back to a blind text box.
   const stepResultColumns = Object.fromEntries(
     draft.joinCards
       .filter((card) => (card.columns || []).length)
@@ -770,12 +650,10 @@ function Datastitching() {
 
   const previewedCard = draft.activePreview ? draft.joinCards[draft.activePreview.cardIndex] : null;
 
-  // The panel shows an explicitly requested step preview when one is open,
-  // otherwise the ARD just generated. Same table either way.
   const shownPreview = draft.activePreview
     ? {
         heading: previewedCard
-          ? `Step ${previewedCard.step} result: ${previewedCard.left} + ${previewedCard.right}`
+          ? `Step ${previewedCard.step} result: ${previewedCard.left || previewedCard.source}`
           : null,
         isLoading: draft.activePreview.isLoading,
         error: draft.activePreview.error,
@@ -792,8 +670,6 @@ function Datastitching() {
       }
     : null;
 
-  // problem+json errors carry a 1-based `step`; use it to mark the card that
-  // failed instead of leaving the user to match a banner against a list.
   const failedSteps = new Set(
     (draft.pipelineError?.errors || [])
       .concat(draft.generateError?.errors || [])
@@ -855,9 +731,6 @@ function Datastitching() {
                         if (e.key === 'Escape') cancelRenameTab(t.id);
                       }}
                     />
-                    {/* Enter still works; this is for anyone who expects to
-                        click. onMouseDown is prevented so the input does not
-                        blur out from under the click and commit twice. */}
                     <button
                       type="button"
                       className="tab-rename-save"
@@ -876,9 +749,6 @@ function Datastitching() {
                 ) : (
                   <>
                     {t.title}
-                    {/* Rename and delete, revealed on hover so the tab reads as
-                        a name until you go looking for them. Double-clicking
-                        the tab still starts a rename. */}
                     <button
                       type="button"
                       className="tab-edit-btn"
@@ -903,7 +773,6 @@ function Datastitching() {
             ))}
           </div>
 
-          {/* Nothing is configured until an ARD exists. */}
           {!activeTab && (
             <div className="stitching-empty">
               No ARD yet. Use <strong>+ Add New</strong> above to create one.
@@ -912,245 +781,246 @@ function Datastitching() {
 
           {activeTab && (
             <>
-          {/* Before the join, not after: two files at different time grains
-              cannot be joined on a date, and this is where that becomes
-              apparent. Moved here from a tab on Data Ingestion, which asked
-              the question one file at a time and out of context. */}
-          <GranularityPanel
-            files={files}
-            workflowId={workflowId}
-            onApplied={() => loadEverything()}
-          />
+              <GranularityPanel
+                files={files}
+                workflowId={workflowId}
+                onApplied={() => loadEverything()}
+              />
 
-          {/* ---- Source files ---- */}
-          <div className="source-files-card">
-            <p className="section-heading">Source Files</p>
-            <p className="section-desc">
-              Select the mapped source files to include in <strong>{ardLabel}</strong>:
-            </p>
-            <div className="file-checkbox-grid">
-              {files.map((f) => (
-                <label key={f.filename} className={`file-checkbox-card${draft.selectedFiles.has(f.filename) ? ' selected' : ''}`}>
-                  <input type="checkbox" checked={draft.selectedFiles.has(f.filename)} onChange={() => toggleFile(f.filename)} />
-                  <div>
-                    <p className="file-checkbox-name">{f.filename}</p>
-                    <p className="file-checkbox-meta">{f.columns?.length ?? 0} columns</p>
-                  </div>
-                </label>
-              ))}
-            </div>
-            <div className="source-files-footer">
-              <span>Mapping file and population universe files included automatically</span>
-              <span>{draft.selectedFiles.size} file(s) active</span>
-            </div>
-          </div>
-
-          {/* ---- Current Joins ---- */}
-          <div className="current-joins-card">
-            <div className="current-joins-header">
-              <p className="section-heading">
-                Current Joins
-                {draft.joinCards.length > 0 && (
-                  <span className="heading-note" style={{ marginLeft: '0.6rem' }}>
-                    {(draft.finalRowCount ?? 0).toLocaleString()} rows · {draft.finalColumnCount ?? 0} columns
-                  </span>
-                )}
-              </p>
-              <button
-                className="add-step-btn"
-                onClick={openAddJoinModal}
-                disabled={draft.selectedFiles.size === 0}
-                title={draft.selectedFiles.size === 0 ? 'Select at least one source file above first' : undefined}
-              >
-                + Add Join
-              </button>
-            </div>
-
-            {draft.pipelineError && (
-              <div className="stitching-error-banner">
-                <p className="error-title">{draft.pipelineError.title}</p>
-                {draft.pipelineError.errors.map((e, i) => <p key={i}>{e.message}</p>)}
+              {/* ---- Source files ---- */}
+              <div className="source-files-card">
+                <p className="section-heading">Source Files</p>
+                <p className="section-desc">
+                  Select the mapped source files to include in <strong>{ardLabel}</strong>:
+                </p>
+                <div className="file-checkbox-grid">
+                  {files.map((f) => (
+                    <label key={f.filename} className={`file-checkbox-card${draft.selectedFiles.has(f.filename) ? ' selected' : ''}`}>
+                      <input type="checkbox" checked={draft.selectedFiles.has(f.filename)} onChange={() => toggleFile(f.filename)} />
+                      <div>
+                        <p className="file-checkbox-name">{f.filename}</p>
+                        <p className="file-checkbox-meta">{f.columns?.length ?? 0} columns</p>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+                <div className="source-files-footer">
+                  <span>Mapping file and population universe files included automatically</span>
+                  <span>{draft.selectedFiles.size} file(s) active</span>
+                </div>
               </div>
-            )}
 
-            {draft.joinCards.length === 0 ? (
-              <p className="stitching-empty">
-                {draft.selectedFiles.size === 0
-                  ? 'Select at least one source file above, then click "+ Add Join".'
-                  : 'No joins configured yet click "+ Add Join" above to get started.'}
-              </p>
-            ) : (
-              draft.joinCards.map((card, i) => (
-                <div
-                  key={i}
-                  className={`join-summary-card${draft.activePreview?.cardIndex === i ? ' active' : ''}${failedSteps.has(card.step) ? ' has-error' : ''}`}
-                >
-                  <div className="join-summary-header">
-                    <span className="step-card-title">
-                      {/* `card.type` is the confirmed discriminator once a dry
-                          run has succeeded for this step; the client-side
-                          `operationType` is only a fallback for the moment
-                          right after an edit, before the rebuild lands. */}
-                      {(card.type || draft.steps[i]?.operationType) === 'join'
-                        ? `Join ${card.step} ${JOIN_LABELS[card.join] || card.join}`
-                        : (card.type || draft.steps[i]?.operationType) === 'rollup'
-                        ? `Step ${card.step} Rollup`
-                        : (card.type || draft.steps[i]?.operationType) === 'allocate'
-                        ? `Step ${card.step} Allocation`
-                        : `Step ${card.step} ${card.operation || ''}`}
-                    </span>
-                    <span className="join-summary-rows">
-                      {(card.rows_in ?? 0).toLocaleString()} → {' '}
-                      <span className={(card.rows_out ?? 0) < (card.rows_in ?? 0) ? 'rows-dropped' : ''}>{(card.rows_out ?? 0).toLocaleString()}</span> rows
-                    </span>
-                  </div>
-                  <p className="join-summary-desc">
-                    {card.type === 'join' ? (
-                      card.join === 'cross' ? (
-                        <>
-                          Every combination of <strong>{card.left}</strong> and{' '}
-                          <strong>{card.right}</strong>, no keys
-                        </>
-                      ) : (
-                        <>
-                          Joining <strong>{card.left}</strong> with{' '}
-                          <strong>{card.right}</strong> on{' '}
-                          {(card.keys || []).map((k, ki) => (
-                            <span key={k}>
-                              {ki > 0 && ' + '}
-                              <code>{k}</code>
-                            </span>
-                          ))}
-                        </>
-                      )
-                    ) : card.type === 'rollup' ? (
-                      <>
-                        Rolling up <strong>{card.source}</strong> via{' '}
-                        <strong>{card.mapping}</strong>
-                        {card.groupBy?.length ? (
-                          <>
-                            {' '}grouped by{' '}
-                            {card.groupBy.map((k, ki) => (
-                              <span key={k}>{ki > 0 && ' + '}<code>{k}</code></span>
-                            ))}
-                          </>
-                        ) : null}
-                      </>
-                    ) : card.type === 'allocate' ? (
-                      <>
-                        Allocating <strong>{card.source}</strong> down to{' '}
-                        <strong>{card.target}</strong>'s grain via{' '}
-                        <strong>{card.mapping}</strong>
-                        {card.method ? <> ({card.method.replace(/_/g, ' ')})</> : null}
-                      </>
-                    ) : draft.steps[i]?.operationType === 'rollup' ? (
-                      <>
-                        Rolling up <strong>{draft.steps[i].sourceFile}</strong> to{' '}
-                        <strong>{draft.steps[i].bridgeFile}</strong>'s grain via{' '}
-                        <code>{draft.steps[i].sourceKey}</code> &rarr; <code>{draft.steps[i].targetKey}</code>
-                      </>
-                    ) : draft.steps[i]?.operationType === 'allocate' ? (
-                      <>
-                        Allocating <strong>{draft.steps[i].higherGrainFile}</strong> down to{' '}
-                        <strong>{draft.steps[i].lowerGrainStructureFile}</strong>'s grain via{' '}
-                        <strong>{draft.steps[i].crosswalkFile}</strong>
-                      </>
-                    ) : (
-                      'Configured step'
+              {/* ---- Current Joins & Transformations ---- */}
+              <div className="current-joins-card">
+                <div className="current-joins-header">
+                  <p className="section-heading">
+                    Current Joins &amp; Enriched Columns
+                    {draft.joinCards.length > 0 && (
+                      <span className="heading-note" style={{ marginLeft: '0.6rem' }}>
+                        {(draft.finalRowCount ?? 0).toLocaleString()} rows · {draft.finalColumnCount ?? 0} columns
+                      </span>
                     )}
                   </p>
-                  <div className="join-summary-actions">
-                    <button className="preview-btn" onClick={() => handleCardPreview(i)}>
-                      {draft.activePreview?.cardIndex === i ? 'Hide Preview' : 'See Preview'}
-                    </button>
-                    <button className="edit-btn" onClick={() => openEditJoinModal(i)}>Edit</button>
-                    <button className="delete-btn" onClick={() => handleDeleteJoin(i)}>Delete</button>
+                  <button
+                    className="add-step-btn"
+                    onClick={openAddJoinModal}
+                    disabled={draft.selectedFiles.size === 0}
+                    title={draft.selectedFiles.size === 0 ? 'Select at least one source file above first' : undefined}
+                  >
+                    + Add Join
+                  </button>
+                </div>
+
+                {draft.pipelineError && (
+                  <div className="stitching-error-banner">
+                    <p className="error-title">{draft.pipelineError.title}</p>
+                    {draft.pipelineError.errors.map((e, i) => <p key={i}>{e.message}</p>)}
                   </div>
-                </div>
-              ))
-            )}
-          </div>
+                )}
 
-          {draft.selectedFiles.size === 0 && (
-            <p className="step-error-text">Select at least one source file above first.</p>
-          )}
-          {draft.generateError && (
-            <div className="stitching-error-banner">
-              <p className="error-title">{draft.generateError.title}</p>
-              {draft.generateError.errors.map((e, i) => <p key={i}>{e.message}</p>)}
-            </div>
-          )}
-
-          {/* ---- Preview, then the generate action beneath it ---- */}
-          <div className="stitch-result">
-            <div className="preview-panel">
-              {!shownPreview ? (
-                <div className="preview-placeholder">
-                  <p className="preview-placeholder-title">No Preview Yet</p>
-                  <p className="preview-placeholder-desc">
-                    Click <strong>See Preview</strong> on any join step above to see its result here.
+                {draft.joinCards.length === 0 ? (
+                  <p className="stitching-empty">
+                    {draft.selectedFiles.size === 0
+                      ? 'Select at least one source file above, then click "+ Add Join".'
+                      : 'No joins configured yet — click "+ Add Join" above to get started.'}
                   </p>
-                </div>
-              ) : (
-                <>
-                  {shownPreview.heading && (
-                    <p className={`preview-panel-heading${shownPreview.isGenerated ? ' is-generated' : ''}`}>
-                      {shownPreview.heading}
-                    </p>
-                  )}
-                  {shownPreview.isLoading && <p className="stitching-empty">Loading preview...</p>}
-                  {shownPreview.error && <p className="step-error-text">{shownPreview.error}</p>}
-                  {shownPreview.data && (
-                    <>
-                      <div className="sample-table-scroll">
-                        <table className="sample-table">
-                          <thead>
-                            <tr>{(shownPreview.data.columns || []).map((c) => <th key={c}>{c}</th>)}</tr>
-                          </thead>
-                          <tbody>
-                            {(shownPreview.data.preview || []).slice(0, 15).map((row, ri) => (
-                              <tr key={ri}>
-                                {(shownPreview.data.columns || []).map((c) => (
-                                  <td key={c}>{row[c] === null || row[c] === undefined ? '-' : row[c]}</td>
-                                ))}
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                ) : (
+                  draft.joinCards.map((card, i) => (
+                    <div
+                      key={i}
+                      className={`join-summary-card${draft.activePreview?.cardIndex === i ? ' active' : ''}${failedSteps.has(card.step) ? ' has-error' : ''}`}
+                    >
+                      <div className="join-summary-header">
+                        <span className="step-card-title">
+                          {(card.type || draft.steps[i]?.operationType) === 'carryover'
+                            ? `Step ${card.step} Carryover Column`
+                            : (card.type || draft.steps[i]?.operationType) === 'join'
+                            ? `Join ${card.step} ${JOIN_LABELS[card.join] || card.join}`
+                            : (card.type || draft.steps[i]?.operationType) === 'rollup'
+                            ? `Step ${card.step} Rollup (${(draft.steps[i]?.rollupMappingMethod === 'weighted_split' || card.mapping_method === 'weighted_split') ? 'Weighted Split' : 'Equal Split'})`
+                            : (card.type || draft.steps[i]?.operationType) === 'allocate'
+                            ? `Step ${card.step} Allocation`
+                            : `Step ${card.step} ${card.operation || ''}`}
+                        </span>
+                        <span className="join-summary-rows">
+                          {(card.rows_in ?? 0).toLocaleString()} → {' '}
+                          <span className={(card.rows_out ?? 0) < (card.rows_in ?? 0) ? 'rows-dropped' : ''}>{(card.rows_out ?? 0).toLocaleString()}</span> rows
+                        </span>
                       </div>
-                      <p className="sample-count-line">
-                        {(shownPreview.data.row_count ?? 0).toLocaleString()} rows · {(shownPreview.data.columns || []).length} columns
+                      <p className="join-summary-desc">
+                        {card.type === 'carryover' ? (
+                          <>
+                            Computing <code>{card.outputColumn || draft.steps[i]?.outputColumnName || 'carryover'}</code> = {card.decayRate || draft.steps[i]?.decayRate}&times;{card.metricColumn || draft.steps[i]?.metricColumn}(t-1) on <strong>{card.source || draft.steps[i]?.sourceFile}</strong> partitioned by <strong>{(card.entityKeys || draft.steps[i]?.entityKeys || []).join(', ')}</strong> sorted by <code>{card.timeKey || draft.steps[i]?.dateKey}</code>
+                          </>
+                        ) : card.type === 'join' ? (
+                          card.join === 'cross' ? (
+                            <>
+                              Every combination of <strong>{card.left}</strong> and{' '}
+                              <strong>{card.right}</strong>, no keys
+                            </>
+                          ) : (
+                            <>
+                              Joining <strong>{card.left}</strong> with{' '}
+                              <strong>{card.right}</strong> on{' '}
+                              {(card.keys || []).map((k, ki) => (
+                                <span key={k}>
+                                  {ki > 0 && ' + '}
+                                  <code>{k}</code>
+                                </span>
+                              ))}
+                            </>
+                          )
+                        ) : card.type === 'rollup' ? (
+                          <>
+                            Rolling up <strong>{card.source}</strong> via{' '}
+                            <strong>{card.mapping}</strong>
+                            {card.groupBy?.length ? (
+                              <>
+                                {' '}grouped by{' '}
+                                {card.groupBy.map((k, ki) => (
+                                  <span key={k}>{ki > 0 && ' + '}<code>{k}</code></span>
+                                ))}
+                              </>
+                            ) : null}
+                          </>
+                        ) : card.type === 'allocate' ? (
+                          <>
+                            Allocating <strong>{card.source}</strong> down to{' '}
+                            <strong>{card.target}</strong>'s grain via{' '}
+                            <strong>{card.mapping}</strong>
+                            {card.method ? <> ({card.method.replace(/_/g, ' ')})</> : null}
+                          </>
+                        ) : draft.steps[i]?.operationType === 'carryover' ? (
+                          <>
+                            Computing <code>{draft.steps[i]?.outputColumnName}</code> = {draft.steps[i]?.decayRate}&times;{draft.steps[i]?.metricColumn}(t-1)
+                          </>
+                        ) : (
+                          'Configured step'
+                        )}
                       </p>
+                      <div className="join-summary-actions">
+                        <button className="preview-btn" onClick={() => handleCardPreview(i)}>
+                          {draft.activePreview?.cardIndex === i ? 'Hide Preview' : 'See Preview'}
+                        </button>
+                        <button className="edit-btn" onClick={() => openEditJoinModal(i)}>Edit</button>
+                        <button className="delete-btn" onClick={() => handleDeleteJoin(i)}>Delete</button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              {draft.selectedFiles.size === 0 && (
+                <p className="step-error-text">Select at least one source file above first.</p>
+              )}
+              {draft.generateError && (
+                <div className="stitching-error-banner">
+                  <p className="error-title">{draft.generateError.title}</p>
+                  {draft.generateError.errors.map((e, i) => <p key={i}>{e.message}</p>)}
+                </div>
+              )}
+
+              {/* ---- Preview & Stitch Generation Actions ---- */}
+              <div className="stitch-result">
+                <div className="preview-panel">
+                  {!shownPreview ? (
+                    <div className="preview-placeholder">
+                      <p className="preview-placeholder-title">No Preview Yet</p>
+                      <p className="preview-placeholder-desc">
+                        Click <strong>See Preview</strong> on any join step above to see its result here.
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      {shownPreview.heading && (
+                        <p className={`preview-panel-heading${shownPreview.isGenerated ? ' is-generated' : ''}`}>
+                          {shownPreview.heading}
+                        </p>
+                      )}
+                      {shownPreview.isLoading && <p className="stitching-empty">Loading preview...</p>}
+                      {shownPreview.error && <p className="step-error-text">{shownPreview.error}</p>}
+                      {shownPreview.data && (
+                        <>
+                          <div className="sample-table-scroll">
+                            <table className="sample-table">
+                              <thead>
+                                <tr>{(shownPreview.data.columns || []).map((c) => <th key={c}>{c}</th>)}</tr>
+                              </thead>
+                              <tbody>
+                                {(shownPreview.data.preview || []).slice(0, 15).map((row, ri) => (
+                                  <tr key={ri}>
+                                    {(shownPreview.data.columns || []).map((c) => (
+                                      <td key={c}>{row[c] === null || row[c] === undefined ? '-' : row[c]}</td>
+                                    ))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                          <p className="sample-count-line">
+                            {(shownPreview.data.row_count ?? 0).toLocaleString()} rows · {(shownPreview.data.columns || []).length} columns
+                          </p>
+                        </>
+                      )}
                     </>
                   )}
-                </>
-              )}
-            </div>
+                </div>
 
-            <div className="stitch-generate-actions">
-              <div className="ard-name-field">
-                <label className="step-field-label" htmlFor="ard-name">
-                  Resulting ARD Dataset Name
-                </label>
-                <input
-                  id="ard-name"
-                  type="text"
-                  className="step-input"
-                  value={draft.ardName}
-                  onChange={(e) => setDraft({ ardName: e.target.value })}
-                  placeholder={defaultArdName}
-                />
+                <div className="stitch-generate-actions">
+                  <div className="ard-name-field">
+                    <label className="step-field-label" htmlFor="ard-name">
+                      Resulting ARD Dataset Name
+                    </label>
+                    <input
+                      id="ard-name"
+                      type="text"
+                      className="step-input"
+                      value={draft.ardName}
+                      onChange={(e) => setDraft({ ardName: e.target.value })}
+                      placeholder={defaultArdName}
+                    />
+                  </div>
+
+                  {/* ── Add Column (Carryover) Action ── */}
+                  <button
+                    type="button"
+                    className="add-carryover-btn"
+                    onClick={openCarryoverModal}
+                    title="Calculate lagged carryover partitioned per entity"
+                  >
+                    + Add Column (Carryover)
+                  </button>
+
+                  <button
+                    className="execute-btn"
+                    onClick={handleGenerate}
+                    disabled={draft.joinCards.length === 0 || draft.isGenerating}
+                    title={draft.joinCards.length === 0 ? 'Add at least one join first' : undefined}
+                  >
+                    {draft.isGenerating ? 'Generating...' : 'Generate Data Stitching'}
+                  </button>
+                </div>
               </div>
-              <button
-                className="execute-btn"
-                onClick={handleGenerate}
-                disabled={draft.joinCards.length === 0 || draft.isGenerating}
-                title={draft.joinCards.length === 0 ? 'Add at least one join first' : undefined}
-              >
-                {draft.isGenerating ? 'Generating...' : 'Generate Data Stitching'}
-              </button>
-            </div>
-          </div>
             </>
           )}
         </div>
@@ -1171,6 +1041,24 @@ function Datastitching() {
           onChange={handleModalStepChange}
           onDone={handleModalDone}
           onClose={() => setModal(null)}
+        />
+      )}
+
+      {carryoverModal && (
+        <CarryoverConfigModal
+          files={files}
+          savedArds={savedArds}
+          selectedFileList={selectedFileList}
+          ardLabel={ardLabel}
+          mode={carryoverModal.mode}
+          stepIndex={carryoverModal.stepIndex}
+          stepResultColumns={stepResultColumns}
+          step={carryoverModal.step}
+          error={carryoverModal.error}
+          isSaving={draft.isSavingPipeline}
+          onChange={handleCarryoverModalStepChange}
+          onDone={handleCarryoverDone}
+          onClose={() => setCarryoverModal(null)}
         />
       )}
 
@@ -1214,18 +1102,206 @@ function Datastitching() {
         </div>
       )}
 
-    <PageFooterNav currentStepId="data-stitching" />
-
+      <PageFooterNav currentStepId="data-stitching" />
     </div>
   );
 }
 
-// ─── Modal: configure exactly ONE join step (add or edit) ──────────────────
+// ─── Carryover Configuration Modal (Operates on Stitched ARDs) ──────────────
+function CarryoverConfigModal({ files, savedArds = [], selectedFileList, ardLabel, mode, stepIndex, stepResultColumns = {}, step, error, isSaving, onChange, onDone, onClose }) {
+  const columnsForDataset = (name) => {
+    const foundArd = savedArds.find((a) => a.filename === name);
+    if (foundArd && Array.isArray(foundArd.columns) && foundArd.columns.length) {
+      return foundArd.columns;
+    }
+    const dataset = files.find((f) => f.filename === name);
+    if (dataset && Array.isArray(dataset.columns)) return dataset.columns;
+    const fromStep = stepResultColumns[name];
+    return fromStep && fromStep.length ? fromStep : null;
+  };
+
+  const currentDatasetCols = columnsForDataset(step.sourceFile) || [];
+
+  const toggleEntityKey = (col) => {
+    const current = step.entityKeys || [];
+    const next = current.includes(col) ? current.filter((k) => k !== col) : [...current, col];
+    onChange({ entityKeys: next });
+  };
+
+  const metricChanged = (col) => {
+    const defaultOutput = col ? `carryover_${col}` : '';
+    onChange({ metricColumn: col, outputColumnName: step.outputColumnName || defaultOutput });
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="create-ard-modal carryover-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="create-ard-header">
+          <div>
+            <p className="create-ard-title">{mode === 'edit' ? 'Edit Carryover Column' : 'Add Column: Carryover'}</p>
+            <p className="create-ard-subtitle">Calculate lagged metric carryover partitioned per entity without cross-entity leakage ({ardLabel})</p>
+          </div>
+          <button className="create-ard-close-btn" onClick={onClose} aria-label="Close">✕</button>
+        </div>
+
+        <div className="create-ard-body">
+          <div className="step-card">
+            <div className="step-grid-2">
+              <div>
+                <p className="step-field-label">1. Source Dataset to Operate On (Stitched ARD Table)</p>
+                <select
+                  className="step-select"
+                  value={step.sourceFile}
+                  onChange={(e) => onChange({ sourceFile: e.target.value, metricColumn: '', dateKey: '', entityKeys: [] })}
+                >
+                  <option value="">Select Stitched ARD Table...</option>
+                  {savedArds.map((ard) => (
+                    <option key={ard.filename} value={ard.filename}>
+                      {ard.filename} ({ard.grain?.toUpperCase() || 'ARD'} &bull; {(ard.row_count ?? 0).toLocaleString()} rows)
+                    </option>
+                  ))}
+                  {savedArds.length === 0 && (
+                    <option value="" disabled>No saved ARDs found. Generate an ARD first.</option>
+                  )}
+                </select>
+              </div>
+              <div>
+                <p className="step-field-label">2. Time / Date Key (Chronologically Sorted)</p>
+                <select className="step-select" value={step.dateKey} onChange={(e) => onChange({ dateKey: e.target.value })}>
+                  <option value="">Select date column...</option>
+                  {currentDatasetCols.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+            </div>
+
+            <div style={{ marginBottom: '0.8rem' }}>
+              <p className="step-field-label">
+                3. Entity / Grain Key(s) &bull; Carryover never leaks across entities
+              </p>
+              <div className="carryover-pill-box">
+                {currentDatasetCols.length === 0 && (
+                  <span className="step-hint-text">Select a Stitched ARD Table above first.</span>
+                )}
+                {currentDatasetCols.map((col) => {
+                  const selected = (step.entityKeys || []).includes(col);
+                  return (
+                    <span
+                      key={col}
+                      className={`metric-pill${selected ? ' selected' : ''}`}
+                      onClick={() => toggleEntityKey(col)}
+                    >
+                      {selected ? '\u2713 ' : '+ '}{col}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="step-grid-2">
+              <div>
+                <p className="step-field-label">4. Sales / Metric Column</p>
+                <select className="step-select" value={step.metricColumn} onChange={(e) => metricChanged(e.target.value)}>
+                  <option value="">Select metric...</option>
+                  {currentDatasetCols.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+              <div>
+                <p className="step-field-label">5. Output Column Name</p>
+                <input
+                  type="text"
+                  className="step-input"
+                  value={step.outputColumnName}
+                  placeholder={`carryover_${step.metricColumn || 'sales'}`}
+                  onChange={(e) => onChange({ outputColumnName: e.target.value })}
+                />
+                <p className="step-hint-text" style={{ marginTop: '0.35rem', border: 'none', padding: 0 }}>
+                  Categorized as: <strong style={{ color: '#a8710d' }}>Baseline Variables</strong> (carried forward to future modules).
+                </p>
+              </div>
+            </div>
+
+            <hr style={{ border: 'none', borderTop: '1px solid var(--color-border-light)', margin: '1rem 0' }} />
+
+            <p className="step-field-label" style={{ fontWeight: 'var(--font-weight-bold)' }}>
+              6. Decay Rate (&lambda;) Configuration &bull; Simple Lag Method
+            </p>
+            <div className="step-grid-2" style={{ alignItems: 'center' }}>
+              <div>
+                <p className="step-field-label">Decay Rate (&lambda;) Method</p>
+                <select className="step-select" value={step.decayRateMethod || 'manual'} onChange={(e) => onChange({ decayRateMethod: e.target.value })}>
+                  <option value="manual">Manual Entry (Numeric &lambda;)</option>
+                </select>
+              </div>
+              <div>
+                <p className="step-field-label">Decay Value (&lambda; &in; [0, 1])</p>
+                <input
+                  type="number"
+                  step="0.05"
+                  min="0"
+                  max="1"
+                  className="step-input"
+                  value={step.decayRate}
+                  onChange={(e) => onChange({ decayRate: e.target.value })}
+                />
+              </div>
+            </div>
+            <p className="step-hint-text" style={{ marginTop: '0.4rem', border: 'none', padding: 0 }}>
+              Formula applied: <code>carryover(t) = {step.decayRate || 0.6} &times; {step.metricColumn || 'sales'}(t-1)</code>
+            </p>
+
+            <hr style={{ border: 'none', borderTop: '1px solid var(--color-border-light)', margin: '1rem 0' }} />
+
+            <p className="step-field-label" style={{ fontWeight: 'var(--font-weight-bold)' }}>
+              7. Edge Case Handling Rules
+            </p>
+            <div className="step-grid-2">
+              <div>
+                <p className="step-field-label">First-period value (per entity)</p>
+                <select className="step-select" value={step.firstPeriodValue || 'zero'} onChange={(e) => onChange({ firstPeriodValue: e.target.value })}>
+                  <option value="zero">Set to 0 (Standard MMx Default)</option>
+                  <option value="nan">Set to NaN / blank</option>
+                </select>
+              </div>
+              <div>
+                <p className="step-field-label">Time gap handling</p>
+                <select className="step-select" value={step.timeGapHandling || 'reset'} onChange={(e) => onChange({ timeGapHandling: e.target.value })}>
+                  <option value="reset">Reset carryover to 0 on time gap</option>
+                  <option value="continue">Carry through time gap anyway</option>
+                </select>
+              </div>
+            </div>
+            <div style={{ marginTop: '0.6rem' }}>
+              <p className="step-field-label">Negative / zero sales handling</p>
+              <select className="step-select" value={step.negativeHandling || 'floor_zero'} onChange={(e) => onChange({ negativeHandling: e.target.value })}>
+                <option value="floor_zero">Floor at 0 (Ignore negative returns/adjustments)</option>
+                <option value="allow_negative">Allow negative carryover values</option>
+              </select>
+            </div>
+            <p className="step-hint-text" style={{ marginTop: '0.6rem' }}>
+              ℹ️ <strong>New entity mid-series:</strong> Handled automatically. Transitions to new entities trigger the first-period rule, preventing carryover backfilling or bleeding across doctors/DMAs.
+            </p>
+          </div>
+
+          {error && (
+            <div className="stitching-error-banner">
+              <p className="error-title">{error}</p>
+            </div>
+          )}
+        </div>
+
+        <div className="modal-footer">
+          <button className="modal-btn" onClick={onClose} style={{ marginRight: '0.5rem' }}>Cancel</button>
+          <button className="modal-btn primary" onClick={onDone} disabled={isSaving}>
+            {isSaving ? 'Calculating...' : 'Done'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Modal: configure Join / Rollup / Allocate steps ────────────────────────
 function SingleJoinModal({ files, selectedFileList, ardLabel, mode, stepIndex, existingSteps, stepResultColumns = {}, step, error, isSaving, onChange, onDone, onClose }) {
-  // A real dataset first, then a previous step's result. Returns null only when
-  // neither is known yet - the first time a step is configured, before any dry
-  // run has reported what it produces - and the key field falls back to free
-  // text for that case rather than showing an empty dropdown.
   const columnsForDataset = (name) => {
     const dataset = files.find((f) => f.filename === name);
     if (dataset) return dataset.columns || null;
@@ -1233,13 +1309,10 @@ function SingleJoinModal({ files, selectedFileList, ardLabel, mode, stepIndex, e
     return fromStep && fromStep.length ? fromStep : null;
   };
 
-  // Exclude files already used by OTHER steps (not this one), so the same
-  // source file can't be picked twice across the pipeline. Prior steps'
-  // results are offered as chaining options.
   const usedFilenames = (side) => {
     const used = new Set();
     existingSteps.forEach((s, i) => {
-      if (i === stepIndex) return; // editing this step, so do not exclude its own current values
+      if (i === stepIndex) return;
       if (s.leftFile) used.add(s.leftFile);
       if (s.rightFile) used.add(s.rightFile);
     });
@@ -1253,9 +1326,6 @@ function SingleJoinModal({ files, selectedFileList, ardLabel, mode, stepIndex, e
     return [...available, ...priorResults];
   };
 
-  // Rollup/Allocate reference more dataset "slots" than left/right (source,
-  // bridge, higher-grain, lower-grain-structure, crosswalk) — no exclusion
-  // logic maps cleanly onto that, so this just offers everything selected.
   const allDatasetOptions = [
     ...selectedFileList.map((f) => f.filename),
     ...Array.from({ length: stepIndex }, (_, i) => `Step ${i + 1} Result`),
@@ -1273,8 +1343,6 @@ function SingleJoinModal({ files, selectedFileList, ardLabel, mode, stepIndex, e
   };
 
   const onAddKeyPair = () => {
-    // Suggest the next unused left column, and the same name on the right when
-    // it exists, so the common case needs no further clicks.
     const taken = keyPairs.map((p) => p.left);
     const nextLeft = (leftCols || []).find((c) => !taken.includes(c)) || '';
     const nextRight = (rightCols || []).find(
@@ -1284,7 +1352,7 @@ function SingleJoinModal({ files, selectedFileList, ardLabel, mode, stepIndex, e
   };
 
   const onRemoveKeyPair = (pairIndex) => {
-    if (keyPairs.length <= 1) return; // one pair is the minimum
+    if (keyPairs.length <= 1) return;
     onChange({ keyPairs: keyPairs.filter((_, i) => i !== pairIndex) });
   };
 
@@ -1322,100 +1390,97 @@ function SingleJoinModal({ files, selectedFileList, ardLabel, mode, stepIndex, e
 
             {step.operationType === 'join' && (
               <>
-            <div className="step-grid-2">
-              <div>
-                <p className="step-field-label">Left Dataset</p>
-                <select className="step-select" value={step.leftFile} onChange={(e) => onChange({ leftFile: e.target.value, keyPairs: [{ left: '', right: '' }] })}>
-                  <option value="">Select...</option>
-                  {datasetOptions('left').map((n) => <option key={n} value={n}>{n}</option>)}
-                </select>
-              </div>
-              <div>
-                <p className="step-field-label">Right Dataset</p>
-                <select className="step-select" value={step.rightFile} onChange={(e) => onChange({ rightFile: e.target.value, keyPairs: (step.keyPairs || []).map((p) => ({ ...p, right: '' })) })}>
-                  <option value="">Select...</option>
-                  {datasetOptions('right').map((n) => <option key={n} value={n}>{n}</option>)}
-                </select>
-              </div>
-            </div>
-
-            <div style={{ marginBottom: '0.6rem' }}>
-              <p className="step-field-label">Join Strategy</p>
-              <select className="step-select" value={step.joinType} onChange={(e) => onChange({ joinType: e.target.value })}>
-                {JOIN_TYPES.map((j) => <option key={j.value} value={j.value}>{j.label}</option>)}
-              </select>
-            </div>
-
-            {step.joinType === 'cross' ? (
-              <p className="step-hint-text">
-                A cross join pairs every left row with every right row, so it takes no keys.
-              </p>
-            ) : (
-              <>
-                {/* Keys are positional pairs: the Nth left key joins to the Nth
-                    right key. A date key is just another pair, so a crosswalk
-                    that joins on the ID alone simply has one. */}
-                {(step.keyPairs || []).map((pair, pairIndex) => (
-                  <div className="step-grid-2" key={pairIndex}>
-                    <div className="step-key-block">
-                      <p className="step-field-label">
-                        {pairIndex + 1}. Key {step.leftFile && `(${step.leftFile})`}
-                      </p>
-                      {leftCols ? (
-                        <select
-                          className="step-select"
-                          value={pair.left}
-                          onChange={(e) => onChangeKeyPair(pairIndex, { left: e.target.value })}
-                        >
-                          <option value="">Select column...</option>
-                          {leftCols.map((c) => <option key={c} value={c}>{c}</option>)}
-                        </select>
-                      ) : (
-                        <input
-                          type="text" className="step-input" placeholder="e.g. npi"
-                          value={pair.left}
-                          onChange={(e) => onChangeKeyPair(pairIndex, { left: e.target.value })}
-                        />
-                      )}
-                    </div>
-
-                    <div className="step-key-block">
-                      <p className="step-field-label">
-                        {pairIndex + 1}. Key {step.rightFile && `(${step.rightFile})`}
-                        {(step.keyPairs || []).length > 1 && (
-                          <button
-                            type="button"
-                            className="step-key-remove"
-                            onClick={() => onRemoveKeyPair(pairIndex)}
-                            aria-label={`Remove key pair ${pairIndex + 1}`}
-                          >&#10005;</button>
-                        )}
-                      </p>
-                      {rightCols ? (
-                        <select
-                          className="step-select"
-                          value={pair.right}
-                          onChange={(e) => onChangeKeyPair(pairIndex, { right: e.target.value })}
-                        >
-                          <option value="">Select column...</option>
-                          {rightCols.map((c) => <option key={c} value={c}>{c}</option>)}
-                        </select>
-                      ) : (
-                        <input
-                          type="text" className="step-input" placeholder="e.g. npi_id"
-                          value={pair.right}
-                          onChange={(e) => onChangeKeyPair(pairIndex, { right: e.target.value })}
-                        />
-                      )}
-                    </div>
+                <div className="step-grid-2">
+                  <div>
+                    <p className="step-field-label">Left Dataset</p>
+                    <select className="step-select" value={step.leftFile} onChange={(e) => onChange({ leftFile: e.target.value, keyPairs: [{ left: '', right: '' }] })}>
+                      <option value="">Select...</option>
+                      {datasetOptions('left').map((n) => <option key={n} value={n}>{n}</option>)}
+                    </select>
                   </div>
-                ))}
+                  <div>
+                    <p className="step-field-label">Right Dataset</p>
+                    <select className="step-select" value={step.rightFile} onChange={(e) => onChange({ rightFile: e.target.value, keyPairs: (step.keyPairs || []).map((p) => ({ ...p, right: '' })) })}>
+                      <option value="">Select...</option>
+                      {datasetOptions('right').map((n) => <option key={n} value={n}>{n}</option>)}
+                    </select>
+                  </div>
+                </div>
 
-                <button type="button" className="step-key-add" onClick={onAddKeyPair}>
-                  + Add key pair
-                </button>
-              </>
-            )}
+                <div style={{ marginBottom: '0.6rem' }}>
+                  <p className="step-field-label">Join Strategy</p>
+                  <select className="step-select" value={step.joinType} onChange={(e) => onChange({ joinType: e.target.value })}>
+                    {JOIN_TYPES.map((j) => <option key={j.value} value={j.value}>{j.label}</option>)}
+                  </select>
+                </div>
+
+                {step.joinType === 'cross' ? (
+                  <p className="step-hint-text">
+                    A cross join pairs every left row with every right row, so it takes no keys.
+                  </p>
+                ) : (
+                  <>
+                    {(step.keyPairs || []).map((pair, pairIndex) => (
+                      <div className="step-grid-2" key={pairIndex}>
+                        <div className="step-key-block">
+                          <p className="step-field-label">
+                            {pairIndex + 1}. Key {step.leftFile && `(${step.leftFile})`}
+                          </p>
+                          {leftCols ? (
+                            <select
+                              className="step-select"
+                              value={pair.left}
+                              onChange={(e) => onChangeKeyPair(pairIndex, { left: e.target.value })}
+                            >
+                              <option value="">Select column...</option>
+                              {leftCols.map((c) => <option key={c} value={c}>{c}</option>)}
+                            </select>
+                          ) : (
+                            <input
+                              type="text" className="step-input" placeholder="e.g. npi"
+                              value={pair.left}
+                              onChange={(e) => onChangeKeyPair(pairIndex, { left: e.target.value })}
+                            />
+                          )}
+                        </div>
+
+                        <div className="step-key-block">
+                          <p className="step-field-label">
+                            {pairIndex + 1}. Key {step.rightFile && `(${step.rightFile})`}
+                            {(step.keyPairs || []).length > 1 && (
+                              <button
+                                type="button"
+                                className="step-key-remove"
+                                onClick={() => onRemoveKeyPair(pairIndex)}
+                                aria-label={`Remove key pair ${pairIndex + 1}`}
+                              >&#10005;</button>
+                            )}
+                          </p>
+                          {rightCols ? (
+                            <select
+                              className="step-select"
+                              value={pair.right}
+                              onChange={(e) => onChangeKeyPair(pairIndex, { right: e.target.value })}
+                            >
+                              <option value="">Select column...</option>
+                              {rightCols.map((c) => <option key={c} value={c}>{c}</option>)}
+                            </select>
+                          ) : (
+                            <input
+                              type="text" className="step-input" placeholder="e.g. npi_id"
+                              value={pair.right}
+                              onChange={(e) => onChangeKeyPair(pairIndex, { right: e.target.value })}
+                            />
+                          )}
+                        </div>
+                      </div>
+                    ))}
+
+                    <button type="button" className="step-key-add" onClick={onAddKeyPair}>
+                      + Add key pair
+                    </button>
+                  </>
+                )}
               </>
             )}
 
@@ -1438,11 +1503,91 @@ function SingleJoinModal({ files, selectedFileList, ardLabel, mode, stepIndex, e
                   </div>
                 </div>
 
+                <div style={{ marginBottom: '0.8rem', padding: '0.7rem', backgroundColor: '#f7f9fc', borderRadius: 'var(--radius-sm)', border: '1px solid var(--color-border-light)' }}>
+                  <p className="step-field-label" style={{ fontWeight: 'var(--font-weight-bold)' }}>
+                    Mapping Method (for multi-mapped records)
+                  </p>
+                  <select
+                    className="step-select"
+                    value={step.rollupMappingMethod || 'equal_split'}
+                    onChange={(e) => onChange({ rollupMappingMethod: e.target.value })}
+                  >
+                    <option value="equal_split">Equal Distribution (1/n per target)</option>
+                    <option value="weighted_split">Weighted Distribution (via Weight File)</option>
+                  </select>
+                  <p className="step-hint-text" style={{ marginTop: '0.35rem', border: 'none', padding: 0, backgroundColor: 'transparent' }}>
+                    Applies only when a record in the Source dataset maps to more than one Target grain value (e.g. one HCP mapped to multiple DMAs). Choose how to split metrics across these ambiguous mappings.
+                  </p>
+
+                  {step.rollupMappingMethod === 'equal_split' && (
+                    <div style={{ marginTop: '0.5rem', padding: '0.4rem 0.6rem', backgroundColor: '#eef1ff', borderRadius: '4px', fontSize: '0.75rem', color: '#1e3a8a' }}>
+                      ℹ️ Each mapped Target (e.g. DMA) will receive an equal 1/n share of the record's metrics, where n = number of targets the record maps to.
+                    </div>
+                  )}
+
+                  {step.rollupMappingMethod === 'weighted_split' && (
+                    <div style={{ marginTop: '0.6rem', display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                      <div className="step-grid-2">
+                        <div>
+                          <p className="step-field-label">Weight Source File</p>
+                          <select
+                            className="step-select"
+                            value={step.weightFile}
+                            onChange={(e) => onChange({ weightFile: e.target.value, weightMatchKey: '', weightColumn: '' })}
+                          >
+                            <option value="">Select Weight dataset...</option>
+                            {allDatasetOptions.map((n) => <option key={n} value={n}>{n}</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <p className="step-field-label">If record has no matching weight, apply:</p>
+                          <select
+                            className="step-select"
+                            value={step.weightFallback || 'equal_split'}
+                            onChange={(e) => onChange({ weightFallback: e.target.value })}
+                          >
+                            <option value="equal_split">Equal split among its mapped targets</option>
+                            <option value="exclude">Exclude from rollup (drop record)</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      {(() => {
+                        const wCols = columnsForDataset(step.weightFile);
+                        return (
+                          <div className="step-grid-2">
+                            <div>
+                              <p className="step-field-label">Weight Match Key (e.g. npi_id)</p>
+                              {wCols ? (
+                                <select className="step-select" value={step.weightMatchKey} onChange={(e) => onChange({ weightMatchKey: e.target.value })}>
+                                  <option value="">Select match key...</option>
+                                  {wCols.map((c) => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                              ) : (
+                                <input type="text" className="step-input" placeholder="e.g. npi_id" value={step.weightMatchKey} onChange={(e) => onChange({ weightMatchKey: e.target.value })} />
+                              )}
+                            </div>
+                            <div>
+                              <p className="step-field-label">Weight Value Column (e.g. split_pct, weight)</p>
+                              {wCols ? (
+                                <select className="step-select" value={step.weightColumn} onChange={(e) => onChange({ weightColumn: e.target.value })}>
+                                  <option value="">Select weight column...</option>
+                                  {wCols.map((c) => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                              ) : (
+                                <input type="text" className="step-input" placeholder="e.g. split_pct" value={step.weightColumn} onChange={(e) => onChange({ weightColumn: e.target.value })} />
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+                </div>
+
                 {(() => {
                   const sourceCols = columnsForDataset(step.sourceFile);
                   const bridgeCols = columnsForDataset(step.bridgeFile);
-                  // The target key is excluded too: after the bridge merge it
-                  // is a group-by column, not something to aggregate.
                   const aggregatableCols = (sourceCols || []).filter(
                     (c) => ![step.sourceKey, step.dateKey, step.targetKey].includes(c)
                       && isMetricColumn(c)
@@ -1475,11 +1620,6 @@ function SingleJoinModal({ files, selectedFileList, ardLabel, mode, stepIndex, e
                         Group-By Aggregation Rules (Promotional &amp; Sales Metrics)
                         <span className="step-hint-text" style={{ float: 'right' }}>Default: Sum (Conserved)</span>
                       </p>
-                      {/* Metrics only, and never a column the rollup groups
-                          BY. This used to list every source column except the
-                          source and date keys, so IDs, geography and the
-                          target grain column all appeared, each badged
-                          "Metric" and offered an aggregation. */}
                       {aggregatableCols.length === 0 && (
                         <p className="step-hint-text">
                           {sourceCols && sourceCols.length
@@ -1529,6 +1669,8 @@ function SingleJoinModal({ files, selectedFileList, ardLabel, mode, stepIndex, e
                 {(() => {
                   const higherCols = columnsForDataset(step.higherGrainFile);
                   const lowerCols = columnsForDataset(step.lowerGrainStructureFile);
+                  const crosswalkCols = columnsForDataset(step.crosswalkFile);
+
                   const keyField = (label, field, cols, placeholder) => (
                     <div className="step-key-block">
                       <p className="step-field-label">{label}</p>
@@ -1542,30 +1684,46 @@ function SingleJoinModal({ files, selectedFileList, ardLabel, mode, stepIndex, e
                       )}
                     </div>
                   );
+
                   return (
                     <>
                       <div className="step-grid-2">
-                        {keyField('Source Grain Key (e.g. DMA)', 'sourceGrainKey', higherCols, 'e.g. dma_code')}
-                        {keyField('Target Grain Key (e.g. NPI)', 'targetGrainKey', lowerCols, 'e.g. npi_id')}
+                        {keyField('Source Grain Key (e.g. DMA in Higher Grain File)', 'sourceGrainKey', higherCols, 'e.g. dma_code')}
+                        {keyField('Target Grain Key (e.g. NPI in Structure File)', 'targetGrainKey', lowerCols, 'e.g. npi_id')}
                       </div>
+
                       <div className="step-grid-2">
-                        {keyField('Time / Date Key', 'dateKey', higherCols, 'e.g. month_start_date')}
                         <div>
                           <p className="step-field-label">Crosswalk Mapping Dataset</p>
-                          <select className="step-select" value={step.crosswalkFile} onChange={(e) => onChange({ crosswalkFile: e.target.value })}>
-                            <option value="">Select...</option>
+                          <select className="step-select" value={step.crosswalkFile} onChange={(e) => onChange({ crosswalkFile: e.target.value, crosswalkMatchKey: '' })}>
+                            <option value="">Select Crosswalk file...</option>
                             {allDatasetOptions.map((n) => <option key={n} value={n}>{n}</option>)}
+                          </select>
+                        </div>
+                        <div>
+                          <p className="step-field-label">Crosswalk Match Key (↔ Source Grain Key)</p>
+                          <select
+                            className="step-select"
+                            value={step.crosswalkMatchKey}
+                            disabled={!step.crosswalkFile || !crosswalkCols}
+                            onChange={(e) => onChange({ crosswalkMatchKey: e.target.value })}
+                          >
+                            <option value="">{step.crosswalkFile ? 'Select column in Crosswalk...' : 'Pick Crosswalk Dataset first'}</option>
+                            {(crosswalkCols || []).map((c) => <option key={c} value={c}>{c}</option>)}
                           </select>
                         </div>
                       </div>
 
-                      <div style={{ marginBottom: '0.6rem' }}>
-                        <p className="step-field-label">Allocation Method</p>
-                        <select className="step-select" value={step.allocationMethod} onChange={(e) => onChange({ allocationMethod: e.target.value })}>
-                          <option value="equal">Equal Distribution (1/N per target)</option>
-                          <option value="weighted_column">Population-Weighted Distribution</option>
-                          <option value="proportional">Proportional (by target volume)</option>
-                        </select>
+                      <div className="step-grid-2">
+                        {keyField('Time / Date Key', 'dateKey', higherCols, 'e.g. month_start_date')}
+                        <div>
+                          <p className="step-field-label">Allocation Method</p>
+                          <select className="step-select" value={step.allocationMethod} onChange={(e) => onChange({ allocationMethod: e.target.value })}>
+                            <option value="equal">Equal Distribution (1/N per target)</option>
+                            <option value="weighted_column">Population-Weighted Distribution</option>
+                            <option value="proportional">Proportional (by target volume)</option>
+                          </select>
+                        </div>
                       </div>
 
                       {step.allocationMethod === 'weighted_column' && (() => {
