@@ -1,6 +1,7 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { v2ListFiles, v2BuildArd, v2ListArds, v2GetCsv, deleteFile, problemMessage, ensureWorkflow } from '../../services/api.js';
 import { forgetFile, loadScreenState, recordStage, saveScreenState } from '../../services/workflowState.js';
+import { rolesFor, rolesFromDatasets } from '../../services/columnRoles.js';
 import GranularityPanel from '../../components/Granularity/GranularityPanel.jsx';
 import './Datastitching.css';
 import PageFooterNav from '../../components/PageFooterNav/PageFooterNav.jsx';
@@ -139,6 +140,11 @@ function Datastitching() {
   const targetGrain = 'hcp';
   const ardLabel = activeTab?.title || 'this ARD';
 
+  // Read all column roles declared during Data Ingestion
+  const declaredRoles = useMemo(() => {
+    return rolesFromDatasets(files.concat(savedArds));
+  }, [files, savedArds]);
+
   const persistableState = () => ({
     activeTabId,
     tabs: tabs.map(({ id, title, grain, removable }) => ({ id, title, grain, removable })),
@@ -221,7 +227,7 @@ function Datastitching() {
       setWorkflowId(id);
       const filesData = await v2ListFiles(id);
       if (isCancelled()) return;
-      setFiles((filesData.items || []).filter((f) => f.kind !== 'ard'));
+      setFiles((filesData?.items || []).filter((f) => f.kind !== 'ard'));
 
       loadArdList(id);
 
@@ -231,10 +237,8 @@ function Datastitching() {
     } catch (err) {
       if (!isCancelled()) setLoadError(problemMessage(err, 'Could not load this workflow.'));
     } finally {
-      if (!isCancelled()) {
-        hasRestored.current = true;
-        setIsLoading(false);
-      }
+      hasRestored.current = true;
+      setIsLoading(false);
     }
   };
 
@@ -341,7 +345,7 @@ function Datastitching() {
   const validateStep = (step) => {
     if (step.operationType === 'carryover') {
       if (!step.sourceFile) return 'Select a Stitched ARD Table as the Source Dataset.';
-      if (!step.metricColumn) return 'Select a Sales / Metric Column to compute carryover from.';
+      if (!step.metricColumn) return 'Select a Sales Column to compute carryover from.';
       if (!step.dateKey) return 'Select a Time / Date Key.';
       if (!(step.entityKeys || []).length) return 'Select at least one Entity / Grain Key.';
       if (step.decayRate === '' || Number.isNaN(Number(step.decayRate))) return 'Enter a valid Decay Rate.';
@@ -408,7 +412,7 @@ function Datastitching() {
   const defaultArdName = `${slugify(activeTab?.title) || 'ard'}.csv`;
 
   const payloadFor = (steps) => ({
-    steps: steps.map((s, sIdx) => {
+    steps: steps.map((s) => {
       if (s.operationType === 'carryover') {
         const metric = s.metricColumn || 'sales';
         return {
@@ -1048,6 +1052,7 @@ function Datastitching() {
         <CarryoverConfigModal
           files={files}
           savedArds={savedArds}
+          declaredRoles={declaredRoles}
           selectedFileList={selectedFileList}
           ardLabel={ardLabel}
           mode={carryoverModal.mode}
@@ -1108,7 +1113,22 @@ function Datastitching() {
 }
 
 // ─── Carryover Configuration Modal (Operates on Stitched ARDs) ──────────────
-function CarryoverConfigModal({ files, savedArds = [], selectedFileList, ardLabel, mode, stepIndex, stepResultColumns = {}, step, error, isSaving, onChange, onDone, onClose }) {
+function CarryoverConfigModal({
+  files,
+  savedArds = [],
+  declaredRoles = {},
+  selectedFileList,
+  ardLabel,
+  mode,
+  stepIndex,
+  stepResultColumns = {},
+  step,
+  error,
+  isSaving,
+  onChange,
+  onDone,
+  onClose,
+}) {
   const columnsForDataset = (name) => {
     const foundArd = savedArds.find((a) => a.filename === name);
     if (foundArd && Array.isArray(foundArd.columns) && foundArd.columns.length) {
@@ -1121,6 +1141,13 @@ function CarryoverConfigModal({ files, savedArds = [], selectedFileList, ardLabe
   };
 
   const currentDatasetCols = columnsForDataset(step.sourceFile) || [];
+
+  // Strictly filter to columns classified as "Dependent Variable" (Sales KPI) during Data Ingestion
+  const salesOnlyCols = useMemo(() => {
+    const allRoles = rolesFor(currentDatasetCols, declaredRoles);
+    const matched = currentDatasetCols.filter((col) => allRoles[col] === 'Dependent Variable');
+    return matched.length > 0 ? matched : currentDatasetCols.filter((c) => isMetricColumn(c));
+  }, [currentDatasetCols, declaredRoles]);
 
   const toggleEntityKey = (col) => {
     const current = step.entityKeys || [];
@@ -1151,7 +1178,7 @@ function CarryoverConfigModal({ files, savedArds = [], selectedFileList, ardLabe
                 <p className="step-field-label">1. Source Dataset to Operate On (Stitched ARD Table)</p>
                 <select
                   className="step-select"
-                  value={step.sourceFile}
+                  value={step.sourceFile || ''}
                   onChange={(e) => onChange({ sourceFile: e.target.value, metricColumn: '', dateKey: '', entityKeys: [] })}
                 >
                   <option value="">Select Stitched ARD Table...</option>
@@ -1167,7 +1194,7 @@ function CarryoverConfigModal({ files, savedArds = [], selectedFileList, ardLabe
               </div>
               <div>
                 <p className="step-field-label">2. Time / Date Key (Chronologically Sorted)</p>
-                <select className="step-select" value={step.dateKey} onChange={(e) => onChange({ dateKey: e.target.value })}>
+                <select className="step-select" value={step.dateKey || ''} onChange={(e) => onChange({ dateKey: e.target.value })}>
                   <option value="">Select date column...</option>
                   {currentDatasetCols.map((c) => <option key={c} value={c}>{c}</option>)}
                 </select>
@@ -1199,18 +1226,29 @@ function CarryoverConfigModal({ files, savedArds = [], selectedFileList, ardLabe
 
             <div className="step-grid-2">
               <div>
-                <p className="step-field-label">4. Sales / Metric Column</p>
-                <select className="step-select" value={step.metricColumn} onChange={(e) => metricChanged(e.target.value)}>
-                  <option value="">Select metric...</option>
-                  {currentDatasetCols.map((c) => <option key={c} value={c}>{c}</option>)}
+                <p className="step-field-label">4. Sales Column (Classified in Data Ingestion)</p>
+                <select
+                  className="step-select"
+                  value={step.metricColumn || ''}
+                  onChange={(e) => metricChanged(e.target.value)}
+                >
+                  <option value="">Select sales column...</option>
+                  {salesOnlyCols.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
                 </select>
+                {salesOnlyCols.length === 0 && currentDatasetCols.length > 0 && (
+                  <p className="step-hint-text" style={{ color: '#c0392b', marginTop: '0.3rem', border: 'none', padding: 0 }}>
+                    No column in this dataset was categorized as "Dependent Variable (Sales KPI)" during Data Ingestion.
+                  </p>
+                )}
               </div>
               <div>
                 <p className="step-field-label">5. Output Column Name</p>
                 <input
                   type="text"
                   className="step-input"
-                  value={step.outputColumnName}
+                  value={step.outputColumnName || ''}
                   placeholder={`carryover_${step.metricColumn || 'sales'}`}
                   onChange={(e) => onChange({ outputColumnName: e.target.value })}
                 />
@@ -1240,7 +1278,7 @@ function CarryoverConfigModal({ files, savedArds = [], selectedFileList, ardLabe
                   min="0"
                   max="1"
                   className="step-input"
-                  value={step.decayRate}
+                  value={step.decayRate ?? 0.6}
                   onChange={(e) => onChange({ decayRate: e.target.value })}
                 />
               </div>
@@ -1795,3 +1833,5 @@ function SingleJoinModal({ files, selectedFileList, ardLabel, mode, stepIndex, e
 }
 
 export default Datastitching;
+
+

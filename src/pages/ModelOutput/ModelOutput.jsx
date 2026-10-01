@@ -515,7 +515,7 @@ function ModelOutput() {
     };
   }, [currentCurve, deepDive, responseChannel]);
 
-  // ── Benchmarks ────────────────────────────────────────────────────────────
+// ── Benchmarks ────────────────────────────────────────────────────────────
   const [diseaseArea, setDiseaseArea] = useState('');
   const [maturityStage, setMaturityStage] = useState('');
   const [marketingDynamic, setMarketingDynamic] = useState('');
@@ -544,6 +544,7 @@ function ModelOutput() {
     access: [12, 19], hcp_npp: [5, 10], consumer_npp: [6, 12],
   };
   const statusForRange = (value, [min, max]) => (value < min ? 'Below Benchmark' : value > max ? 'Above Benchmark' : 'Within Benchmark');
+
   const buildFallbackBenchmark = () => {
     const shares = userImpactShares || { baseline: 0, salesforce: 0, hcp_pp: 0, access: 0, hcp_npp: 0, consumer_npp: 0 };
     return {
@@ -564,9 +565,9 @@ function ModelOutput() {
         return {
           channel: d.variable,
           category: BENCHMARK_TIER_LABELS[classifyBenchmarkTier(d.variable)],
-          yours: formatRoi(d.roi),
+          yours: d.roi > 10.0 ? '>10x' : formatRoi(d.roi),
           benchmark: formatRoi(benchVal),
-          status: delta >= 0.2 ? 'Above Benchmark' : delta >= -0.2 ? 'Near Benchmark' : 'Below Benchmark',
+          status: delta > 0.2 ? 'Above Benchmark' : delta >= -0.2 ? 'Within Benchmark' : 'Below Benchmark',
         };
       }),
     };
@@ -1096,24 +1097,35 @@ function ModelOutput() {
                               </tbody>
                             </table>
 
-                            <p className="benchmark-subheading">2. Channel-Level ROI vs. Industry Peer Benchmarks:</p>
-                            <table className="benchmark-table-lg">
-                              <thead><tr><th>Channel</th><th>Category</th><th>Your Dollar ROI</th><th>Peer Benchmark Range</th><th>Status</th></tr></thead>
-                              <tbody>
-                                {(benchmarkResult.channel_benchmarks || []).map((row, i) => {
-                                  const status = parseStatus(row.status);
-                                  return (
-                                    <tr key={i}>
-                                      <td>{row.channel}</td>
-                                      <td>{row.category}</td>
-                                      <td>{row.yours}</td>
-                                      <td>{row.benchmark}</td>
-                                      <td className={`status-cell-lg ${status.tone}`}>{status.text}</td>
-                                    </tr>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
+<p className="benchmark-subheading">2. Channel-Level ROI vs. Industry Peer Benchmarks:</p>
+<table className="benchmark-table-lg">
+  <thead>
+    <tr>
+      <th>Channel</th>
+      <th>Category</th>
+      <th>Your Dollar ROI</th>
+      <th>Peer Benchmark Range</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    {(benchmarkResult.channel_benchmarks || []).map((row, i) => {
+      const status = parseStatus(row.status);
+      const rawNum = parseFloat(String(row.yours).replace(/[^0-9.-]/g, ''));
+      const displayYours = rawNum > 10.0 || String(row.yours).includes('>10') ? '>10x' : row.yours;
+
+      return (
+        <tr key={i}>
+          <td>{row.channel}</td>
+          <td>{row.category}</td>
+          <td>{displayYours}</td>
+          <td>{row.benchmark}</td>
+          <td className={`status-cell-lg ${status.tone}`}>{status.text}</td>
+        </tr>
+      );
+    })}
+  </tbody>
+</table>
                           </>
                         )}
                       </>

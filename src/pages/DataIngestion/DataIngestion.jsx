@@ -60,9 +60,6 @@ import {
 import { nullPctColor } from '../../services/nullscale.js';
 import './DataIngestion.css';
 
-// ─── Category model ──────────────────────────────────────────────────────
-// Each category carries its expected grain, a description shown once
-// selected, and whether it's required before the workflow can proceed.
 export const FILE_CATEGORIES = [
   {
     id: 'sales',
@@ -92,20 +89,13 @@ export const FILE_CATEGORIES = [
     desc: 'Crosswalk bridge between HCP IDs ZIPs and DMA IDs',
     required: false,
   },
-  // {
-  //   id: 'dma_pop',
-  //   label: 'DMA Population File',
-  //   grain: 'DMA Grain',
-  //   desc: 'DMA target population or universe sizing',
-  //   required: false,
-  // },
   {
-  id: 'other',
-  label: 'Other Misceleneous Files',
-  grain: 'Varies',
-  desc: 'Supplementary or reference data that doesn\'t fit the standard categories above.',
-  required: false,
-},
+    id: 'other',
+    label: 'Other Misceleneous Files',
+    grain: 'Varies',
+    desc: 'Supplementary or reference data that doesn\'t fit the standard categories above.',
+    required: false,
+  },
 ];
 
 export const PROMO_SUB_TIERS = [
@@ -127,33 +117,16 @@ const DATA_TYPE_OPTIONS = [
   { value: 'date', label: 'Date' },
 ];
 
-// `value` is the strftime pattern the API needs; `label` is what the user sees.
 const DATE_FORMATS = [
   { value: '%d/%m/%Y', label: 'DD/MM/YYYY (24/05/2026)' },
   { value: '%m/%d/%Y', label: 'MM/DD/YYYY (05/24/2026)' },
   { value: '%Y-%m-%d', label: 'YYYY-MM-DD (2026-05-24)' },
-  // For a column that has no day in it. Rewriting "2023-01" as "01/01/2023"
-  // invents a day the file never had.
   { value: '%Y-%m', label: 'YYYY-MM (2026-05) - month grain' },
 ];
 
-/** A source format with no day in it, so its target must not invent one. */
 const isMonthGrainFormat = (fmt) => /^%Y[-/]%m$/.test(fmt || '');
-
-
-// Granularity left this screen for Data Stitching, where it belongs: a rollup
-// exists so two files can be joined on a date, and that is only apparent with
-// both files in view. The manifest field itself is untouched - see
-// `buildGranularity`, which still reproduces whatever rollup a file already
-// carries, so applying a change here cannot quietly undo one configured there.
 const TAB_ORDER = ['mapping', 'standardize', 'filter', 'review'];
 
-/**
- * Has this dataset ever been applied?
- *
- * A freshly uploaded file carries an empty spec. Anything in `live_updates`,
- * `filters` or `granularity` means someone configured it and pressed Apply.
- */
 function hasCommittedSpec(dataset) {
   const spec = dataset?.spec || {};
   const lu = spec.live_updates || {};
@@ -167,20 +140,6 @@ function hasCommittedSpec(dataset) {
   );
 }
 
-// Nothing guesses a category from the filename any more. A guess made from a
-// substring was wrong often enough to matter - "sample" matched hcp_promo,
-// "dma" plus "spend" matched dma_promo - and because the guess was written
-// straight into the file's category it rode into the manifest as though
-// someone had chosen it. A file now carries a category only when one was
-// genuinely committed to its spec.
-
-// ─── Control totals ribbon ────────────────────────────────────────────────
-// Collapsed it answers "is this the file I think it is?" - row count and
-// duplicates. Expanded it answers "can I trust these columns?" - null share
-// per column, which is the thing that actually sinks a model downstream.
-
-// Rows past this many scroll rather than pushing the preview table off screen.
-const NULL_ROWS_BEFORE_SCROLL = 5;
 function ControlTotalsRibbon({ stats }) {
   const { data, isLoading, error } = stats || {};
   const rowCount = data?.row_count ?? 0;
@@ -204,8 +163,6 @@ function ControlTotalsRibbon({ stats }) {
           </span>
         </span>
         <span className="control-totals-toggle">
-          {/* Full per-column detail now lives on the Data Review tab - this
-              bar just confirms row count/duplicates at a glance. */}
           {error ? 'Unavailable' : isLoading ? 'Loading…' : 'See Data Review tab for full column detail'}
         </span>
       </div>
@@ -215,23 +172,6 @@ function ControlTotalsRibbon({ stats }) {
   );
 }
 
-// ─── Filter: one column at a time, control chosen by that column's type ───
-// The type comes from /stats, which reads it off the committed manifest. A
-// column the user has not typed yet is a string, and gets the value picker -
-// which is the honest default, since an unconfirmed profile guess is not a
-// fact about the data.
-
-// ─── Summary stats helpers ──────────────────────────────────────────────────
-// Builds per-column summary rows from real fields confirmed on this project:
-//   /profile → column, non_null, null_count, unique_count, suggested_dtype, id_like
-//   /stats   → column, null_pct, control_total, (min/max if present)
-// mean/median/std_dev/p75/p95 do not exist anywhere yet - shown as "-" until
-// the backend adds them.
-/**
- * One summary cell. Numbers get thousands separators; date bounds arrive as
- * ISO strings and pass through as they are; a column with no such statistic
- * reads "NA" rather than an empty cell that looks like a loading state.
- */
 function num(value) {
   if (value === null || value === undefined) return 'NA';
   return typeof value === 'number' ? value.toLocaleString() : String(value);
@@ -245,10 +185,6 @@ function buildSummaryRows(file, statsFor) {
 
     const dtype = p.suggested_dtype || 'string';
     const isDate = dtype === 'date' || statEntry.kind === 'date';
-    // `numeric` is what /stats determined by reading the values, which is the
-    // better signal than the upload-time guess: a column nobody has typed yet
-    // still has a sum and a mean, and would otherwise sit under "Dimension"
-    // with a control total beside it.
     const isMetric = !p.id_like && !isDate
       && (dtype === 'integer' || dtype === 'float' || statEntry.numeric === true);
     const role = p.id_like ? 'Dimension' : isDate ? 'Date' : isMetric ? 'Metric' : 'Dimension';
@@ -258,9 +194,6 @@ function buildSummaryRows(file, statsFor) {
       role,
       distinct: statEntry.distinct_count ?? p.unique_count ?? null,
       controlTotal: statEntry.control_total ?? null,
-      // Share of rows that are NON-ZERO, not non-null - the same definition the
-      // Data Review sparsity panel uses. A tactic present but zero for fifty
-      // weeks is sparse, and non-null would report it as perfectly healthy.
       activePct: statEntry.active_pct ?? null,
       mean: statEntry.mean ?? null,
       median: statEntry.median ?? null,
@@ -274,42 +207,20 @@ function buildSummaryRows(file, statsFor) {
   });
 }
 
-// ─── Time Trends (Data Review tab) ──────────────────────────────────────────
-// Rolled up from the file's COMPLETE content, fetched once per file through
-// GET /v2/workflows/{id}/files/{name}/csv - the same endpoint the Data Review
-// page uses for an ARD. It works for an upload too, and returns the resolved
-// frame, so renames, drops and filters are already applied to what arrives.
-//
-// This used to chart `file.previewRows`, the first hundred rows, and say so.
-// A hundred rows of a weekly file is under two years for one geography: the
-// shape was whatever the top of the CSV happened to hold.
-//
-// Because the frame is resolved, its column names are the RENAMED ones. The
-// pills still show the original names, as the rest of this screen does, so
-// every row lookup goes through `renamedName`.
-// The rollup itself lives in services/trendRollup.js so it can be checked
-// directly - see trendrollup.check.mjs.
-
 function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, selectedMetrics, setSelectedMetrics, xAxisKey, setXAxisKey, startDate, setStartDate, endDate, setEndDate }) {
   const previewRows = file.previewRows || [];
-  const [fullRows, setFullRows] = useState(null); // null until the fetch lands
+  const [fullRows, setFullRows] = useState(null);
   const [isLoadingFull, setIsLoadingFull] = useState(false);
   const [fullError, setFullError] = useState(null);
 
-  // Column names as they exist in the fetched frame.
   const derived = (col) => renamedName(file, col);
 
-  // Anything that changes the resolved frame changes this, so the rollup is
-  // refetched: a different file, a filter that drops rows, a rename or a drop
-  // that changes the columns.
   const frameSignature = `${file.filename}|${file.totalRows || 0}|`
     + `${(file.previewColumns || []).join(',')}`;
 
   useEffect(() => {
     if (!file.workflowId || !file.filename) return undefined;
     let cancelled = false;
-    // Inside the async body, not the effect's: setting state straight out of
-    // an effect is a cascading render, and the linter says so.
     const load = async () => {
       setIsLoadingFull(true);
       setFullError(null);
@@ -318,9 +229,6 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
     load()
       .then((text) => {
         if (cancelled) return;
-        // `dynamicTyping` is off on purpose: it turns an ID like 0123 into 123
-        // and a date into a Date object, and every consumer below wants the
-        // text as written.
         const parsed = Papa.parse(String(text || '').trim(), {
           header: true, skipEmptyLines: true,
         });
@@ -328,8 +236,6 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
       })
       .catch((err) => {
         if (cancelled) return;
-        // The preview rows are still there, so the chart falls back to them
-        // rather than disappearing - but it says which it is drawing.
         setFullRows(null);
         setFullError(problemMessage(err, 'Could not load the full file.'));
       })
@@ -341,14 +247,6 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
   const usingFullFile = Array.isArray(fullRows);
   const sourceRows = usingFullFile ? fullRows : previewRows;
 
-  // X axis is date columns only. Plotting a total against a geography or a
-  // product code produced a line joining categories in alphabetical order,
-  // which looks like a trend and is not one.
-  //
-  // "Date" means the column is typed as one, or /stats read it as one. Name
-  // matching is a fallback for a file nobody has typed yet, where it is the
-  // only signal available - it is not consulted when a real date column
-  // exists, so a `week_number` integer cannot displace one.
   const dateColumns = useMemo(() => {
     const statsByColumn = Object.fromEntries((statsFor?.data?.columns || []).map((c) => [c.column, c]));
     const all = (file.profile || []).map((p) => p.column);
@@ -362,17 +260,11 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [file, statsFor]);
 
-  // A stored choice that is no longer a date column - the user retyped it, or
-  // it came from a saved state written before this was restricted - must not
-  // strand the chart on a column that is not offered any more.
   const effectiveXAxis = (xAxisKey && dateColumns.includes(xAxisKey))
     ? xAxisKey
     : (dateColumns[0] || '');
   const xAxisIsDateLike = Boolean(effectiveXAxis);
 
-  // Bounds across every row, so the pickers span the file rather than the
-  // first hundred rows of it. Normalised, because a DD/MM/YYYY column sorted
-  // as text puts the 1st of every month first.
   const availableDateBounds = useMemo(() => {
     if (!xAxisIsDateLike) return null;
     const values = sourceRows
@@ -386,10 +278,6 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
   const effectiveStart = startDate || availableDateBounds?.min || '';
   const effectiveEnd = endDate || availableDateBounds?.max || '';
 
-  // Same "is this a Metric?" logic as buildSummaryRows above, so a column
-  // shown as "Metric" in that table always appears here too. Using only
-  // typeCastMap (the initial suggested_dtype guess) missed columns the
-  // /stats endpoint has since confirmed are numeric.
   const metricColumns = useMemo(() => {
     const statsByColumn = Object.fromEntries((statsFor?.data?.columns || []).map((c) => [c.column, c]));
     return (file.profile || [])
@@ -404,8 +292,6 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
       .map((p) => p.column);
   }, [file, statsFor, effectiveXAxis]);
 
-  // Default to the first two metrics once they're known, without fighting
-  // the user's own pill selections on every re-render.
   useEffect(() => {
     if (selectedMetrics.length === 0 && metricColumns.length > 0) {
       setSelectedMetrics(metricColumns.slice(0, 2));
@@ -413,8 +299,6 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [metricColumns]);
 
-  // If the user picks a column as X Axis that was already a selected Y
-  // metric, drop it from the Y selection - the same column can't be both.
   useEffect(() => {
     if (selectedMetrics.includes(effectiveXAxis)) {
       setSelectedMetrics(selectedMetrics.filter((m) => m !== effectiveXAxis));
@@ -432,8 +316,6 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
     if (!xAxisIsDateLike || (!effectiveStart && !effectiveEnd)) return sourceRows;
     const xCol = derived(effectiveXAxis);
     return sourceRows.filter((r) => {
-      // Compared as ISO, so the bounds mean the same thing whatever format the
-      // column is stored in.
       const v = toIsoDate(String(r[xCol] ?? ''));
       if (!v) return false;
       if (effectiveStart && v < effectiveStart) return false;
@@ -443,39 +325,25 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceRows, effectiveXAxis, xAxisIsDateLike, effectiveStart, effectiveEnd]);
 
-  // What this file's rows actually are.
-  //
-  // Detection runs on its own as soon as a date column is known, rather than
-  // waiting for a Detect Granularity button on a tab that is being removed. A
-  // monthly file offering Week-on-Week is wrong whether or not anybody pressed
-  // that button first.
   const [autoGrain, setAutoGrain] = useState('');
-  // True until detection for this file and column settles. The period buttons
-  // are built from the answer, so rendering them first would offer
-  // Week-on-Week on a monthly file and then take it away a moment later.
   const [isDetectingGrain, setIsDetectingGrain] = useState(true);
   const detectKey = `${file.filename}|${effectiveXAxis}`;
   useEffect(() => {
     let cancelled = false;
     const detect = async () => {
       if (!file.workflowId || !effectiveXAxis || !xAxisIsDateLike) {
-        // Nothing to detect against. Settle rather than spin forever.
         setIsDetectingGrain(false);
         return;
       }
       setIsDetectingGrain(true);
       try {
         const detail = await detectGranularity(file.workflowId, file.filename, {
-          // Detection sees the dates as configured, so it must be told the
-          // post-rename name and the same draft edits the preview uses.
           date_column: renamedName(file, effectiveXAxis),
           live_updates: buildLiveUpdates(file),
           filters: buildFilters(file),
         });
         if (!cancelled) setAutoGrain(detail.granularity || '');
       } catch {
-        // Too few distinct dates, or an unparseable column. Not an error worth
-        // showing: the chart still works, it just offers both periods.
         if (!cancelled) setAutoGrain('');
       } finally {
         if (!cancelled) setIsDetectingGrain(false);
@@ -486,17 +354,12 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detectKey, file.workflowId]);
 
-  // A configured rollup wins over detection: after rolling daily rows up to
-  // monthly the file IS monthly, whatever the raw dates say.
   const fileGrain = file.granularityConfig?.target
     || file.granularityConfig?.detected
     || autoGrain
     || '';
   const aggOptions = aggregationsFor(fileGrain);
 
-  // A stored aggregation that this granularity does not support - saved before
-  // the rollup was configured, or before this was restricted - would otherwise
-  // leave the chart on a period none of the buttons is showing as active.
   useEffect(() => {
     if (!aggOptions.includes(aggregation)) setAggregation(aggOptions[0]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -514,7 +377,6 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
   }, [rowsInRange, effectiveXAxis, selectedMetrics, activeAgg, xAxisIsDateLike]);
 
   const chartData = trend.points;
-  // Roughly a year of weeks. Past this the markers touch and become a band.
   const showVertices = chartData.length <= 60;
 
   if (!effectiveXAxis) {
@@ -526,9 +388,6 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
     );
   }
 
-  // Hold the whole section until the grain is known. The period buttons are
-  // derived from it, so drawing them first means showing Week-on-Week on a
-  // monthly file and withdrawing it once the answer arrives.
   if (isDetectingGrain || (isLoadingFull && !usingFullFile)) {
     return (
       <div style={{ marginTop: '1.5rem' }}>
@@ -556,13 +415,10 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
           <>
             All {sourceRows.length.toLocaleString()} rows in this file, summed per
             {` ${AGGREGATIONS[activeAgg].period}`}.
-            {/* Why there may be only one button to press. */}
             {fileGrain && <> This file is {String(fileGrain).toLowerCase()}.</>}
             {(startDate || endDate) && (
               <> {rowsInRange.length.toLocaleString()} fall within the selected range.</>
             )}
-            {/* Said out loud: a bad date is a row missing from the totals, not
-                a row plotted in the wrong place. */}
             {trend.unparseable > 0 && (
               <> {trend.unparseable.toLocaleString()} rows have a date that could not be
                 read and are not included.</>
@@ -579,9 +435,6 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
 
       <div className="trend-controls-row">
         {xAxisIsDateLike && (
-          // Only the periods this file's granularity can actually be rolled
-          // up to. A monthly file offered Week-on-Week before, which drew one
-          // point per month under a weekly label.
           <div className="agg-toggle">
             {aggOptions.map((key) => (
               <button
@@ -595,8 +448,6 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
           </div>
         )}
 
-        {/* Was a stack of inline styles, which is why the inputs ended up a
-            different height from the toggle beside them. */}
         {xAxisIsDateLike && (
           <div className="trend-date-range">
             <label htmlFor="trend-from">From:</label>
@@ -638,8 +489,6 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
             X Axis - Select Date Column (1 selected):
           </p>
           <div className="metric-pills">
-            {/* Date columns only. A trend against anything else is a line
-                joining categories in whatever order they sort in. */}
             {dateColumns.map((c) => (
               <span
                 key={c}
@@ -678,13 +527,6 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
                      tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${Math.round(v / 1000)}k` : v)}
                      label={{ value: 'Value', ...Y_LABEL }} />
               <Tooltip content={<ChartTooltip />} cursor={{ stroke: '#c7d2e5', strokeWidth: 1 }} />
-              {/* A marker at each period, while there is room for them. The
-                  line is straight between points - `type` is 'linear', never a
-                  spline - but with the vertices hidden a dense series reads as
-                  a smooth curve, because the only thing that shows a segment
-                  is straight is seeing where it starts and ends. Past the
-                  threshold the dots merge into a band and hide the line, so
-                  they come off. */}
               {selectedMetrics.map((key, i) => (
                 <Line key={key} type={LINE_TYPE} dataKey={key} stroke={CHART_COLORS[i % CHART_COLORS.length]}
                       strokeWidth={2}
@@ -706,25 +548,12 @@ function TimeTrendsSection({ file, statsFor, aggregation, setAggregation, select
   );
 }
 
-/**
- * Whether a role id is the "Independent Promotions" role - judged from its
- * label text via `roleMeta`, not a hardcoded id, since the id strings
- * themselves live in columnRoles.js and aren't re-declared here.
- */
 function isPromoRole(roleId) {
   const meta = roleMeta(roleId);
   const label = `${meta?.short || ''} ${meta?.hint || ''}`.toLowerCase();
   return label.includes('promo');
 }
 
-/**
- * Best-effort mirror of `restoreColumnRoles` for sub-tiers: the saved object
- * is keyed by the renamed column name, this screen works in original names,
- * so it is mapped back through `renameMap` on the way in. Written locally
- * because columnRoles.js does not (yet) export an equivalent - if the
- * backend isn't sending `config_metadata.promo_sub_tiers` yet, this simply
- * returns {} and every row starts unset, same as a first upload.
- */
 function restorePromoSubTiers(saved, renameMap) {
   if (!saved) return {};
   const reverse = Object.fromEntries(Object.entries(renameMap).map(([from, to]) => [to, from]));
@@ -733,20 +562,11 @@ function restorePromoSubTiers(saved, renameMap) {
   );
 }
 
-/**
- * What each column in this file IS, for the screens downstream.
- *
- * Every column starts on a guess from its name, so the table is answerable by
- * exception rather than one dropdown at a time. The roles ride along in the
- * manifest's `config_metadata`, which the engine stores without interpreting.
- */
 function ColumnRoleTable({ file, onChange, onSubTierChange, onBulk }) {
   const columns = file.columns || [];
   const roles = rolesFor(columns, file.columnRoles);
   const dropped = new Set(columns.filter((c) => !(file.selectedCols || columns).includes(c)));
 
-  // A count per role, so a file with no Dependent Variable is visible without
-  // reading every row.
   const counts = Object.fromEntries(
     ROLE_IDS.map((id) => [id, columns.filter((c) => !dropped.has(c) && roles[c] === id).length])
   );
@@ -776,8 +596,6 @@ function ColumnRoleTable({ file, onChange, onSubTierChange, onBulk }) {
             {role.short}: <strong>{counts[role.id]}</strong>
           </span>
         ))}
-        {/* Resetting is one click rather than re-picking every row, for the
-            case where a rename or a retype has moved things on. */}
         <button
           type="button"
           className="role-reset"
@@ -806,8 +624,6 @@ function ColumnRoleTable({ file, onChange, onSubTierChange, onBulk }) {
                 <tr key={col} className={dropped.has(col) ? 'is-dropped' : ''}>
                   <td className="role-col-name">
                     {col}
-                    {/* A dropped column keeps its row so the role is not lost
-                        by an accidental untick, but it says it is going. */}
                     {dropped.has(col) && <span className="role-dropped-tag">dropped</span>}
                     {renamedName(file, col) !== col && (
                       <span className="role-renamed-tag">→ {renamedName(file, col)}</span>
@@ -857,7 +673,6 @@ function ColumnRoleTable({ file, onChange, onSubTierChange, onBulk }) {
   );
 }
 
-/** Debounced server-side search over one column's distinct values. */
 function ValuePicker({ workflowId, filename, column, selected, onChange }) {
   const [query, setQuery] = useState('');
   const [options, setOptions] = useState([]);
@@ -865,13 +680,9 @@ function ValuePicker({ workflowId, filename, column, selected, onChange }) {
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
 
-
-
   useEffect(() => {
     if (!column) return undefined;
     let cancelled = false;
-    // Debounced: typing "california" should not be nine round trips. The
-    // searching flag is set inside the timer, not synchronously here.
     const timer = setTimeout(() => {
       setIsSearching(true);
       getColumnValues(workflowId, filename, column, query, 50)
@@ -884,8 +695,6 @@ function ValuePicker({ workflowId, filename, column, selected, onChange }) {
         .catch((err) => {
           if (cancelled) return;
           setOptions([]);
-          // Most often this is a rename that has not been applied yet: /values
-          // reads the resolved dataset, so it only knows the committed name.
           setError(err instanceof ApiError ? err.text : 'Could not read this column.');
         })
         .finally(() => { if (!cancelled) setIsSearching(false); });
@@ -950,14 +759,6 @@ function ValuePicker({ workflowId, filename, column, selected, onChange }) {
   );
 }
 
-/**
- * Which control a column gets.
- *
- * Server first: /stats reports the type off the committed manifest, which is
- * what the filter will actually run against. Before anything is committed
- * there is no manifest to read, so fall back to what the user has chosen on
- * the Standardize tab - that is their stated intent even if unsaved.
- */
 function filterKindOf(file, stats, column) {
   const entry = (stats?.data?.columns || []).find((c) => c.column === renamedName(file, column));
   if (entry && entry.kind !== 'string') return entry.kind;
@@ -971,25 +772,15 @@ function filterKindOf(file, stats, column) {
 let fileIdCounter = 0;
 
 function DataIngestion() {
-  // Per-file configuration lives in each dataset's manifest on the server and
-  // is read back by the resume effect below - it is NOT duplicated into the
-  // workflow's state_data, which would be a second copy free to disagree with
-  // the one that actually derives the frame. What is kept there is the screen
-  // position: which file is open, which tab, and a category picked but not yet
-  // applied.
   const pendingScreen = useRef(null);
   const [uploadedFiles, setUploadedFiles] = useState([]);
   const [selectedFileId, setSelectedFileId] = useState(null);
   const [isDragging, setIsDragging] = useState(false);
-  const [activeTab, setActiveTab] = useState('mapping'); // mapping | standardize | filter | granularity
+  const [activeTab, setActiveTab] = useState('mapping');
   const [visitedTabs, setVisitedTabs] = useState(new Set(['mapping']));
 
-  // Remember where the user got to, so Resume reopens this screen instead
-  // of always returning to Data Ingestion.
   useEffect(() => { recordStage('ingestion'); }, []);
 
-  // Files are keyed by filename, not by the in-memory id: ids are regenerated
-  // on every load, so one stored from a previous session would match nothing.
   const stateRestored = useScreenState('ingestion', {
     ready: uploadedFiles.length > 0,
     deps: [activeTab, selectedFileId, uploadedFiles, visitedTabs],
@@ -997,8 +788,6 @@ function DataIngestion() {
       activeTab,
       openFile: uploadedFiles.find((f) => f.id === selectedFileId)?.filename || null,
       visitedTabs: Array.from(visitedTabs),
-      // A category chosen but not yet applied. The committed spec wins over
-      // this on restore, so it can only ever fill a gap, never contradict.
       pendingCategories: Object.fromEntries(
         uploadedFiles.filter((f) => f.category).map((f) => [f.filename, f.category])
       ),
@@ -1023,21 +812,10 @@ function DataIngestion() {
   const [deletingFileId, setDeletingFileId] = useState(null);
   const [applyMessage, setApplyMessage] = useState('');
   const [previewResult, setPreviewResult] = useState(null);
-  // Only RESOLVED control totals: { filename, data, error }. "Loading" is
-  // derived during render from whether this holds the selected file yet, which
-  // keeps the effect free of synchronous setState. Keyed by filename so a slow
-  // response for a file the user has switched away from is never shown against
-  // the wrong file.
   const [stats, setStats] = useState(null);
   const [statsVersion, setStatsVersion] = useState(0);
   const fileInputRef = useRef(null);
 
-  // ── Platform Connections (Databricks / Snowflake / Fabric) ──────────────
-  // PLACEHOLDER: no backend endpoint exists yet for creating, testing, or
-  // listing platform connections — nothing like this is in services/api.js.
-  // Kept as local-only state: the full UI flow is reviewable now, and each
-  // handler is marked with exactly what a real API call would need to
-  // replace it.
   const [platformConnections, setPlatformConnections] = useState([]);
   const [isPlatformModalOpen, setIsPlatformModalOpen] = useState(false);
   const [editingConnectionId, setEditingConnectionId] = useState(null);
@@ -1080,11 +858,6 @@ function DataIngestion() {
     setIsPlatformModalOpen(false);
   };
 
-  // PLACEHOLDER: no backend endpoint yet to actually test connectivity to a
-  // platform. Rather than fabricate a fake "Connected" result, this says
-  // plainly that a real check isn't wired up, and leaves status as-is.
-  // Replace with a real call (e.g. POST /v1/platform-connections/{id}/test)
-  // once one exists, then set status to whatever it reports.
   const handleTestConnection = (conn) => {
     setTestingConnectionId(conn.id);
     window.alert(
@@ -1094,32 +867,19 @@ function DataIngestion() {
     setTestingConnectionId(null);
   };
 
-  // ── Data Review tab: Time Trends chart state ──────────────────────────
-  // Rolled up from the file's COMPLETE content, fetched through the dataset
-  // /csv endpoint. This was a preview-sample rollup until that endpoint was
-  // found; the note under the chart says which one it is drawing.
-  const [trendAggregation, setTrendAggregation] = useState('wow'); // 'wow' | 'mom'
+  const [trendAggregation, setTrendAggregation] = useState('wow');
   const [trendMetrics, setTrendMetrics] = useState([]);
   const [trendXAxis, setTrendXAxis] = useState('');
   const [trendStartDate, setTrendStartDate] = useState('');
   const [trendEndDate, setTrendEndDate] = useState('');
 
-  // Fix: without this, switching files kept whatever metric names were
-  // selected for the PREVIOUS file - those columns don't exist on the new
-  // file, so the chart silently plotted flat 0-lines under the old names
-  // instead of showing the new file's actual columns.
   useEffect(() => {
     setTrendMetrics([]);
-    setTrendXAxis(''); // '' means "use the auto-detected date column"
+    setTrendXAxis('');
     setTrendStartDate('');
     setTrendEndDate('');
   }, [selectedFileId]);
 
-  // The category gate is gone with the picker. It counted unmapped files,
-  // checked that every required category had one, and blocked Proceed until
-  // both held - all of it measuring a decision this screen no longer asks
-  // anyone to make. The category itself still rides in the manifest and is
-  // still suggested from the filename on upload.
   const hasVisitedAllTabs = TAB_ORDER.every((t) => visitedTabs.has(t));
 
   const handleNext = () => {
@@ -1135,28 +895,23 @@ function DataIngestion() {
     setActiveTab(prevTab);
   };
 
-  // Resume the server-side datasets for the selected workflow. The browser
-  // holds only metadata; bytes remain in object storage and are never
-  // re-uploaded just to resume this screen.
   useEffect(() => {
-    // Waits for the restore: the stored open file and any uncommitted
-    // category must be known before this builds the list.
-    if (!stateRestored) return undefined;
     const workflowId = storedWorkflowId();
-    if (!workflowId) return undefined;
+    if (!workflowId) {
+      setIsRestoringFiles(false);
+      return undefined;
+    }
+    if (!stateRestored) return undefined;
+
     let cancelled = false;
 
     const hydrate = async () => {
       setIsRestoringFiles(true);
       try {
-        // Uploads only. ARDs built on the stitching screen are datasets in the
-        // same workflow, so they were appearing here as files to categorise
-        // and re-map - and every one of them cost a profile and a preview
-        // request on resume.
         const response = await listFiles(workflowId, { kind: 'upload' });
-        const files = await Promise.all((response.items || []).map(async (dataset) => {
-          // Listing metadata is enough to render a resumed file. Profile and
-          // preview failures must not hide every file in the workflow.
+        const items = response?.items || [];
+        
+        const files = await Promise.all(items.map(async (dataset) => {
           const [profileResult, fileResult] = await Promise.allSettled([
             getProfile(workflowId, dataset.filename),
             getFile(workflowId, dataset.filename),
@@ -1173,29 +928,26 @@ function DataIngestion() {
           );
           const typeCastMap = Object.fromEntries(profile.map((p) => [p.column, clampDtype(p.suggested_dtype)]));
           for (const change of updates.dtype_changes || []) typeCastMap[change.column] = change.to;
+
           return {
-            id: `file-${++fileIdCounter}`, filename: dataset.filename, name: dataset.filename, workflowId,
+            id: `file-${++fileIdCounter}`,
+            filename: dataset.filename,
+            name: dataset.filename,
+            workflowId,
             category: spec.config_metadata?.category || null,
-            // Roles are stored under the renamed column name, which is what the
-            // rest of the app sees; this screen works in original names, so
-            // they are mapped back on the way in.
             columnRoles: restoreColumnRoles(spec.config_metadata?.column_roles, renameMap),
             promoSubTiers: restorePromoSubTiers(spec.config_metadata?.promo_sub_tiers, renameMap),
             columns: rawColumns,
             previewRows: currentDataset.preview || [],
-            // `dataset.columns` is the DERIVED column list. The preview rows are
-            // derived too, so using rawColumns here rendered a table of empty
-            // cells for any file with a rename or a drop.
             previewColumns: dataset.columns || rawColumns,
             previewRowCount: dataset.row_count,
             totalRows: dataset.row_count || 0,
-            isParsing: false, parseError: null, selectedCols: rawColumns.filter((column) => !dropped.has(column)),
+            isParsing: false,
+            parseError: null,
+            selectedCols: rawColumns.filter((column) => !dropped.has(column)),
             renameMap,
             profile,
             typeCastMap,
-            // Fall back to the detected dates when nothing has been committed
-            // yet, so resuming before the first Apply still offers the format
-            // controls rather than an empty box.
             dateConfigs: (updates.date_formats || []).length
               ? updates.date_formats.map((item) => ({ col: item.column, format: item.to }))
               : profile.filter((p) => p.suggested_date_from)
@@ -1204,10 +956,6 @@ function DataIngestion() {
               ? Object.fromEntries(updates.date_formats.map((item) => [item.column, item.from]))
               : Object.fromEntries(profile.filter((p) => p.suggested_date_from)
                   .map((p) => [p.column, p.suggested_date_from])),
-            // Read back from the committed spec, not reset to empty. These two
-            // were the only parts of the manifest that did not survive a
-            // refresh: the tabs came up blank, and the next Apply then sent an
-            // empty `filters`/`granularity` and wiped what was stored.
             filterConfig: {
               ...restoreFilterChain(spec, renameMap),
               draft: null,
@@ -1215,39 +963,31 @@ function DataIngestion() {
             granularityConfig: restoreGranularity(spec.granularity, renameMap),
           };
         }));
+
         if (!cancelled) {
           const screen = pendingScreen.current || {};
           pendingScreen.current = null;
-          // A category the user picked but never applied. The spec already
-          // read above takes precedence, so this only fills a blank.
           const withCategories = files.map((f) => (
             f.category ? f : { ...f, category: screen.pendingCategories?.[f.filename] || null }
           ));
           setUploadedFiles(withCategories);
           const reopened = withCategories.find((f) => f.filename === screen.openFile);
           setSelectedFileId((reopened || withCategories[0])?.id || null);
-          // The four tabs are a first-run walkthrough: Apply only appears once
-          // they have all been seen. That walk already happened in the session
-          // that configured these files, and `visitedTabs` does not survive a
-          // refresh - so on resume the Apply button simply disappeared from a
-          // file that was already fully configured.
-          if ((response.items || []).some(hasCommittedSpec)) {
+          if (items.some(hasCommittedSpec)) {
             setVisitedTabs(new Set(TAB_ORDER));
           }
         }
       } catch (err) {
-        if (!cancelled) window.alert(err instanceof ApiError ? err.text : 'Could not load workflow files.');
+        console.error('Workflow hydration error:', err);
       } finally {
         if (!cancelled) setIsRestoringFiles(false);
       }
     };
+
     hydrate();
     return () => { cancelled = true; };
-    // Re-runs once the restore lands, which is what makes the stored open file
-    // and any uncommitted category available to it.
   }, [stateRestored]);
 
-  // ─── File upload + parsing ───────────────────────────────────────────
   const addFiles = async (fileList) => {
     if (isUploadingFiles) return;
     const csvFiles = Array.from(fileList).filter((file) =>
@@ -1271,9 +1011,6 @@ function DataIngestion() {
     setIsUploadingFiles(true);
     try {
       const workflowId = await ensureWorkflow();
-      // overwrite:false so the server refuses a collision too. The check above
-      // only sees what this screen has loaded; this is what stops a name that
-      // is in the workflow but not on screen from being overwritten.
       const result = await uploadFiles(workflowId, accepted, { overwrite: false });
       const newEntries = await Promise.all(result.files.map(async (dataset) => {
         const profileResponse = dataset.profile ? dataset : await getProfile(workflowId, dataset.filename);
@@ -1288,20 +1025,13 @@ function DataIngestion() {
           renameMap: {},
           profile,
           typeCastMap: Object.fromEntries(profile.map((p) => [p.column, clampDtype(p.suggested_dtype)])),
-          // Every detected date column gets a Target Date Format row. Excluding
-          // the ambiguous ones hid the control precisely where the user most
-          // needs it - a file whose dates are all day <= 12 showed no date
-          // options at all.
           dateConfigs: profile.filter((p) => p.suggested_date_from)
             .map((p) => ({
               col: p.column,
-              // A month-grain column keeps its grain; everything else lands on ISO.
               format: isMonthGrainFormat(p.suggested_date_from) ? '%Y-%m' : '%Y-%m-%d',
             })),
           dateSourceFormats: Object.fromEntries(profile.filter((p) => p.suggested_date_from)
             .map((p) => [p.column, p.suggested_date_from])),
-          // The Filter tab edits one column at a time (`activeColumn`) but keeps a
-          // rule per column, so switching the dropdown never discards a filter.
           filterConfig: { chain: [], operators: [], draft: null },
           granularityConfig: { dateCol: '', geoCol: '', detected: null, target: '', numOps: {} },
         };
@@ -1349,17 +1079,7 @@ function DataIngestion() {
     setUploadedFiles((prev) => prev.filter((f) => f.id !== fileId));
     if (selectedFileId === fileId) setSelectedFileId(null);
 
-    // The dataset is gone, so nothing saved should still point at it: the
-    // joins built on it, the files ticked for an ARD, a category never
-    // applied. Only after the delete succeeded - a failed one leaves the file
-    // in place, and its state with it.
     if (file?.filename) forgetFile(file.filename);
-  };
-
-  const handleCategoryChange = (fileId, category) => {
-    setUploadedFiles((prev) =>
-      prev.map((f) => (f.id === fileId ? { ...f, category } : f))
-    );
   };
 
   const handleResetWorkflow = () => {
@@ -1375,12 +1095,8 @@ function DataIngestion() {
     );
   };
 
-  // Assign Category tab: one column's modelling role.
   const setColumnRole = (file, column, role) => {
     const updates = { columnRoles: { ...rolesFor(file.columns, file.columnRoles), [column]: role } };
-    // A column that stops being an Independent Promotion no longer needs a
-    // sub-tier; clearing it here avoids a stale choice silently reappearing
-    // if the column is switched back to Promotions later.
     if (!isPromoRole(role) && file.promoSubTiers?.[column]) {
       updates.promoSubTiers = { ...file.promoSubTiers };
       delete updates.promoSubTiers[column];
@@ -1388,13 +1104,11 @@ function DataIngestion() {
     updateFileConfig(file.id, updates);
   };
 
-  // Assign Category tab: one Independent-Promotion column's sub-tier.
   const setPromoSubTier = (file, column, subTier) =>
     updateFileConfig(file.id, {
       promoSubTiers: { ...(file.promoSubTiers || {}), [column]: subTier },
     });
 
-  // Standardize tab
   const toggleKeepColumn = (file, col, keep) => {
     const selectedCols = keep
       ? [...file.selectedCols, col]
@@ -1406,9 +1120,6 @@ function DataIngestion() {
   const setColType = (file, col, type) => {
     const typeCastMap = { ...file.typeCastMap, [col]: type };
     let dateConfigs = file.dateConfigs;
-    // The API needs the format the file actually uses, not just the target, and
-    // it never guesses. Seed it from the server profile so marking a column as
-    // Date by hand still produces a usable conversion.
     const dateSourceFormats = { ...(file.dateSourceFormats || {}) };
     if (type === 'date' && !dateConfigs.find((d) => d.col === col)) {
       const detected = (file.profile || []).find((p) => p.column === col);
@@ -1429,10 +1140,6 @@ function DataIngestion() {
       dateConfigs: file.dateConfigs.map((d) => (d.col === col ? { ...d, format } : d)),
     });
 
-  // ── Filter chain ────────────────────────────────────────────────────────
-  // The tab builds an ordered chain of cards with an operator in every gap.
-  // A draft is the card being composed; it only joins the chain on Add, so a
-  // half-typed filter never changes what Apply would send.
   const setFilterConfig = (file, updates) =>
     updateFileConfig(file.id, { filterConfig: { ...file.filterConfig, ...updates } });
 
@@ -1442,8 +1149,6 @@ function DataIngestion() {
   const cancelDraft = (file) => setFilterConfig(file, { draft: null });
 
   const setDraftColumn = (file, column) => {
-    // The kind decides which controls render, so it is resolved once here
-    // rather than re-derived at every keystroke.
     const kind = column ? filterKindOf(file, statsFor, column) : 'string';
     setFilterConfig(file, { draft: { column, kind, cond: emptyCondition() } });
   };
@@ -1460,8 +1165,6 @@ function DataIngestion() {
     if (!conditionIsSet(draft.cond, draft.kind)) return;
     const chain = [...(file.filterConfig.chain || []), draft];
     const operators = [...(file.filterConfig.operators || [])];
-    // Every gap needs an operator, and a new card creates one gap. AND is the
-    // default because it narrows, which is the safer thing to do silently.
     if (chain.length > 1) operators.push('and');
     setFilterConfig(file, { chain, operators, draft: null });
   };
@@ -1469,9 +1172,6 @@ function DataIngestion() {
   const removeChainEntry = (file, index) => {
     const chain = (file.filterConfig.chain || []).filter((_, i) => i !== index);
     const operators = [...(file.filterConfig.operators || [])];
-    // Drop the gap the removed card sat in: the one before it, or - when it was
-    // the first card - the one after. Otherwise later operators shift onto the
-    // wrong pairs.
     if (operators.length) operators.splice(index ? index - 1 : 0, 1);
     setFilterConfig(file, { chain, operators });
   };
@@ -1481,8 +1181,6 @@ function DataIngestion() {
     operators[gap] = value;
     setFilterConfig(file, { operators });
   };
-
-  // Granularity tab
 
   const applyFile = async (file) => {
     const problems = localProblems(file);
@@ -1503,8 +1201,6 @@ function DataIngestion() {
         previewColumns: committed.columns || file.columns,
         totalRows: committed.row_count,
       });
-      // The resolved frame just changed, so the control totals describe the
-      // previous version until they are re-read.
       setStatsVersion((v) => v + 1);
       setApplyMessage(['Configuration applied successfully. The preview now shows the transformed dataset.', ...localWarnings(file)].join(' '));
     } catch (err) {
@@ -1564,10 +1260,6 @@ function DataIngestion() {
 
   const selectedFile = uploadedFiles.find((f) => f.id === selectedFileId);
 
-  // Control totals for whichever file is selected. Read from the server rather
-  // than computed from `previewRows`, because the preview is only the first
-  // 100 rows - a null percentage derived from it would look authoritative and
-  // be wrong.
   const statsKey = selectedFile ? `${selectedFile.workflowId}/${selectedFile.filename}` : null;
   useEffect(() => {
     if (!selectedFile?.workflowId) return undefined;
@@ -1581,24 +1273,14 @@ function DataIngestion() {
                    error: err instanceof ApiError ? err.text : 'Could not read control totals.' });
       });
     return () => { cancelled = true; };
-    // eslint-disable-next-line
   }, [statsKey, statsVersion]);
 
-  useEffect(() => {
-  if (selectedFile?.profile?.[0]) {
-    console.log('PROFILE SHAPE:', JSON.stringify(selectedFile.profile[0], null, 2));
-  }
-}, [selectedFile]);
-  // Anything not yet resolved for THIS file reads as loading, including the
-  // window between selecting a file and its request coming back.
   const statsFor = selectedFile
     ? (stats && stats.filename === selectedFile.filename
         ? { ...stats, isLoading: false }
         : { filename: selectedFile.filename, data: null, error: null, isLoading: true })
     : null;
 
-  // Post-rename column -> stats entry, because /stats describes the resolved
-  // frame while the tab still works in original column names.
   const statsByColumn = Object.fromEntries((statsFor?.data?.columns || []).map((c) => [c.column, c]));
 
   const filterChain = selectedFile?.filterConfig?.chain || [];
@@ -1619,7 +1301,6 @@ function DataIngestion() {
 
   return (
     <div className="data-ingestion-page">
-      {/* ---- Shared header ---- */}
       <div className="page-header">
         <div className="page-header-left">
           <div className="page-header-icon icon-placeholder">
@@ -1653,7 +1334,6 @@ function DataIngestion() {
           <span>Loading files from storage…</span>
         </div>
       ) : !hasFiles ? (
-        /* ============ DEFAULT VIEW (no files yet) ============ */
         <div className="upload-card">
           <p className="upload-card-title">Upload CSV Files</p>
 
@@ -1781,9 +1461,7 @@ function DataIngestion() {
           )}
         </div>
       ) : (
-        /* ============ MAPPING VIEW (files uploaded) ============ */
         <div className="mapping-layout">
-          {/* ---- Left: file list ---- */}
           <div className="file-list-panel">
             <button className="upload-files-btn" onClick={handleBrowseClick} disabled={isUploadingFiles}>
               {isUploadingFiles ? 'Uploading files…' : 'Upload files'}
@@ -1794,7 +1472,7 @@ function DataIngestion() {
             </p>
 
             <div className="file-list">
-              {uploadedFiles.map((f, index) => {
+              {uploadedFiles.map((f) => {
                 const categoryInfo = FILE_CATEGORIES.find((c) => c.id === f.category);
                 return (
                   <div
@@ -1806,10 +1484,6 @@ function DataIngestion() {
                   >
                     <div className="file-item-text">
                       <p className="file-item-name" title={f.name}>{f.name}</p>
-                      {/* A file's category is shown only when it has one. The
-                          "Unmapped" label and the amber row it came with were
-                          reporting a gap against a picker this screen no
-                          longer offers. */}
                       {categoryInfo && (
                         <p className="file-item-status">
                           {categoryInfo.label}
@@ -1833,15 +1507,8 @@ function DataIngestion() {
                 );
               })}
             </div>
-
-            {/* No category status here. The picker that would let anyone act
-                on it is no longer on the Assign Category tab, so a count of
-                files "still needing a category" reported work that could not
-                be done, and the all-clear reported a gate that no longer
-                exists. */}
           </div>
 
-          {/* ---- Right: mapping configuration ---- */}
           <div className="mapping-config-panel">
             {selectedFile ? (
               <>
@@ -1887,8 +1554,6 @@ function DataIngestion() {
                   <div className="mapping-top-actions">
                     {applyMessage && <p className="apply-config-message" role="status">{applyMessage}</p>}
 
-                    {/* Position in the walkthrough, not "have you pressed Next
-                        this session" - which did not survive a refresh. */}
                     {activeTab !== TAB_ORDER[0] && (
                       <button className="mapping-btn secondary" onClick={handleBack}>
                         Back
@@ -1908,9 +1573,6 @@ function DataIngestion() {
                       </button>
                     )}
 
-                    {/* Shown alongside Next, not instead of it: once every tab
-                        has been seen the configuration can be applied from any
-                        of them, and the user can still move between tabs. */}
                     {hasVisitedAllTabs && (
                       <button className="mapping-btn primary" disabled={!selectedFile || isApplying || isPreviewing || isFiltering} onClick={() => applyFile(selectedFile)}>
                         {isApplying ? 'Applying configurations…' : 'Apply configuration'}
@@ -1920,67 +1582,12 @@ function DataIngestion() {
                 </div>
 
                 {activeTab === 'mapping' && (
-                  <>
-                <hr className="mapping-divider" />
-
-                {/* <p className="mapping-section-label">Assign category</p>
-                <select
-                  className="category-select"
-                  value={selectedFile.category || ''}
-                  onChange={(e) =>
-                    handleCategoryChange(selectedFile.id, e.target.value)
-                  }
-                >
-                  <option value="">Select a category...</option>
-                  {FILE_CATEGORIES.map((cat) => (
-                    <option key={cat.id} value={cat.id}>
-                      {cat.label}
-                      {cat.required ? ' (required)' : ''}
-                    </option>
-                  ))}
-                </select>
-
-                {selectedFile.category && (
-                  <div className="category-info-box">
-                    <p className="category-info-title">
-                      {FILE_CATEGORIES.find((c) => c.id === selectedFile.category)?.label}
-                    </p>
-                    <p className="category-info-desc">
-                      {FILE_CATEGORIES.find((c) => c.id === selectedFile.category)?.desc}
-                    </p>
-                    <p className="category-info-grain">
-                      Expected grain:{' '}
-                      {FILE_CATEGORIES.find((c) => c.id === selectedFile.category)?.grain}
-                    </p>
-                  </div>
-                )} */}
-
-                {/* The "still needs a category" count now lives in the file
-                    list panel, next to the rows it is counting. */}
-                {/* {unmappedCount === 0 && !hasRequiredCategories && (
-                  <div className="mapping-warning-banner">
-                    Please assign at least one file to:{' '}
-                    {missingRequiredLabels.join(', ')}
-                  </div>
-                )} */}
-
-                {/* The all-clear now sits with the file list, next to the rows
-                    it is reporting on, alongside the "still needs a category"
-                    count it replaces. */}
-
-                {/* Column-level roles. The file category says what the FILE is;
-                    this says what each column in it is, which is what every
-                    screen downstream needs and was previously guessing for
-                    itself - three heuristics with three chances to disagree
-                    about the same column, and no way to correct any of them
-                    except per screen, every time. */}
-                <ColumnRoleTable
-                  file={selectedFile}
-                  onChange={(column, role) => setColumnRole(selectedFile, column, role)}
-                  onSubTierChange={(column, tier) => setPromoSubTier(selectedFile, column, tier)}
-                  onBulk={(next) => updateFileConfig(selectedFile.id, { columnRoles: next })}
-                />
-                  </>
+                  <ColumnRoleTable
+                    file={selectedFile}
+                    onChange={(column, role) => setColumnRole(selectedFile, column, role)}
+                    onSubTierChange={(column, tier) => setPromoSubTier(selectedFile, column, tier)}
+                    onBulk={(next) => updateFileConfig(selectedFile.id, { columnRoles: next })}
+                  />
                 )}
 
                 {activeTab === 'standardize' && (
@@ -2051,8 +1658,6 @@ function DataIngestion() {
                           Date Format (source &rarr; target)
                         </p>
                         {selectedFile.dateConfigs.map((dc) => {
-                          // Read-only: the source format is detected from the
-                          // file itself, so it is shown rather than chosen.
                           const source = selectedFile.dateSourceFormats?.[dc.col];
                           return (
                             <div key={dc.col} className="date-format-row">
@@ -2084,7 +1689,6 @@ function DataIngestion() {
 
                 {activeTab === 'filter' && (
                   <>
-                    {/* The chain, in the order it is evaluated. */}
                     {filterChain.map((entry, index) => (
                       <div key={index}>
                         {index > 0 && (
@@ -2127,8 +1731,6 @@ function DataIngestion() {
                       </p>
                     )}
 
-                    {/* The card being composed. It joins the chain on Add, so a
-                        half-typed filter never changes what Apply sends. */}
                     {filterDraft && (
                       <div className="chain-draft">
                         {filterChain.length > 0 && (
@@ -2384,18 +1986,11 @@ function DataIngestion() {
                   </>
                 )}
 
-                {/* Shared across every tab: previewing from Standardize, Filter or
-                    Granularity should show its result in place, not send the user
-                    back to Assign Category. */}
-
                 <hr className="mapping-divider" />
 
                 <div className="mapping-preview-section">
                   <p className="mapping-section-label">Preview</p>
 
-                  {/* Control totals sit directly above the table they describe,
-                      on Assign Category only - that is where the user is still
-                      deciding whether the file is the right one. */}
                   {activeTab === 'mapping' && statsFor && (
                     <ControlTotalsRibbon stats={statsFor} />
                   )}
@@ -2446,8 +2041,6 @@ function DataIngestion() {
                       </div>
                     )}
                 </div>
-
-
               </>
             ) : (
               <p className="mapping-config-subtitle">
@@ -2460,8 +2053,6 @@ function DataIngestion() {
       <PageFooterNav currentStepId="data-ingestion" />
     </div>
   );
-  
-
 }
 
 export default DataIngestion;

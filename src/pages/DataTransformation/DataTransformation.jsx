@@ -6,8 +6,8 @@ import {
 } from 'recharts';
 import {
   ensureWorkflow, listFiles, problemMessage, transformationApply,
-  transformationCorrelation, transformationPreviewSingle, v2GetCsv, v2ListArds,
-  edaHistogram, edaDetectOutliers,
+  transformationCorrelation, transformationPreviewSingle, transformationGridSearchSingle,
+  v2GetCsv, v2ListArds, edaHistogram, edaDetectOutliers,
   correlationMatrix as fetchPreCorrelationMatrix,
 } from '../../services/api.js';
 import { recordStage } from '../../services/workflowState.js';
@@ -26,14 +26,10 @@ import {
 import PageFooterNav from '../../components/PageFooterNav/PageFooterNav.jsx';
 import './DataTransformation.css';
 
-// Statistics, histograms and response curves all come from the engine now;
-// the local implementations of them were removed with the adstock maths.
 function isNumericColumn(rows, col) {
   return rows.some((r) => typeof r[col] === 'number');
 }
 
-// Population Based was removed per instruction. The engine still implements
-// it, so nothing server-side changes; it is simply no longer offered.
 const NORMALIZATION_OPTIONS = [
   { value: 'none', label: 'None (Raw Volume)' },
   { value: 'minmax', label: 'Min-Max Scaling [0, 1]' },
@@ -41,25 +37,9 @@ const NORMALIZATION_OPTIONS = [
   { value: 'iqr', label: 'Robust / IQR Scaling' },
 ];
 
-// A transformation set saved before the option was withdrawn can still carry
-// normalization: 'population'. A <select> whose value matches no <option>
-// renders blank, and the first edit to any other field on that row would then
-// silently write that blank back. Reading it as 'none' keeps the row honest.
 const NORMALIZATION_VALUES = new Set(NORMALIZATION_OPTIONS.map((o) => o.value));
 const normalizationValue = (v) => (NORMALIZATION_VALUES.has(v) ? v : 'none');
 
-// Both Adstock Decay and Adstock Horizon are free-typed now (see
-// decayDrafts/horizonDrafts below) rather than picked from a fixed list -
-// ADSTOCK_OPTIONS and a per-grain Horizon preset list used to live here, but
-// a channel needing a value outside those presets (or a grain the lists
-// didn't anticipate) could never reach it. The engine itself is
-// grain-agnostic — it just shifts/decays over N rows — so "weeks" was only
-// ever a UI labelling assumption, not a real constraint. See
-// detectedGranularity below, which reads the actual spacing between dates in
-// the loaded data and drives the unit label shown next to Horizon and Lag.
-
-// Singular unit name per detected grain, shown next to the Horizon and Lag
-// inputs (e.g. "2 months" for monthly data, "8 weeks" for weekly data).
 const GRANULARITY_UNIT = { daily: 'day', weekly: 'week', monthly: 'month', quarterly: 'quarter', yearly: 'year' };
 function pluralUnit(n, unit) { return `${n} ${unit}${n === 1 ? '' : 's'}`; }
 const SATURATION_OPTIONS = [
@@ -67,12 +47,6 @@ const SATURATION_OPTIONS = [
   { value: 'log', label: 'Log: ln(1 + k·x)' },
   { value: 'power', label: 'Power: x^p' },
 ];
-
-// Adstock, saturation and correlation are computed by the engine in
-// core/processing.py, not here. They used to be reimplemented in this file; a
-// second copy of the maths is a second thing to keep in step with the version
-// the model is actually fitted with, and the two drift silently because both
-// produce plausible numbers.
 
 let derivedIdCounter = 0;
 
@@ -83,61 +57,43 @@ function DataTransformation() {
   const [isLoadingArds, setIsLoadingArds] = useState(true);
   const [loadError, setLoadError] = useState(null);
 
-  // The CSV text exactly as stored, kept because the transformation engines
-  // take the dataset rather than a parsed copy of it.
   const [activeCsv, setActiveCsv] = useState('');
   const [rows, setRows] = useState([]);
   const [columns, setColumns] = useState([]);
   const [isLoadingData, setIsLoadingData] = useState(false);
   const [dataError, setDataError] = useState(null);
 
-  // Step 1 (new): Outlier Diagnostics & Pre-Treatment. Ported from Data
-  // Review's "Distributions & Outliers" tab — same server endpoints
-  // (edaHistogram / edaDetectOutliers), condensed to one variable driving
-  // both the histogram and the outlier scan, matching this screen's layout.
+  // Step 1: Outliers
   const [outlierVariable, setOutlierVariable] = useState('');
   const [outlierMethod, setOutlierMethod] = useState('percentile');
   const [outlierLowerPct, setOutlierLowerPct] = useState(0.5);
   const [outlierUpperPct, setOutlierUpperPct] = useState(99.5);
   const [outlierThreshold, setOutlierThreshold] = useState(3.0);
   const [binWidthInput, setBinWidthInput] = useState('');
-  const [binWidth, setBinWidth] = useState(null); // null = let the server choose
+  const [binWidth, setBinWidth] = useState(null);
   const [binWidthError, setBinWidthError] = useState(null);
   const [histRaw, setHistRaw] = useState(null);
   const [outlierRaw, setOutlierRaw] = useState(null);
   const [isScanningOutliers, setIsScanningOutliers] = useState(false);
   const [outlierScanError, setOutlierScanError] = useState(null);
-  // Row indices excluded from the working dataset — indexed into the
-  // ORIGINAL, unfiltered `rows` array (not the filtered one), so exclusions
-  // stay consistent across variables and across restore/re-exclude cycles.
   const [excludedRowKeys, setExcludedRowKeys] = useState(() => new Set());
 
-  // The actual working dataset, with excluded rows removed. This is what
-  // Steps 2-4 (live channel preview, pre/post correlation, Save & Apply) run
-  // against — exclusion here is real pre-treatment, not just a chart filter.
-  // Kept indexed against the ORIGINAL `rows` array throughout (never against
-  // this filtered one), so the outlier scan's returned indices never need
-  // re-mapping after an exclusion changes what's in the working set.
-  // Declared early (right after the state it depends on) rather than near
-  // the rest of the Step 1 outlier logic further down — several Step 2-4
-  // effects reference it in their dependency arrays, and a const referenced
-  // in a dependency array before its own declaration line executes is a
-  // temporal-dead-zone error, not just a stale-value bug.
   const effectiveCsv = useMemo(() => {
     if (!excludedRowKeys.size) return activeCsv;
     const keptRows = rows.filter((_, idx) => !excludedRowKeys.has(idx));
     return Papa.unparse(keptRows, { columns });
   }, [activeCsv, rows, columns, excludedRowKeys]);
 
-  // Step 2 (was Step 1)
+  // Step 2: Columns & Roles
   const [dateKeys, setDateKeys] = useState([]);
+  const [geoKeys, setGeoKeys] = useState([]);
+  const [dependentVars, setDependentVars] = useState([]);
+  const [zipKeys, setZipKeys] = useState([]);
+  const [dmaKeys, setDmaKeys] = useState([]);
+  const [popKeys, setPopKeys] = useState([]);
+  const [carryover, setCarryover] = useState(false);
+  const [modelSpec, setModelSpec] = useState('linear_log');
 
-  // Detected from the actual data, not assumed. Looks at the spacing between
-  // every distinct date in the chosen date column and takes the median gap
-  // (median rather than mean so one bad/missing date doesn't skew it), then
-  // buckets that gap into the nearest common grain. Feeds the Horizon/Lag
-  // labels below — nothing about the actual transformation math changes,
-  // only what unit the period-count numbers are described in.
   const detectedGranularity = useMemo(() => {
     const dateCol = dateKeys[0];
     if (!dateCol || !rows.length) return null;
@@ -159,80 +115,46 @@ function DataTransformation() {
     return 'yearly';
   }, [rows, dateKeys]);
 
-  const granularityUnitLabel = GRANULARITY_UNIT[detectedGranularity] || 'week'; // weekly fallback if detection is inconclusive
-  const [geoKeys, setGeoKeys] = useState([]);
-  const [dependentVars, setDependentVars] = useState([]);
-  const [zipKeys, setZipKeys] = useState([]);
-  const [dmaKeys, setDmaKeys] = useState([]);
-  const [popKeys, setPopKeys] = useState([]);
-  const [carryover, setCarryover] = useState(false);
-  // Linear-Log keeps the KPI in linear units and out of the transformable set;
-  // Log-Log puts a log curve on it, which makes it a channel Step 3 configures.
-  const [modelSpec, setModelSpec] = useState('linear_log'); // linear_log | log_log
+  const granularityUnitLabel = GRANULARITY_UNIT[detectedGranularity] || 'week';
 
-  // Step 2
+  // Step 3: Configurations
   const [selectedVars, setSelectedVars] = useState(new Set());
-  // What the user declared each column IS, on the ingestion screen. Empty for a
-  // workflow whose files predate column categories, in which case every
-  // fallback below is the name-based guess this screen used to make on its own.
   const [declaredRoles, setDeclaredRoles] = useState({});
-  const [derivedVars, setDerivedVars] = useState([]); // [{id, name, operator, parts}]
-  const [derivedDraft, setDerivedDraft] = useState(null); // {name, operator, parts}
-  // Which channel's benchmark panel is open, if any.
+  const [derivedVars, setDerivedVars] = useState([]);
+  const [derivedDraft, setDerivedDraft] = useState(null);
   const [guidanceFor, setGuidanceFor] = useState('');
 
-  // Step 3: per-variable config
-  const [configs, setConfigs] = useState({}); // { [varName]: {decay, horizon, saturation, param, source} }
-  // Lag's input needs to be freely backspace-able down to empty while typing,
-  // but configs[name].lag must always stay a real number for
-  // sharedToTransformation's payload — so the in-progress text lives here,
-  // separate from the committed value, and only gets parsed/committed back
-  // into configs on blur.
-  const [lagDrafts, setLagDrafts] = useState({}); // { [varName]: string }
-  // Same free-typing pattern as lag, for Adstock Decay and Adstock Horizon -
-  // both used to be fixed dropdowns (ADSTOCK_OPTIONS / a horizon preset list
-  // per grain); channels that need a value outside those presets, or a grain
-  // the preset lists didn't anticipate, could never reach it. Horizon is
-  // still shown in whatever unit detectedGranularity found in the data
-  // (same as Lag), it just isn't limited to that grain's preset numbers now.
-  const [decayDrafts, setDecayDrafts] = useState({}); // { [varName]: string }
-  const [horizonDrafts, setHorizonDrafts] = useState({}); // { [varName]: string }
+  // Grid Search Modal State
+  const [gridSearchModal, setGridSearchModal] = useState(null);
+
+  const [configs, setConfigs] = useState({});
+  const [lagDrafts, setLagDrafts] = useState({});
+  const [decayDrafts, setDecayDrafts] = useState({});
+  const [horizonDrafts, setHorizonDrafts] = useState({});
 
   const [transformSetName, setTransformSetName] = useState('');
   const [isApplying, setIsApplying] = useState(false);
   const [applyError, setApplyError] = useState(null);
 
-  // Result of applying (post-Step-3-save)
-  const [transformResult, setTransformResult] = useState(null); // { rows, transformedCols, corrThreshold... }
+  // Step 4: Transformed Previews
+  const [transformResult, setTransformResult] = useState(null);
   const [inspectVar, setInspectVar] = useState('');
   const [corrThreshold, setCorrThreshold] = useState(0.7);
   const [correlation, setCorrelation] = useState(null);
   const [corrError, setCorrError] = useState(null);
   const [isScoringCorr, setIsScoringCorr] = useState(false);
-  // The same correlation, scored on the raw (pre-transformation) columns, so
-  // Step 4 can show the before/after structure side by side.
   const [preCorrelation, setPreCorrelation] = useState(null);
   const [preCorrError, setPreCorrError] = useState(null);
   const [isScoringPreCorr, setIsScoringPreCorr] = useState(false);
   const [preview, setPreview] = useState(null);
   const [previewError, setPreviewError] = useState(null);
   const [isPreviewing, setIsPreviewing] = useState(false);
-  // The ARD a restored configuration belongs to. Consumed once by the loader,
-  // so only that first load keeps the config instead of resetting it.
   const restoredArd = useRef(null);
-  // The set-name field, so Save can send the user to it when it is empty.
   const setNameRef = useRef(null);
-  // The set the user deliberately saved, with a signature of the config it
-  // was saved from. Null until Save is pressed.
   const [savedSet, setSavedSet] = useState(null);
 
-  // Remember where the user got to, so Resume reopens this screen instead
-  // of always returning to Data Ingestion.
   useEffect(() => { recordStage('transformation'); }, []);
 
-  // Everything the user chose on this screen. The transformed dataset itself
-  // is not stored: it is reproducible from this config plus the ARD, and a
-  // stale copy of it would outlive the data it was computed from.
   const stateRestored = useScreenState('transformation', {
     ready: Boolean(columns.length),
     deps: [selectedArdFilename, dateKeys, geoKeys, dependentVars, zipKeys, dmaKeys,
@@ -243,7 +165,6 @@ function DataTransformation() {
       dateKeys, geoKeys, dependentVars, zipKeys, dmaKeys, popKeys,
       carryover,
       modelSpec,
-      // A Set does not survive JSON.
       selectedVars: Array.from(selectedVars),
       derivedVars,
       configs,
@@ -253,8 +174,6 @@ function DataTransformation() {
       savedSet,
     }),
     restore: (s) => {
-      // The ARD is restored by the loader effect below, which also refetches
-      // its rows; setting it here would race that.
       if (Array.isArray(s.dateKeys)) setDateKeys(s.dateKeys);
       if (Array.isArray(s.geoKeys)) setGeoKeys(s.geoKeys);
       if (Array.isArray(s.dependentVars)) setDependentVars(s.dependentVars);
@@ -275,8 +194,6 @@ function DataTransformation() {
   });
 
   useEffect(() => {
-    // Waits for the restore. Running concurrently would let this pick the
-    // first ARD in the list before the saved choice had arrived.
     if (!stateRestored) return;
     (async () => {
       setIsLoadingArds(true);
@@ -286,16 +203,12 @@ function DataTransformation() {
         setWorkflowId(id);
         const [data, uploads] = await Promise.all([
           v2ListArds(id),
-          // Roles are declared per source file; an ARD is those files joined,
-          // so they are merged into one map covering its columns. A failure
-          // here costs the defaults, not the screen - hence the catch.
           listFiles(id, { kind: 'upload' }).catch(() => ({ items: [] })),
         ]);
         const items = data.items || [];
         setArds(items);
         setDeclaredRoles(rolesFromDatasets(uploads.items));
         if (items.length) {
-          // Reopen the ARD the user was working on, when it still exists.
           const wanted = items.find((x) => x.filename === restoredArd.current);
           setSelectedArdFilename((wanted || items[0]).filename);
         }
@@ -320,35 +233,14 @@ function DataTransformation() {
       setColumns(cols);
       setRows(parsed.data);
 
-      // Loading a DIFFERENT ARD clears the configuration, because column names
-      // chosen against one dataset rarely mean anything in another. Loading
-      // the ARD a restored config was saved against must not: that is the
-      // resume path, and resetting here would wipe the work a moment after
-      // putting it back.
-      // Not consumed: StrictMode mounts twice, so this runs twice for the same
-      // file. Clearing it on the first pass let the second re-guess and wipe
-      // the configuration that had just been restored. Comparing without
-      // clearing is idempotent - and selecting a genuinely different ARD still
-      // falls through to fresh guesses, which is the intended behaviour.
       const keepConfig = restoredArd.current === filename;
       if (!keepConfig) {
-        // Step 1 is answered from what the user declared at ingestion rather
-        // than re-guessed here. The old guesses were a second, weaker set of
-        // rules - `/npi|dma|zip|id$/` took the first match and had no way to be
-        // told it was wrong - and they disagreed with the ones Data Review and
-        // Model Configuration were each making separately.
-        //
-        // `rolePartition` falls back to the same kind of name matching for any
-        // column with no declared role, so an ARD built before column
-        // categories existed still opens with something sensible selected.
         const part = rolePartition(cols, declaredRoles);
         setDateKeys(part['Time Variable'].slice(0, 1));
         setGeoKeys(part['Cross-sectional Variable'].slice(0, 1));
         setDependentVars(part['Dependent Variable'].slice(0, 1));
         setZipKeys([]); setDmaKeys([]);
         setPopKeys(part['Baseline Variables'].slice(0, 1));
-        // Promotions are what a marketing mix model transforms, so they start
-        // ticked - the same default as the reference app.
         setSelectedVars(new Set(part['Independent Promotions']));
         setDerivedVars([]);
         setDerivedDraft(null);
@@ -369,29 +261,11 @@ function DataTransformation() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedArdFilename, workflowId]);
 
-  // The model's keys. Baseline columns are deliberately NOT here: a population
-  // column is both the divisor for population normalization and a variable
-  // worth transforming in its own right.
   const lockedKeys = useMemo(
     () => new Set([...dateKeys, ...geoKeys, ...zipKeys, ...dmaKeys]),
     [dateKeys, geoKeys, zipKeys, dmaKeys]
   );
 
-  /**
-   * What Step 3 can configure: promotions and baselines, plus the KPI only
-   * under Log-Log.
-   *
-   * The formulation IS the KPI lock. Linear-Log keeps the dependent variable
-   * in linear units, so it is not a channel to adstock and saturate; Log-Log
-   * puts a log curve on it, which makes it one. There is no separate lock
-   * control: an earlier version of this screen had per-KPI checkboxes, so the
-   * radio could say the KPI was un-transformed while a checkbox still put it
-   * in the table.
-   *
-   * Built from the ingestion categories rather than "every numeric column that
-   * is not a key", so a geography code or an ID that happens to be numeric is
-   * never offered as a media channel.
-   */
   const eligibleColumns = useMemo(() => {
     const part = rolePartition(columns, declaredRoles);
     const list = [...part['Independent Promotions'], ...part['Baseline Variables']];
@@ -414,8 +288,6 @@ function DataTransformation() {
     });
   };
 
-  // The builder stays a draft until Add: a half-specified derived variable
-  // would otherwise reach the engine, which needs at least two real columns.
   const openDerivedBuilder = () => {
     if (eligibleColumns.length < 2) return;
     setDerivedDraft({ name: '', operator: '+', parts: eligibleColumns.slice(0, 2) });
@@ -433,15 +305,11 @@ function DataTransformation() {
     });
   };
 
-  // The default name spells out the expression, which is what makes a column
-  // called "CALLS+EMAILS" readable three screens later in the model output.
   const derivedDefaultName = (draft) => draft.parts.join(draft.operator).toUpperCase();
 
   const commitDerivedVariable = () => {
     if (!derivedDraft || derivedDraft.parts.length < 2) return;
     const name = (derivedDraft.name.trim() || derivedDefaultName(derivedDraft)).toUpperCase();
-    // A derived name that collides with a real column would shadow it in the
-    // frame the engine builds, so the two cannot share one.
     if (columns.includes(name) || derivedVars.some((d) => d.name === name)) {
       setApplyError(`"${name}" is already a column. Give the derived variable another name.`);
       return;
@@ -472,41 +340,13 @@ function DataTransformation() {
   const configFor = (name) => sharedConfigFor(configs, name);
 
   const updateConfig = (name, updates) => {
-    setConfigs((prev) => ({ ...prev, [name]: { ...configFor(name), ...updates, source: 'manual' } }));
+    setConfigs((prev) => ({ ...prev, [name]: { ...configFor(name), ...updates, source: updates.source || 'manual' } }));
   };
 
-  // ── Engine payloads ─────────────────────────────────────────────────────
-  // Shared with Model Configuration, which replays this same set to rebuild
-  // the transformed frame the regression is fitted on. Two copies would mean
-  // two frames from one saved set.
   const toTransformation = (name) => sharedToTransformation(configs, name);
   const toDerivedVariables = () => sharedToDerivedVariables(derivedVars);
 
-  // Auto Select was removed: the reference application no longer offers it,
-  // and a per-channel fit that nothing else in the app agrees with is worse
-  // than the benchmarks the guidance panel gives. The endpoint still exists
-  // server-side; nothing here calls it.
-
-
-  // Roles for the columns in THIS frame, so a derived variable or a column
-  // from a file ingested before categories existed still gets one.
   const columnRoles = rolesFor(columns, declaredRoles);
-
-
-  /**
-   * The channels Step 2 configures, in the order they are shown.
-   *
-   * Step 1's Promotions card holds the marketing selection and its Baseline
-   * card the population and macro ones; the KPI joins them under Log-Log, and
-   * a derived channel is added at the end. There is no separate selection
-   * step: one decision, taken in one place.
-   *
-   * Everything is intersected with `eligibleColumns`, so a column that has
-   * since been chosen as the date or geography key drops out rather than being
-   * configured as a channel.
-   */
-  // The promotions card's own selection, as an array. selectedVars is a Set,
-  // and CategoryCard needs .includes/.filter.
   const selectedVarList = useMemo(() => [...selectedVars], [selectedVars]);
 
   const selectedList = useMemo(() => {
@@ -516,12 +356,61 @@ function DataTransformation() {
     return [...kept, ...derivedVars.map((d) => d.name)];
   }, [selectedVars, popKeys, dependentVars, modelSpec, eligibleColumns, derivedVars]);
 
-  // Derived rather than synced through an effect: the inspected channel is
-  // always one of the currently selected variables, falling back to the first
-  // when the chosen one is deselected. No extra render, nothing to keep in step.
   const activeInspectVar = selectedList.includes(inspectVar)
     ? inspectVar
     : (selectedList[0] || '');
+
+  // ── Grid Search Auto-Tune Handlers ──────────────────────────────────────
+  const handleOpenGridSearch = async (channelName) => {
+    if (!effectiveCsv || !dependentVars.length) {
+      setApplyError('Dependent variable must be selected in Step 2 to tune channel parameters.');
+      return;
+    }
+    setGridSearchModal({
+      channel: channelName,
+      isTuning: true,
+      result: null,
+      error: null,
+      current: configFor(channelName),
+    });
+
+    try {
+      const res = await transformationGridSearchSingle({
+        csv_data: effectiveCsv,
+        channel: channelName,
+        geo_column: geoKeys[0] || '',
+        date_column: dateKeys[0] || '',
+        dependent_variable: dependentVars[0],
+        derived_variables: toDerivedVariables(),
+        pop_column: popKeys[0] || null,
+      });
+      setGridSearchModal((prev) => (prev && prev.channel === channelName ? {
+        ...prev,
+        isTuning: false,
+        result: res,
+      } : prev));
+    } catch (err) {
+      setGridSearchModal((prev) => (prev && prev.channel === channelName ? {
+        ...prev,
+        isTuning: false,
+        error: problemMessage(err, 'Grid search parameter optimization failed.'),
+      } : prev));
+    }
+  };
+
+  const handleApplyGridSearchResult = (channelName, gridResult) => {
+    if (!gridResult) return;
+    updateConfig(channelName, {
+      normalization: gridResult.normalization || 'none',
+      decay: gridResult.decay ?? 0.5,
+      horizon: gridResult.horizon ?? 2,
+      lag: gridResult.lag ?? 0,
+      saturation: gridResult.saturation || 'none',
+      param: gridResult.param ?? 1.0,
+      source: 'auto',
+    });
+    setGridSearchModal(null);
+  };
 
   const handleSaveApply = async () => {
     if (!dateKeys.length || !geoKeys.length || !dependentVars.length) {
@@ -536,17 +425,7 @@ function DataTransformation() {
     setIsApplying(true);
 
     try {
-      // Run on the server: derived variables, then normalization -> adstock ->
-      // saturation per channel, then the optional carryover column. This is the
-      // same engine the model is fitted with, so what is previewed here is what
-      // gets modelled.
       const builtTransformations = selectedList.map(toTransformation);
-      // Verify per-channel population weight is actually reaching the
-      // payload — sharedToTransformation (services/manifest.js) may or may
-      // not read cfg.popColumn yet; if "Population Column"/"pop_column" on
-      // a population-normalized row doesn't reflect what was picked per
-      // channel in Step 3, that shared function needs updating to read it.
-      console.log('[Data Transformation] built transformations (check Population Column/pop_column per row):', builtTransformations);
       const data = await transformationApply({
         csv_data: effectiveCsv,
         geo_column: geoKeys[0],
@@ -558,9 +437,6 @@ function DataTransformation() {
         add_carryover: carryover,
       });
 
-      // The full transformed dataset comes back as CSV; the `preview` field is
-      // only the first 60 rows, which would quietly make the correlation panel
-      // and the inspector chart describe a sample rather than the data.
       const parsed = Papa.parse(data.csv_data, {
         header: true, dynamicTyping: true, skipEmptyLines: true,
       });
@@ -587,9 +463,6 @@ function DataTransformation() {
     }
   };
 
-  // What was applied, as one comparable string. Saving records this, and the
-  // card goes back to Unsaved the moment any of it changes - a set that still
-  // read "Saved" after the config moved underneath it would be a lie.
   const appliedSignature = useMemo(() => JSON.stringify({
     ard: selectedArdFilename,
     dateKeys, geoKeys, dependentVars, popKeys, carryover,
@@ -600,15 +473,10 @@ function DataTransformation() {
   [selectedArdFilename, dateKeys, geoKeys, dependentVars, popKeys, carryover,
    selectedVars, configs, derivedVars]);
 
-  // Saved only when a set was saved AND nothing has changed since.
   const isSaved = Boolean(savedSet) && savedSet.signature === appliedSignature;
 
   const saveTransformationSet = () => {
     if (!transformResult) return;
-
-    // A set with no name is a set nobody can identify later. Rather than
-    // inventing one, point at the field that needs filling in - it lives up in
-    // Step 3, which is easy to miss from the button down here.
     if (!transformSetName.trim()) {
       setApplyError('Name this transformation set in Step 3 before saving it.');
       setNameRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -621,18 +489,12 @@ function DataTransformation() {
       name: transformSetName.trim(),
       signature: appliedSignature,
       savedAt: new Date().toISOString(),
-      // The transformed frame is deliberately not stored: it is 26k rows of
-      // derived data that this config reproduces exactly, and a stale copy
-      // would outlive the ARD it came from.
       columns: transformResult.columns,
       rowCount: transformResult.rowCount,
     });
   };
 
-  // ---- Validation section ----
-  // Correlation over the transformed columns, computed by the same engine the
-  // Data Review screen uses, so the two screens cannot disagree about the same
-  // pair of channels.
+  // Correlation Scoring
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -647,9 +509,6 @@ function DataTransformation() {
         const data = await transformationCorrelation({
           csv_data: transformResult.csv,
           columns: columnsToScore,
-          // 0 so the response carries every pair. The slider filters what is
-          // shown; it does not change the correlations themselves, so it must
-          // not cause another upload of the whole dataset.
           threshold: 0,
         });
         if (!cancelled) { setCorrelation(data); setCorrError(null); }
@@ -663,16 +522,8 @@ function DataTransformation() {
       }
     })();
     return () => { cancelled = true; };
-    // Deliberately NOT keyed on corrThreshold. The slider steps in 0.05, so
-    // dragging it once re-ran this twenty times, each posting the entire
-    // transformed dataset; the connection gave out and the screen reported the
-    // backend as unreachable.
   }, [transformResult]);
 
-  // The same channels, scored before any transformation was applied, so Step
-  // 4 can show whether adstock/saturation *changed* the correlation structure
-  // rather than only what it looks like afterwards. Uses the raw column each
-  // transformed column came from, so the two matrices line up row-for-row.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -684,13 +535,6 @@ function DataTransformation() {
       }
       setIsScoringPreCorr(true);
       try {
-        // /api/correlation/matrix, not /api/transformation/correlation — the
-        // latter has no derived_variables support at all (confirmed against
-        // the API reference), which is why a derived variable never showed
-        // up here before: the parameter was being sent but silently ignored
-        // by an endpoint that doesn't accept it. This one computes derived
-        // variables from the raw data server-side before scoring, same as
-        // transformationApply does for the Post matrix.
         const data = await fetchPreCorrelationMatrix({
           csv_data: effectiveCsv,
           columns: rawColumnsToScore,
@@ -708,12 +552,8 @@ function DataTransformation() {
       }
     })();
     return () => { cancelled = true; };
-    // Same reasoning as the post-transformation effect above: keyed on
-    // transformResult (which only changes on Apply), never on corrThreshold.
   }, [transformResult, effectiveCsv]);
 
-  // The server returns the matrix column-major ({ colA: { colB: r } }); the
-  // table renders rows, so it is pivoted once here.
   const correlationMatrix = useMemo(() => {
     if (!correlation?.columns?.length) return [];
     const cols = correlation.columns;
@@ -723,7 +563,6 @@ function DataTransformation() {
     }));
   }, [correlation]);
 
-  // Same pivot, for the raw-column ("before") matrix.
   const preCorrelationMatrix = useMemo(() => {
     if (!preCorrelation?.columns?.length) return [];
     const cols = preCorrelation.columns;
@@ -733,13 +572,6 @@ function DataTransformation() {
     }));
   }, [preCorrelation]);
 
-  // Scatter data for the two charts below the correlation matrices — same
-  // channel-vs-KPI pairing the single-channel inspector further down uses
-  // (raw values for Pre, _transformed for Post), capped at 500 points so a
-  // 10k-row ARD doesn't render an unreadable, sluggish point cloud.
-  // Scatter X/Y are independently selectable (any ARD column), defaulting to
-  // the inspector's current channel and the dependent variable so the charts
-  // still make sense out of the box without the user having to pick first.
   const [scatterXVar, setScatterXVar] = useState('');
   const [scatterYVar, setScatterYVar] = useState('');
   const SCATTER_POINT_CAP = 500;
@@ -755,10 +587,6 @@ function DataTransformation() {
       .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
   }, [rows, excludedRowKeys, effectiveScatterX, effectiveScatterY]);
 
-  // Not every picked X column has a _transformed counterpart (e.g. a
-  // Baseline or Dimension field never gets one) — postScatterHasX flags
-  // that so the chart can say so plainly instead of silently plotting
-  // nothing or falling back to the raw column unlabeled.
   const postScatterTransformedCol = `${effectiveScatterX}_transformed`;
   const postScatterHasX = Boolean(transformResult?.columns?.includes(postScatterTransformedCol));
   const postScatterData = useMemo(() => {
@@ -769,10 +597,6 @@ function DataTransformation() {
       .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
   }, [transformResult, effectiveScatterX, effectiveScatterY, postScatterHasX, postScatterTransformedCol]);
 
-  // Filtered here, from the matrix already in hand, using the same rule the
-  // engine applies: upper triangle only, |r| at or above the threshold,
-  // strongest first. The value shown keeps its sign, which the matrix cells
-  // above it also show; the threshold compares the magnitude.
   const highCorrPairs = useMemo(() => {
     const cols = correlation?.columns || [];
     const pairs = [];
@@ -786,9 +610,6 @@ function DataTransformation() {
     return pairs.sort((x, y) => Math.abs(y.r) - Math.abs(x.r));
   }, [correlation, corrThreshold]);
 
-  // Live preview of ONE channel, computed by the engine. It re-runs whenever
-  // the config for that channel changes, so the effect of a decay or a
-  // saturation curve is visible before committing anything with Save & Apply.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -819,13 +640,9 @@ function DataTransformation() {
       }
     })();
     return () => { cancelled = true; };
-    // `configs` is a dependency so editing the inspected channel re-previews.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveCsv, activeInspectVar, configs, derivedVars, geoKeys, dateKeys, dependentVars, popKeys]);
 
-  // The server response, reshaped for the panels below. Statistics, bins and
-  // curves all come from the engine, so what is shown here is what the model
-  // will be fitted on rather than a second approximation of it.
   const inspectDetail = useMemo(() => {
     if (!preview) return null;
     const byMetric = Object.fromEntries(
@@ -869,10 +686,7 @@ function DataTransformation() {
     URL.revokeObjectURL(url);
   };
 
-  // ── Step 1 (new): Outlier Diagnostics & Pre-Treatment ────────────────────
-  // Every numeric column in the ARD, not scoped to promotions/baseline like
-  // eligibleColumns above — the KPI itself (e.g. trx_pso) needs outlier
-  // inspection just as much as any channel.
+  // Step 1 Outlier Logic
   const numericColumnsAll = useMemo(
     () => columns.filter((c) => !lockedKeys.has(c) && isNumericColumn(rows, c)),
     [columns, rows, lockedKeys]
@@ -883,8 +697,6 @@ function DataTransformation() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [numericColumnsAll]);
 
-  // Same two server endpoints Data Review's "Distributions & Outliers" tab
-  // uses, fired together since this screen drives both from one variable.
   const runOutlierScan = () => {
     if (!activeCsv || !outlierVariable) return;
     setIsScanningOutliers(true);
@@ -906,8 +718,6 @@ function DataTransformation() {
     ])
       .then(([hist, out]) => {
         setHistRaw(hist);
-        // Seed the width box with whatever the server actually used, so the
-        // first edit is a nudge from the real value rather than a guess.
         if (!binWidth && hist?.bin_width) setBinWidthInput(String(hist.bin_width));
         setOutlierRaw(out);
       })
@@ -915,17 +725,11 @@ function DataTransformation() {
       .finally(() => setIsScanningOutliers(false));
   };
 
-  // Auto-runs once a variable/ARD is available, and again whenever the bin
-  // width changes (Apply Width). Everything else — method, cutoffs,
-  // threshold — is picked up on the next "Re-Scan Outliers" click, so typing
-  // a new cutoff doesn't fire a request per keystroke.
   useEffect(() => {
     runOutlierScan();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeCsv, outlierVariable, binWidth]);
 
-  // A width is in the units of the column it was chosen for — reset it when
-  // switching variables rather than carrying it over, same as Data Review.
   const lastOutlierVariable = useRef('');
   useEffect(() => {
     const previous = lastOutlierVariable.current;
@@ -963,8 +767,6 @@ function DataTransformation() {
     return {
       lower: Number(outlierRaw.lower_bound) || 0,
       upper: Number(outlierRaw.upper_bound) || 0,
-      // Rows already excluded stop counting as "still flagged" — otherwise
-      // clicking Exclude wouldn't visibly change anything on screen.
       flaggedIndices: allFlagged.filter((idx) => !excludedRowKeys.has(idx)),
       pct: Number(outlierRaw.outlier_pct) || 0,
     };
@@ -1007,7 +809,7 @@ function DataTransformation() {
 
       {!isLoadingArds && !loadError && ards.length > 0 && (
         <>
-          {/* ---- Active ARD selector ---- */}
+          {/* Active ARD selector */}
           <div className="transform-card">
             <p className="transform-card-heading">Active ARD Dataset Under Transformation</p>
             <p className="transform-card-heading" style={{ marginBottom: '0.5rem' }}>Select ARD Table:</p>
@@ -1028,7 +830,7 @@ function DataTransformation() {
 
           {!isLoadingData && !dataError && rows.length > 0 && (
             <>
-              {/* ---- Step 1 (new): Outlier Diagnostics & Pre-Treatment ---- */}
+              {/* Step 1: Outlier Diagnostics & Pre-Treatment */}
               <div className="transform-card">
                 <p className="transform-section-title">Outlier Diagnostics &amp; Pre-Treatment</p>
                 <p className="transform-section-desc">
@@ -1133,8 +935,6 @@ function DataTransformation() {
                       color="#1d2a6b"
                       xLabel={outlierVariable}
                       yLabel="Records"
-                      // The tick was a bin ordinal, not a value - it told the
-                      // reader nothing the tooltip does not say properly.
                       showXTicks={false}
                     />
                   </div>
@@ -1159,14 +959,11 @@ function DataTransformation() {
                 )}
               </div>
 
-              {/* ---- Step 2: Column categorization ---- */}
+              {/* Step 2: Column Categorization */}
               <div className="transform-card">
-                <p className="transform-section-title">
-                  Column Categorization (from Ingestion)
-                </p>
+                <p className="transform-section-title">Column Categorization (from Ingestion)</p>
                 <p className="transform-section-desc">
-                  Variables are categorized according to their Ingestion roles. You can adjust
-                  channel inclusions or switch model formulation below.
+                  Variables are categorized according to their Ingestion roles. You can adjust channel inclusions or switch model formulation below.
                 </p>
 
                 <div className="category-card-grid">
@@ -1177,9 +974,6 @@ function DataTransformation() {
                     selected={dateKeys}
                     onToggle={(c) => togglePill(setDateKeys, dateKeys, c)}
                   />
-                  {/* ZIP and DMA had pickers of their own that were never sent
-                      to the engine - they only excluded a column from
-                      transformation, which selecting it here already does. */}
                   <CategoryCard
                     index={2} title="Cross-sectional Variable" hint="HCP IDs, DMA, Zip, Region Keys"
                     role="Cross-sectional Variable"
@@ -1194,18 +988,10 @@ function DataTransformation() {
                     selected={dependentVars}
                     onToggle={(c) => togglePill(setDependentVars, dependentVars, c)}
                   />
-                  {/* The promotions card IS the channel inclusion list: these
-                      are the columns Step 3 will configure. */}
                   <CategoryCard
                     index={4} title="Independent Promotions" hint="Calls, Details, Spend, Emails, Media"
                     role="Independent Promotions"
                     columns={columns} columnRoles={columnRoles}
-                    // Its OWN selection, not selectedList. selectedList is the
-                    // merged Step 2 channel list - promotions plus baselines
-                    // plus the KPI under log-log - and CategoryCard renders any
-                    // selected column that is out of its role as an extra pill.
-                    // Handed the merged list, this card grew a pill for every
-                    // baseline variable the Baseline card selected.
                     selected={selectedVarList}
                     onToggle={toggleVarSelect}
                   />
@@ -1219,16 +1005,14 @@ function DataTransformation() {
 
                   <div className="formulation-card">
                     <p className="category-card-title">Model Formulation &amp; KPI Lock</p>
-                    <p className="category-card-hint">
-                      Decide whether the Dependent Variable is transformed
-                    </p>
+                    <p className="category-card-hint">Decide whether the Dependent Variable is transformed</p>
                     <label className="formulation-option">
                       <input
                         type="radio" name="model-formulation"
                         checked={modelSpec === 'linear_log'}
                         onChange={() => setModelSpec('linear_log')}
                       />
-                      Lock Dependent Varibale(Sales KPI)
+                      Lock Dependent Variable (Sales KPI)
                     </label>
                     <label className="formulation-option">
                       <input
@@ -1236,18 +1020,9 @@ function DataTransformation() {
                         checked={modelSpec === 'log_log'}
                         onChange={() => setModelSpec('log_log')}
                       />
-                      Unlock Dependent Varibale(Sales KPI)
+                      Unlock Dependent Variable (Sales KPI)
                     </label>
-                    {/* <label className="formulation-option is-check">
-                      <input
-                        type="checkbox" checked={carryover}
-                        onChange={(e) => setCarryover(e.target.checked)}
-                      />
-                      Generate Carryover (Lag 1 of Sales KPI)
-                    </label> */}
 
-                    {/* What the radio above actually did, said in the terms
-                        the rest of the screen uses. */}
                     {dependentVars.length > 0 && (
                       <p className="category-card-hint" style={{ marginTop: '0.7rem' }}>
                         {modelSpec === 'log_log'
@@ -1262,23 +1037,13 @@ function DataTransformation() {
                 </div>
               </div>
 
-              {/* ---- Step 3: Transformation Configuration Table ----
-                  There is no separate variable-selection step. What gets
-                  configured here is what Step 1 put in the Promotions and
-                  Baseline cards, plus the KPI when the formulation is Log-Log
-                  and any derived channel added below. A grid that repeated
-                  those same selections was a second place to change one
-                  decision. */}
+              {/* Step 3: Transformation Configuration Table */}
               {selectedList.length > 0 && (
                 <div className="transform-card">
                   <p className="transform-section-title">Transformation Configuration Table</p>
                   <p className="transform-section-desc">
-                    Configure Normalization, Adstock Decay, Adstock Horizon (decay span), Lag (pure
-                    shift) and Saturation curves per channel. Use the i on any row for benchmarks.
-                    {' '}Channels come from the categories in Step 2
-                    {modelSpec === 'log_log' && dependentVars.length > 0
-                      ? `, including ${dependentVars.join(', ')} under Log-Log.`
-                      : '.'}
+                    Configure Normalization, Adstock Decay, Adstock Horizon, Lag, and Saturation curves per channel.
+                    Click <strong>⚡ Auto</strong> for automated multi-dimensional Grid Search optimization or <strong>i</strong> for channel benchmarks.
                   </p>
 
                   <div className="step-toolbar">
@@ -1348,9 +1113,16 @@ function DataTransformation() {
                     <table className="config-table">
                       <thead>
                         <tr>
-                          <th>Variable</th><th>Category</th><th>Normalization &amp; Population Weight</th><th>Adstock (Decay)</th>
-                          <th>Adstock Horizon</th><th>Lag (Shift)</th>
-                          <th>Saturation Curve</th><th>Param (k / p)</th><th>Guidance</th>
+                          <th>Variable</th>
+                          <th>Category</th>
+                          <th>Normalization</th>
+                          <th>Adstock (Decay)</th>
+                          <th>Adstock Horizon</th>
+                          <th>Lag (Shift)</th>
+                          <th>Saturation Curve</th>
+                          <th>Param (k / p)</th>
+                          <th>Auto-Tune</th>
+                          <th>Guidance</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1363,9 +1135,6 @@ function DataTransformation() {
                               <td>
                                 <div className="config-name-cell">
                                   <strong>{name}</strong>
-                                  {/* Deleting a derived channel lives with its
-                                      name now that the Actions column is gone;
-                                      guidance has a column of its own. */}
                                   {derived && (
                                     <button
                                       className="remove-derived-btn"
@@ -1376,8 +1145,6 @@ function DataTransformation() {
                                     </button>
                                   )}
                                 </div>
-                                {/* A derived channel's formula, so a row named
-                                    "promo_total" says what it is made of. */}
                                 {derived && (
                                   <span className="derived-formula">
                                     = {derived.parts.join(` ${derived.operator} `)}
@@ -1385,9 +1152,6 @@ function DataTransformation() {
                                 )}
                               </td>
                               <td>
-                                {/* Derived and KPI rows are not promotions, and
-                                    a KPI only appears here at all under
-                                    Log-Log. */}
                                 <span className={`role-chip tone-${
                                   derived ? 'amber' : isDep ? 'red'
                                     : roleMeta(columnRoles[name])?.tone || 'neutral'}`}
@@ -1405,8 +1169,6 @@ function DataTransformation() {
                                     <option key={o.value} value={o.value}>{o.label}</option>
                                   ))}
                                 </select>
-                                {/* The Population weight picker went with the
-                                    option it belonged to. */}
                               </td>
                               <td>
                                 <div className="lag-input-cell">
@@ -1451,31 +1213,18 @@ function DataTransformation() {
                                   <span className="lag-input-unit">{granularityUnitLabel}(s)</span>
                                 </div>
                               </td>
-                              {/* The pure shift, separate from the horizon and
-                                  sent as its own `Lag` key, exactly as the
-                                  reference app sends it. Free-form per
-                                  feedback — a fixed 0-4 week dropdown made no
-                                  sense once the grain isn't weekly, and the
-                                  engine accepts any non-negative period
-                                  count anyway. */}
                               <td>
                                 <div className="lag-input-cell">
                                   <input
                                     type="number" min="0" step="1"
                                     value={lagDrafts[name] !== undefined ? lagDrafts[name] : String(cfg.lag ?? 0)}
                                     onChange={(e) => {
-                                      // Strips a leading zero once another digit follows it
-                                      // (05 -> 5, 007 -> 7), but leaves a lone "0" alone so
-                                      // typing a fresh zero still works normally.
                                       const normalized = e.target.value.replace(/^0+(?=\d)/, '');
                                       setLagDrafts((d) => ({ ...d, [name]: normalized }));
                                     }}
                                     onBlur={(e) => {
                                       const parsed = Math.max(0, Number(e.target.value) || 0);
                                       updateConfig(name, { lag: parsed });
-                                      // Draft's job is done — future renders read straight from
-                                      // configs again, so an external reset of cfg.lag (e.g.
-                                      // "Reset to suggested") isn't shadowed by a stale draft.
                                       setLagDrafts((d) => {
                                         const next = { ...d };
                                         delete next[name];
@@ -1493,8 +1242,21 @@ function DataTransformation() {
                               </td>
                               <td>
                                 {cfg.saturation !== 'none' ? (
-                                  <input type="number" step="0.1" value={cfg.param} onChange={(e) => updateConfig(name, { param: Number(e.target.value) })} />
+                                  <input
+                                    type="number" step="0.1" value={cfg.param}
+                                    onChange={(e) => updateConfig(name, { param: Number(e.target.value) })}
+                                  />
                                 ) : '-'}
+                              </td>
+                              <td>
+                                <button
+                                  type="button"
+                                  className="auto-optuna-btn"
+                                  onClick={() => handleOpenGridSearch(name)}
+                                  title="Run Grid Search optimization on this channel"
+                                >
+                                  ⚡ Auto
+                                </button>
                               </td>
                               <td>
                                 <button
@@ -1512,6 +1274,109 @@ function DataTransformation() {
                     </table>
                   </div>
 
+                  {/* Exhaustive Grid Search Modal */}
+                  {gridSearchModal && (
+                    <div className="modal-overlay" onClick={() => setGridSearchModal(null)}>
+                      <div className="optuna-tune-modal" onClick={(e) => e.stopPropagation()}>
+                        <div className="optuna-modal-head">
+                          <div>
+                            <p className="optuna-modal-title">
+                              ⚡ Grid Search Parameter Optimization: {gridSearchModal.channel}
+                            </p>
+                            <p className="optuna-modal-subtitle">
+                              Exhaustively evaluating combinations of Normalization, Adstock Decay, Horizon, Lag, and Saturation curves
+                            </p>
+                          </div>
+                          <button type="button" className="optuna-modal-close" onClick={() => setGridSearchModal(null)}>✕</button>
+                        </div>
+
+                        <div className="optuna-modal-body">
+                          {gridSearchModal.isTuning && (
+                            <div className="optuna-tuning-state">
+                              <span className="loading-spinner" aria-hidden="true" />
+                              <p>Evaluating multi-dimensional grid search permutations against {dependentVars[0]}...</p>
+                            </div>
+                          )}
+
+                          {gridSearchModal.error && (
+                            <div className="transform-error-banner">{gridSearchModal.error}</div>
+                          )}
+
+                          {gridSearchModal.result && (
+                            <>
+                              <div className="optuna-comparison-table-wrap">
+                                <table className="optuna-comparison-table">
+                                  <thead>
+                                    <tr>
+                                      <th>Parameter</th>
+                                      <th>Current Settings</th>
+                                      <th>Grid Search Best Settings</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    <tr>
+                                      <td><strong>Normalization</strong></td>
+                                      <td>{gridSearchModal.current.normalization || 'none'}</td>
+                                      <td className="optuna-highlight">{gridSearchModal.result.normalization}</td>
+                                    </tr>
+                                    <tr>
+                                      <td><strong>Adstock Decay (&alpha;)</strong></td>
+                                      <td>{gridSearchModal.current.decay}</td>
+                                      <td className="optuna-highlight">{gridSearchModal.result.decay}</td>
+                                    </tr>
+                                    <tr>
+                                      <td><strong>Adstock Horizon</strong></td>
+                                      <td>{pluralUnit(gridSearchModal.current.horizon, granularityUnitLabel)}</td>
+                                      <td className="optuna-highlight">{pluralUnit(gridSearchModal.result.horizon, granularityUnitLabel)}</td>
+                                    </tr>
+                                    <tr>
+                                      <td><strong>Pure Shift Lag</strong></td>
+                                      <td>{pluralUnit(gridSearchModal.current.lag, granularityUnitLabel)}</td>
+                                      <td className="optuna-highlight">{pluralUnit(gridSearchModal.result.lag, granularityUnitLabel)}</td>
+                                    </tr>
+                                    <tr>
+                                      <td><strong>Saturation Function</strong></td>
+                                      <td>{gridSearchModal.current.saturation}</td>
+                                      <td className="optuna-highlight">{gridSearchModal.result.saturation}</td>
+                                    </tr>
+                                    <tr>
+                                      <td><strong>Saturation Parameter (k / p)</strong></td>
+                                      <td>{gridSearchModal.current.saturation === 'none' ? '-' : gridSearchModal.current.param}</td>
+                                      <td className="optuna-highlight">{gridSearchModal.result.saturation === 'none' ? '-' : gridSearchModal.result.param}</td>
+                                    </tr>
+                                  </tbody>
+                                </table>
+                              </div>
+                              <p className="optuna-note">
+                                Applying Grid Search recommendations will immediately update this row in the Transformation Configuration Table.
+                              </p>
+                            </>
+                          )}
+                        </div>
+
+                        <div className="optuna-modal-foot">
+                          <button
+                            type="button"
+                            className="mapping-btn secondary"
+                            onClick={() => setGridSearchModal(null)}
+                          >
+                            Dismiss
+                          </button>
+                          {gridSearchModal.result && (
+                            <button
+                              type="button"
+                              className="mapping-btn primary"
+                              onClick={() => handleApplyGridSearchResult(gridSearchModal.channel, gridSearchModal.result)}
+                            >
+                              ✓ Apply Grid Search Settings
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Benchmark Guidance Panel */}
                   {guidanceFor && (() => {
                     const g = getChannelGuidance(guidanceFor);
                     return (
@@ -1531,10 +1396,6 @@ function DataTransformation() {
                           <div><span>Adstock horizon</span><strong>{g.adstockHorizon}</strong></div>
                           <div><span>Saturation</span><strong>{g.saturation}</strong></div>
                         </div>
-                        {/* The reference app wrote these numbers into a
-                            sentence for the user to retype into four
-                            dropdowns. Applying them is the same information,
-                            minus the transcription. */}
                         <button
                           type="button" className="mapping-btn"
                           onClick={() => {
@@ -1566,10 +1427,9 @@ function DataTransformation() {
                 </div>
               )}
 
-              {/* ---- Validation sections (post apply) ---- */}
+              {/* Step 4: Transformed Dataset Preview & Validation */}
               {transformResult && (
                 <>
-                  
                   <div className="transform-card">
                     <div className="transform-card-titlebar">
                       <div>
@@ -1579,7 +1439,7 @@ function DataTransformation() {
                         </p>
                       </div>
                       <button type="button" className="download-csv-btn" onClick={downloadTransformed}>
-                      Download CSV
+                        Download CSV
                       </button>
                     </div>
                     <div className="transformed-preview-scroll">
@@ -1592,7 +1452,11 @@ function DataTransformation() {
                         <tbody>
                           {transformResult.rows.slice(0, 10).map((r, i) => (
                             <tr key={i}>
-                              {transformResult.columns.map((c) => <td key={c}>{typeof r[c] === 'number' ? r[c].toLocaleString(undefined, { maximumFractionDigits: 4 }) : r[c]}</td>)}
+                              {transformResult.columns.map((c) => (
+                                <td key={c}>
+                                  {typeof r[c] === 'number' ? r[c].toLocaleString(undefined, { maximumFractionDigits: 4 }) : r[c]}
+                                </td>
+                              ))}
                             </tr>
                           ))}
                         </tbody>
@@ -1629,12 +1493,8 @@ function DataTransformation() {
                     <div className="corr-compare-row">
                       <div className="corr-compare-col">
                         <p className="corr-compare-title">Pre-Transformation Matrix (Raw Features)</p>
-                        {isScoringPreCorr && (
-                          <p className="transform-section-desc" role="status">Scoring correlation…</p>
-                        )}
-                        {preCorrError && (
-                          <p className="transform-section-desc" role="alert">{preCorrError}</p>
-                        )}
+                        {isScoringPreCorr && <p className="transform-section-desc" role="status">Scoring correlation…</p>}
+                        {preCorrError && <p className="transform-section-desc" role="alert">{preCorrError}</p>}
                         <div className="config-table-wrapper">
                           <table className="corr-table-t">
                             <thead><tr><th>Variable</th>{preCorrelationMatrix.map((r) => <th key={r.col}>{r.col}</th>)}</tr></thead>
@@ -1674,12 +1534,8 @@ function DataTransformation() {
 
                       <div className="corr-compare-col">
                         <p className="corr-compare-title">Post-Transformation Matrix (Transformed Features)</p>
-                        {isScoringCorr && (
-                          <p className="transform-section-desc" role="status">Scoring correlation…</p>
-                        )}
-                        {corrError && (
-                          <p className="transform-section-desc" role="alert">{corrError}</p>
-                        )}
+                        {isScoringCorr && <p className="transform-section-desc" role="status">Scoring correlation…</p>}
+                        {corrError && <p className="transform-section-desc" role="alert">{corrError}</p>}
                         <div className="config-table-wrapper">
                           <table className="corr-table-t">
                             <thead><tr><th>Variable</th>{correlationMatrix.map((r) => <th key={r.col}>{r.col.replace('_transformed', '')}</th>)}</tr></thead>
@@ -1734,11 +1590,6 @@ function DataTransformation() {
                     )}
                   </div>
 
-
-                  <div className="section-connector">
-                   
-                  </div>
-
                   <div className="transform-card">
                     <div className="transform-card-titlebar">
                       <div>
@@ -1747,16 +1598,11 @@ function DataTransformation() {
                           Review the empirical impact of transformations, validate distribution compression, and inspect response shape against KPI before saving.
                         </p>
                       </div>
-                      {/* Applying runs the engine; saving records the set that
-                          produced this result. Nothing to save until something
-                          has been applied. */}
                       <button
                         type="button"
                         className="save-set-btn"
                         disabled={!transformResult || isSaved}
-                        title={isSaved
-                          ? 'This set is already saved'
-                          : 'Save this transformation set'}
+                        title={isSaved ? 'This set is already saved' : 'Save this transformation set'}
                         onClick={saveTransformationSet}
                       >
                         {isSaved ? 'Saved' : 'Save Transformation Set'}
@@ -1768,13 +1614,8 @@ function DataTransformation() {
                       <div className="tstat-card grey"><p className="tstat-value">{Object.values(configs).filter((c) => c.source === 'manual').length}</p><p className="tstat-label">Manually Configured</p></div>
                       <div className="tstat-card purple"><p className="tstat-value">{derivedVars.length}</p><p className="tstat-label">Derived Variables</p></div>
                       <div className="tstat-card yellow"><p className="tstat-value">{highCorrPairs.length}</p><p className="tstat-label">High Corr Pairs</p></div>
-                      {/* Reads Saved only while the saved signature still
-                          matches the current config. Changing anything after
-                          saving puts it back to Unsaved. */}
                       <div className={`tstat-card ${isSaved ? 'green' : 'dark'}`}>
-                        <p className="tstat-value">
-                          {isSaved ? savedSet.name : 'Unsaved'}
-                        </p>
+                        <p className="tstat-value">{isSaved ? savedSet.name : 'Unsaved'}</p>
                         <p className="tstat-label">Active Version</p>
                       </div>
                     </div>
@@ -1790,12 +1631,8 @@ function DataTransformation() {
                       </select>
                     </div>
 
-                    {isPreviewing && (
-                      <p className="transform-section-desc" role="status">Previewing this channel…</p>
-                    )}
-                    {previewError && (
-                      <p className="transform-section-desc" role="alert">{previewError}</p>
-                    )}
+                    {isPreviewing && <p className="transform-section-desc" role="status">Previewing this channel…</p>}
+                    {previewError && <p className="transform-section-desc" role="alert">{previewError}</p>}
 
                     {inspectDetail && (
                       <>
@@ -1803,11 +1640,12 @@ function DataTransformation() {
                           <div className="transform-detail-card">
                             <p className="transform-detail-title">Transformation Details: {activeInspectVar.toUpperCase()}</p>
                             <div className="detail-grid">
-                              <div><p className="detail-item-label">Normalization</p><p className="detail-item-value">none</p></div>
+                              <div><p className="detail-item-label">Normalization</p><p className="detail-item-value">{inspectDetail.config.normalization || 'none'}</p></div>
                               <div><p className="detail-item-label">Adstock Decay (α)</p><p className="detail-item-value">{inspectDetail.config.decay}</p></div>
                               <div><p className="detail-item-label">Adstock Horizon</p><p className="detail-item-value">{pluralUnit(inspectDetail.config.horizon, granularityUnitLabel)}</p></div>
+                              <div><p className="detail-item-label">Pure Shift Lag</p><p className="detail-item-value">{pluralUnit(inspectDetail.config.lag, granularityUnitLabel)}</p></div>
                               <div><p className="detail-item-label">Saturation Transform</p><p className="detail-item-value">{SATURATION_OPTIONS.find((o) => o.value === inspectDetail.config.saturation)?.label.split(':')[0]}</p></div>
-                              <div><p className="detail-item-label">Param (k  p)</p><p className="detail-item-value">{inspectDetail.config.saturation === 'none' ? '-' : inspectDetail.config.param}</p></div>
+                              <div><p className="detail-item-label">Param (k / p)</p><p className="detail-item-value">{inspectDetail.config.saturation === 'none' ? '-' : inspectDetail.config.param}</p></div>
                               <div><p className="detail-item-label">Configuration Source</p><p className="detail-item-value"><span className={`source-badge ${inspectDetail.config.source}`}>{inspectDetail.config.source === 'auto' ? 'Auto Selected' : 'Manual'}</span></p></div>
                             </div>
                           </div>
@@ -1840,22 +1678,9 @@ function DataTransformation() {
                             <MiniBarChart bins={inspectDetail.histAfter} binLabels={inspectDetail.binsAfter} color="#1d4ed8" xLabel={`${activeInspectVar} (transformed)`} yLabel="Records" showXTicks={false} />
                           </div>
                         </div>
-
-                        {/* <p className="transform-card-heading">Relationship with KPI (Poor Man's Curve): Before vs. After Transformation</p>
-                        <div className="curve-compare-row">
-                          <div className="dist-chart-box">
-                            <p className="dist-chart-title">Before: {activeInspectVar} vs {dependentVars[0]}</p>
-                            <MiniLineChart points={inspectDetail.curveBefore} color="#94a3b8" xLabel={activeInspectVar} yLabel={`Average ${dependentVars[0] || 'KPI'}`} />
-                          </div>
-                          <div className="dist-chart-box">
-                            <p className="dist-chart-title after-title">After: {activeInspectVar} (Transformed) vs {dependentVars[0]}</p>
-                            <MiniLineChart points={inspectDetail.curveAfter} color="#1d4ed8" xLabel={`${activeInspectVar} (transformed)`} yLabel={`Average ${dependentVars[0] || 'KPI'}`} />
-                          </div>
-                        </div> */}
                       </>
                     )}
                   </div>
-                  
                 </>
               )}
             </>
@@ -1868,29 +1693,8 @@ function DataTransformation() {
   );
 }
 
-// recharts, like Data Review. These were hand-drawn SVGs with no hover at all:
-// you could see a shape but not read a value off it, and the hit-testing to
-// add that is exactly what recharts already does.
 const CHART_MARGIN = { top: 10, right: 20, bottom: 24, left: 10 };
 
-/**
- * One of the five categories, and the columns the ingestion screen put in it.
- *
- * Step 1 used to be six pickers - Date, Geo, Dependent, ZIP, DMA, Population -
- * each listing every column in the ARD. On a sales file that is the same 32
- * names rendered six times, so choosing the date column meant reading past
- * thirty call-detail columns to find it, and the ZIP and DMA pickers were never
- * sent to the engine at all.
- *
- * The categories already answer "which of these could this be", so the step now
- * shows them: one card per category, holding what was declared for it. The
- * count reads selected-over-available, so a card nobody has touched still says
- * how much is in it.
- *
- * `extra` carries columns chosen for this card that the ingestion screen filed
- * elsewhere - a selection has to stay visible, or it could be counted but not
- * unpicked.
- */
 function CategoryCard({ index, title, hint, role, columns, columnRoles, selected, onToggle }) {
   const inRole = columns.filter((c) => columnRoles[c] === role);
   const extra = selected.filter((c) => columnRoles[c] !== role && columns.includes(c));
@@ -1916,8 +1720,6 @@ function CategoryCard({ index, title, hint, role, columns, columnRoles, selected
             {selected.includes(c) ? '✓ ' : '+ '}{c}
           </span>
         ))}
-        {/* Not an error - a file may genuinely have no population column - so
-            it says what is missing rather than looking broken. */}
         {!offered.length && (
           <span className="category-card-empty">No columns mapped to this category</span>
         )}
@@ -1929,10 +1731,6 @@ function CategoryCard({ index, title, hint, role, columns, columnRoles, selected
 function MiniBarChart({ bins, color, xLabel = '', yLabel = 'Records', binLabels = [], showXTicks = true }) {
   if (!bins.length) return null;
   const total = bins.reduce((a, b) => a + b, 0);
-  // The bin's own range as the category, so the tooltip reports the values
-  // rather than a bin index. Where no label is supplied the index is the only
-  // thing left to key on - it identifies the bar to recharts but means
-  // nothing to the reader, which is why showXTicks exists.
   const data = bins.map((count, i) => ({ bin: binLabels[i] ?? String(i + 1), count }));
 
   return (
@@ -1965,45 +1763,6 @@ function MiniBarChart({ bins, color, xLabel = '', yLabel = 'Records', binLabels 
         />
         <Bar dataKey="count" fill={color} radius={[2, 2, 0, 0]} />
       </BarChart>
-    </ResponsiveContainer>
-  );
-}
-
-function MiniLineChart({ points, color, xLabel = '', yLabel = '' }) {
-  if (!points.length) return null;
-
-  return (
-    <ResponsiveContainer width="100%" height={200}>
-      <LineChart data={points} margin={CHART_MARGIN}>
-        <CartesianGrid stroke={GRID} strokeDasharray="3 3" />
-        <XAxis
-          dataKey="x" type="number" domain={['dataMin', 'dataMax']}
-          tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
-          tickFormatter={(v) => fmt(v)}
-          label={{ value: xLabel, ...X_LABEL }}
-        />
-        <YAxis
-          tick={AXIS_TICK} tickLine={false} axisLine={{ stroke: GRID }}
-          tickFormatter={(v) => (Math.abs(v) >= 1000 ? `${Math.round(v / 1000)}k` : v)}
-          label={{ value: yLabel, ...Y_LABEL }}
-        />
-        <Tooltip
-          cursor={{ stroke: '#c7d2e5', strokeWidth: 1 }}
-          content={
-            <ChartTooltip
-              title={(label) => `${xLabel}: ${fmt(label)}`}
-              rows={(label, payload) => [
-                { label: yLabel, value: fmt(payload[0]?.value), color },
-              ]}
-            />
-          }
-        />
-        <Line
-          type={LINE_TYPE} dataKey="y" stroke={color} strokeWidth={2}
-          dot={{ r: 3, fill: color }}
-          activeDot={{ r: 5, strokeWidth: 1.5, stroke: '#fff' }}
-        />
-      </LineChart>
     </ResponsiveContainer>
   );
 }

@@ -151,13 +151,15 @@ function Home() {
   const [workflowActionId, setWorkflowActionId] = useState(null);
   const [onlyCreateForm, setOnlyCreateForm] = useState(openCreateOnArrival);
 
-  const loadWorkflows = async () => {
+const loadWorkflows = async () => {
     setLoading(true);
     try {
       const data = await listWorkflows();
-      setWorkflows(data.items || []);
+      const list = data?.items || data?.workflows || [];
+      setWorkflows(Array.isArray(list) ? list : []);
     } catch (err) {
-      window.alert(err instanceof ApiError ? err.text : 'Could not load workflows.');
+      console.error('Failed to load workflows:', err);
+      setWorkflows([]);
     } finally {
       setLoading(false);
     }

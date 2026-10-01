@@ -475,3 +475,12 @@ export const generateResponseCurves = (payload) =>
 /** Budget optimization across channels — not yet wired to any Model Output section. */
 export const runOptimization = (payload) =>
   request('/api/optimization/run', { method: 'POST', ...json(payload) });
+
+export const transformationOptunaSingle = (payload) =>
+  transformationPost('optuna-single', payload);
+
+
+/** Run Exhaustive Grid Search optimization on a single channel. */
+export const transformationGridSearchSingle = (payload) =>
+  transformationPost('grid-search-single', payload);
+
