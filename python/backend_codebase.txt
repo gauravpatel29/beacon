@@ -1,4 +1,4 @@
-PROJECT backend CODEBASE EXPORT
+PROJECT CODEBASE EXPORT
 Total Files Exported: 65
 ================================================================================
 
@@ -2963,69 +2963,75 @@ def optuna_params_to_transform_rows(channels_cfg: List[Dict], best_params: Dict)
 # MODELLING REGRESSION ENGINES (WITH FULL STATISTICAL INFERENCE FOR OLS & RIDGE)
 # ---------------------------------------------------------------------------
 
-def run_ols_regression(
-    transformed_df: pd.DataFrame,
-    granular_df: pd.DataFrame,
-    date_column: str,
-    geo_column: str,
+LAMBDA_CAP = 0.95  # Documented safety cap to prevent division by zero on carryover rate
+
+
+def calculate_long_term_factor(carryover_rate: float) -> float:
+    """
+    Standard MMx infinite geometric carryover multiplier: 1 / (1 - lambda).
+    Capped at LAMBDA_CAP (0.95) to prevent explosive multipliers.
+    """
+    if carryover_rate <= 0.0:
+        return 1.0
+    lam = min(float(carryover_rate), LAMBDA_CAP)
+    return 1.0 / (1.0 - lam)
+
+
+def _calculate_attribution_table(
+    params_series: pd.Series,
+    tdf: pd.DataFrame,
+    gdf: pd.DataFrame,
+    gdf_prior: pd.DataFrame,
     dependent_variable: str,
     dependent_variable_user_input: str,
-    selected_channels: List[str],
-    start_date,
-    end_date,
-    include_const: bool = True,
-) -> dict:
-    """include_const=False fits through the origin.
-
-    The screen's "Hide const row" used to drop the intercept from the table
-    only, which changed what the reader saw without changing what was fitted:
-    every other coefficient was still estimated against an intercept that was
-    no longer shown, and the contributions no longer added up to anything the
-    table explained. Passing it through to the fit is what the checkbox was
-    always taken to mean.
+    se_series: Optional[np.ndarray] = None,
+    t_stat_series: Optional[np.ndarray] = None,
+    p_val_series: Optional[np.ndarray] = None,
+    ci_lower_series: Optional[np.ndarray] = None,
+    ci_upper_series: Optional[np.ndarray] = None,
+) -> Tuple[pd.DataFrame, float, Dict[str, Any]]:
     """
-    transformed_df = transformed_df.copy()
-    granular_df = granular_df.copy()
+    Unified Attribution Engine for BOTH OLS and Ridge.
+    Guarantees standard denominators (Sum Actual Sales) and consistent units.
+    """
+    tdf_copy = tdf.copy()
+    gdf_copy = gdf.copy()
+    tdf_copy["const"] = 1.0
+    gdf_copy["const"] = 1.0
 
-    transformed_df[date_column] = _parse_dates_robust(transformed_df[date_column].astype(str).str.strip())
-    granular_df[date_column] = _parse_dates_robust(granular_df[date_column].astype(str).str.strip())
+    y_modeled = pd.to_numeric(tdf_copy[dependent_variable_user_input], errors="coerce").fillna(0.0)
+    sum_modeled_sales = float(y_modeled.sum())
 
-    start_dt = _parse_dates_robust(pd.Series([str(start_date)])).iloc[0]
-    end_dt = _parse_dates_robust(pd.Series([str(end_date)])).iloc[0]
+    # Actual observed raw sales in natural volume units (e.g. TRx)
+    if dependent_variable in gdf_copy.columns:
+        sum_raw_sales = float(pd.to_numeric(gdf_copy[dependent_variable], errors="coerce").sum())
+    else:
+        sum_raw_sales = sum_modeled_sales
 
-    modeling_duration_days = (end_dt - start_dt).days + 1
-    prior_end_date = start_dt - pd.Timedelta(days=1)
-    prior_start_date = prior_end_date - pd.Timedelta(days=modeling_duration_days - 1)
+    # Prior period raw sales
+    has_prior_data = False
+    sum_raw_sales_prior = 0.0
+    if len(gdf_prior) > 0 and dependent_variable in gdf_prior.columns:
+        raw_prior_sum = float(pd.to_numeric(gdf_prior[dependent_variable], errors="coerce").sum())
+        if raw_prior_sum > 0.0:
+            sum_raw_sales_prior = raw_prior_sum
+            has_prior_data = True
 
-    tdf = transformed_df[(transformed_df[date_column] >= start_dt) & (transformed_df[date_column] <= end_dt)]
-    gdf = granular_df[(granular_df[date_column] >= start_dt) & (granular_df[date_column] <= end_dt)]
-    gdf_prior = granular_df[(granular_df[date_column] >= prior_start_date) & (granular_df[date_column] <= prior_end_date)]
-
-    y = pd.to_numeric(tdf[dependent_variable_user_input], errors="coerce").fillna(0.0)
-    X = tdf[selected_channels].apply(pd.to_numeric, errors="coerce").fillna(0.0)
-    if include_const:
-        X = sm.add_constant(X, has_constant="add")
-    model = sm.OLS(y, X).fit()
-
-    sum_sales = float(y.sum())
-    sum_raw_sales = float(pd.to_numeric(gdf[dependent_variable], errors="coerce").sum()) if dependent_variable in gdf.columns else sum_sales
-    sum_raw_sales_prior = float(pd.to_numeric(gdf_prior[dependent_variable], errors="coerce").sum()) if (len(gdf_prior) > 0 and dependent_variable in gdf_prior.columns) else 1.0
-
-    conf_int = model.conf_int()
     coefficients = pd.DataFrame({
-        "Variable": model.params.index,
-        "Coefficient": [float(v) for v in model.params.values],
-        "Std Error": [float(v) for v in model.bse.values],
-        "t-stat": [float(v) for v in model.tvalues.values],
-        "P-value": [float(v) for v in model.pvalues.values],
-        "CI Lower (2.5%)": [float(v) for v in conf_int[0].values],
-        "CI Upper (97.5%)": [float(v) for v in conf_int[1].values],
+        "Variable": params_series.index,
+        "Coefficient": [float(v) for v in params_series.values]
     })
 
-    tdf_copy = tdf.copy()
-    tdf_copy["const"] = 1.0
-    gdf_copy = gdf.copy()
-    gdf_copy["const"] = 1.0
+    if se_series is not None:
+        coefficients["Std Error"] = [float(v) for v in se_series]
+    if t_stat_series is not None:
+        coefficients["t-stat"] = [float(v) for v in t_stat_series]
+    if p_val_series is not None:
+        coefficients["P-value"] = [float(v) for v in p_val_series]
+    if ci_lower_series is not None:
+        coefficients["CI Lower (2.5%)"] = [float(v) for v in ci_lower_series]
+    if ci_upper_series is not None:
+        coefficients["CI Upper (97.5%)"] = [float(v) for v in ci_upper_series]
 
     transformed_to_raw = {col: "const" if col == "const" else col.replace("_transformed", "") for col in coefficients["Variable"]}
     coefficients["Raw Variable"] = coefficients["Variable"].map(transformed_to_raw)
@@ -3058,38 +3064,113 @@ def run_ols_regression(
         return 0.0
 
     coefficients["Spend"] = coefficients["Raw Variable"].apply(calc_spend)
-    coefficients["Impactable %"] = coefficients.apply(
-        lambda row: (float(row["Coefficient"]) * float(row["Modelled Activity"]) * 100.0) / sum_sales if sum_sales != 0 else 0.0, axis=1
-    )
+
+    # 1. Real Mathematical Contribution (beta * Modelled Activity)
+    coefficients["Contribution"] = coefficients["Coefficient"].astype(float) * coefficients["Modelled Activity"].astype(float)
+
+    # 2. Raw Unforced Impact % = (Contribution / Sum Actual Observed Sales) * 100
+    if sum_modeled_sales != 0:
+        coefficients["Impactable %"] = (coefficients["Contribution"] / sum_modeled_sales) * 100.0
+    else:
+        coefficients["Impactable %"] = 0.0
+
     coefficients["Impactable (%)"] = coefficients["Impactable %"].apply(lambda x: f"{float(x):.2f}%")
-    coefficients["Impactable Sales"] = coefficients["Impactable %"].astype(float) * sum_raw_sales / 100.0
-    coefficients["ROI"] = coefficients.apply(lambda row: float(row["Impactable Sales"]) / float(row["Spend"]) if float(row["Spend"]) != 0 else 0.0, axis=1)
+
+    # 3. Impactable Sales in Real Units (Rescaled to natural volume)
+    coefficients["Impactable Sales"] = (coefficients["Impactable %"] / 100.0) * sum_raw_sales
+
+    # 4. Marketing ROI = Impactable Sales / Spend
+    coefficients["ROI"] = coefficients.apply(
+        lambda row: float(row["Impactable Sales"]) / float(row["Spend"]) if float(row["Spend"]) > 0 else 0.0,
+        axis=1
+    )
+
     coefficients["Note"] = coefficients["Raw Variable"].apply(
         lambda var: "Intercept" if var == "const" else ("Carryover" if var == "Carryover" else "")
     )
 
-    long_term_factor = None
-    carryover_pct = coefficients[coefficients["Note"] == "Carryover"]["Impactable %"]
-    if not carryover_pct.empty:
-        cp = float(carryover_pct.iloc[0]) / 100.0
-        carryover_rate = (cp * sum_raw_sales) / sum_raw_sales_prior if sum_raw_sales_prior != 0 else 0.0
-        long_term_factor = (3.0 + 2.0 * carryover_rate + carryover_rate ** 2) / 3.0
-        coefficients["Long Term ROI"] = long_term_factor * coefficients["ROI"]
-    else:
-        coefficients["Long Term ROI"] = 0.0
+    # 5. Long-Term ROI & Carryover Multiplier Calculation
+    long_term_factor = 1.0
+    carryover_rows = coefficients[coefficients["Note"] == "Carryover"]
+    prior_warning = None
 
-    coefficients = coefficients.drop(columns=["Raw Variable"], errors="ignore")
+    if not carryover_rows.empty:
+        if has_prior_data:
+            cp = max(0.0, float(carryover_rows["Impactable %"].iloc[0]) / 100.0)
+            carryover_rate = (cp * sum_raw_sales) / sum_raw_sales_prior
+            long_term_factor = calculate_long_term_factor(carryover_rate)
+            coefficients["Long Term ROI"] = long_term_factor * coefficients["ROI"]
+        else:
+            prior_warning = "No prior-period data available — Long Term ROI defaulted to Current ROI."
+            coefficients["Long Term ROI"] = coefficients["ROI"]
+    else:
+        coefficients["Long Term ROI"] = coefficients["ROI"]
+
+    metadata = {
+        "has_prior_data": has_prior_data,
+        "prior_warning": prior_warning,
+        "sum_raw_sales": sum_raw_sales,
+        "sum_modeled_sales": sum_modeled_sales,
+    }
+
+    coefficients = coefficients.drop(columns=["Contribution", "Raw Variable"], errors="ignore")
+    return coefficients, long_term_factor, metadata
+
+
+def run_ols_regression(
+    transformed_df: pd.DataFrame,
+    granular_df: pd.DataFrame,
+    date_column: str,
+    geo_column: str,
+    dependent_variable: str,
+    dependent_variable_user_input: str,
+    selected_channels: List[str],
+    start_date,
+    end_date,
+    include_const: bool = True,
+) -> dict:
+    tdf, gdf, gdf_prior = _filter_modelling_frames(transformed_df, granular_df, date_column, start_date, end_date)
+
+    y = pd.to_numeric(tdf[dependent_variable_user_input], errors="coerce").fillna(0.0)
+    X = tdf[selected_channels].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    if include_const:
+        X = sm.add_constant(X, has_constant="add")
+
+    model = sm.OLS(y, X).fit()
+    conf_int = model.conf_int()
+
+    params_series = model.params
+    se_series = model.bse.values
+    t_stat_series = model.tvalues.values
+    p_val_series = model.pvalues.values
+    ci_lower = conf_int[0].values
+    ci_upper = conf_int[1].values
+
+    coefficients, long_term_factor, meta = _calculate_attribution_table(
+        params_series=params_series,
+        tdf=tdf,
+        gdf=gdf,
+        gdf_prior=gdf_prior,
+        dependent_variable=dependent_variable,
+        dependent_variable_user_input=dependent_variable_user_input,
+        se_series=se_series,
+        t_stat_series=t_stat_series,
+        p_val_series=p_val_series,
+        ci_lower_series=ci_lower,
+        ci_upper_series=ci_upper,
+    )
+
     return {
         "summary": model.summary().as_text(),
         "coefficients": coefficients.to_dict(orient="records"),
         "long_term_factor": long_term_factor,
+        "meta": meta,
         "start_date": str(start_date),
         "end_date": str(end_date),
         "r_squared": float(model.rsquared),
         "adj_r_squared": float(model.rsquared_adj),
         "rmse": float(np.sqrt(model.mse_resid)),
     }
-
 
 def get_original_scale_coefficients(model, scaler, selected_channels, prior_weights, use_custom_penalties):
     coef_scaled = model.coef_[1:] if len(model.coef_) > len(selected_channels) else model.coef_
@@ -3270,26 +3351,27 @@ def _ridge_scale_and_weight(X_df, scaler_obj, channels, prior_weights, use_custo
 
 
 def run_ridge_regression(
-    transformed_df, granular_df, date_column, geo_column,
-    dependent_variable, dependent_variable_user_input,
-    selected_channels, start_date, end_date,
-    alpha_mode: str = "manual", manual_alpha: float = 1.0, cv_splits: int = 3,
-    positive_coef: bool = False, use_custom_penalties: bool = False,
-    prior_weights: Optional[Dict] = None, stage: int = 1,
-    parent_channel: Optional[str] = None, s2_channels: Optional[List[str]] = None,
+    transformed_df: pd.DataFrame,
+    granular_df: pd.DataFrame,
+    date_column: str,
+    geo_column: str,
+    dependent_variable: str,
+    dependent_variable_user_input: str,
+    selected_channels: List[str],
+    start_date,
+    end_date,
+    alpha_mode: str = "manual",
+    manual_alpha: float = 1.0,
+    cv_splits: int = 3,
+    positive_coef: bool = False,
+    use_custom_penalties: bool = False,
+    prior_weights: Optional[Dict] = None,
+    stage: int = 1,
+    parent_channel: Optional[str] = None,
+    s2_channels: Optional[List[str]] = None,
     stage1_coefficients: Optional[List[Dict]] = None,
     include_const: bool = True,
 ) -> dict:
-    """include_const=False fits through the origin - see run_ols_regression.
-
-    Ridge needs one extra thing OLS does not. The features are standardised
-    before fitting, and centring them re-introduces an intercept through the
-    back door: a model with no constant column fitted on centred data still
-    carries -sum(coef * mean). Dropping the constant alone would leave that
-    term in the rescaled coefficients. So when the constant is excluded the
-    features are scaled but NOT centred, which is what fitting through the
-    origin actually requires.
-    """
     prior_weights = prior_weights or {}
     tdf, gdf, gdf_prior = _filter_modelling_frames(transformed_df, granular_df, date_column, start_date, end_date)
 
@@ -3310,12 +3392,12 @@ def run_ridge_regression(
     intercept_orig, coef_orig = get_original_scale_coefficients(
         ridge_final, scaler_final, channels, prior_weights, use_custom_penalties
     )
-    # No constant was fitted, so no const row is reported. Carrying one at
-    # 0.0 would put an Intercept line in the table for a model that has none.
+
     if include_const:
         params_series = pd.Series([intercept_orig] + list(coef_orig), index=["const"] + channels)
     else:
         params_series = pd.Series(list(coef_orig), index=list(channels))
+
     y_pred = ridge_final.predict(X_scaled)
     residuals = y_raw - y_pred
     rmse = float(np.sqrt(mean_squared_error(y_raw, y_pred)))
@@ -3324,7 +3406,7 @@ def run_ridge_regression(
     n, k = len(y_raw), len(channels)
     adj_r2 = 1.0 - (1.0 - r2) * (n - 1) / (n - k - 1) if (n - k - 1) > 0 else float("nan")
 
-    # Full Ridge Statistical Inference
+    # Ridge Inference
     dof = max(1, n - k - 1)
     sigma_sq = float(np.sum(residuals ** 2) / dof)
     XtX = np.dot(X_scaled.T, X_scaled)
@@ -3332,9 +3414,6 @@ def run_ridge_regression(
     cov_matrix = sigma_sq * np.dot(np.dot(A_inv, XtX), A_inv)
     se_scaled = np.sqrt(np.maximum(1e-12, np.diag(cov_matrix)))
 
-    # The constant occupies row 0 of the scaled design only when one was
-    # fitted. Without this offset the no-constant path read every channel's
-    # standard error one row late and ran off the end of the array.
     offset = 1 if include_const else 0
     se_orig = np.zeros(len(params_series))
     if include_const:
@@ -3349,13 +3428,21 @@ def run_ridge_regression(
     ci_lower = params_series.values - 1.96 * se_orig
     ci_upper = params_series.values + 1.96 * se_orig
 
-    coefficients = _build_coefficients_table(
-        params_series, tdf, gdf, gdf_prior, dependent_variable, dependent_variable_user_input,
-        se_series=se_orig, t_stat_series=t_stats, p_val_series=p_values,
-        ci_lower_series=ci_lower, ci_upper_series=ci_upper
+    coefficients, long_term_factor, meta = _calculate_attribution_table(
+        params_series=params_series,
+        tdf=tdf,
+        gdf=gdf,
+        gdf_prior=gdf_prior,
+        dependent_variable=dependent_variable,
+        dependent_variable_user_input=dependent_variable_user_input,
+        se_series=se_orig,
+        t_stat_series=t_stats,
+        p_val_series=p_values,
+        ci_lower_series=ci_lower,
+        ci_upper_series=ci_upper,
     )
-    model_type = "Ridge Stage 1"
 
+    model_type = "Ridge Stage 1"
     ridge_summary = f"{model_type} Summary\n{'─' * 54}\nAlpha: {best_alpha} | R²: {r2:.4f} | Adj R²: {adj_r2:.4f} | RMSE: {rmse:,.2f}"
 
     return {
@@ -3366,13 +3453,13 @@ def run_ridge_regression(
         "r_squared": r2,
         "adj_r_squared": adj_r2,
         "rmse": rmse,
+        "meta": meta,
         "positive_coef": positive_coef,
         "prior_weights": prior_weights if use_custom_penalties else {},
         "start_date": str(start_date),
         "end_date": str(end_date),
         "params": {k: float(v) for k, v in params_series.items()},
     }
-
 
 def build_combined_table(s1_coeff_df: pd.DataFrame, s2_coeff_df: pd.DataFrame, parent_channel: str) -> pd.DataFrame:
     rows = []
@@ -3459,77 +3546,372 @@ def build_waterfall_chart_data(combined_df: pd.DataFrame, dep_var_label: str = "
     }
 
 
-def calc_calibration_factor(impactable_sales_nation, beta_coeff, spend_nation, saturation_function, power_value, num_time=12, num_geo=2614):
-    # A channel with no recorded spend has no curve to calibrate: the
-    # denominator below is beta * log(1 + 0) == 0, and numpy divides by it to
-    # give inf rather than raising. Every point of the curve then came back
-    # inf, and Starlette serialises responses with allow_nan=False, so the
-    # failure surfaced as a 500 raised while rendering the response - outside
-    # this module's callers and outside the router's own try/except. Rejecting
-    # it here turns that into the router's 400 with a message that says which
-    # channel and why.
-    if saturation_function == "log":
-        denominator = beta_coeff * np.log(1 + (spend_nation / (num_time * num_geo)))
-    elif saturation_function == "power":
-        denominator = beta_coeff * np.power(spend_nation / (num_time * num_geo), power_value)
+def calc_calibration_factor(
+    impactable_sales_nation: float,
+    beta_coeff: float,
+    spend_nation: float,
+    saturation_function: str,
+    power_value: float = 0.5,
+    log_k: float = 1.0,
+    num_time: int = 12,
+    num_geo: int = 100,
+) -> float:
+    sat = str(saturation_function or "none").lower()
+    t_g = max(1, int(num_time) * int(num_geo))
+    x_local = max(0.0, float(spend_nation)) / t_g
+
+    if sat == "log":
+        k_val = float(log_k) if log_k and float(log_k) > 0 else 1.0
+        denominator = float(beta_coeff) * np.log1p(k_val * x_local)
+    elif sat == "power":
+        p_val = float(power_value) if power_value and float(power_value) > 0 else 0.5
+        denominator = float(beta_coeff) * np.power(x_local, p_val)
     else:
+        denominator = float(beta_coeff) * x_local
+
+    if not np.isfinite(denominator) or denominator <= 0:
         return 1.0
 
-    if not np.isfinite(denominator) or denominator == 0:
-        raise ValueError(
-            "cannot calibrate a response curve without spend and a non-zero "
-            "coefficient (spend_nation=%r, beta_coeff=%r)" % (spend_nation, beta_coeff)
-        )
-
-    factor = (impactable_sales_nation / (num_time * num_geo)) / denominator
-    if not np.isfinite(factor):
-        raise ValueError(
-            "response curve calibration is not a finite number "
-            "(impactable_sales_nation=%r)" % (impactable_sales_nation,)
-        )
-    return factor
+    target_geo_time = float(impactable_sales_nation) / t_g
+    factor = target_geo_time / denominator
+    return float(factor) if np.isfinite(factor) and factor > 0 else 1.0
 
 
-def create_response_curve(channel_name, impactable_sales_nation, beta_coeff, spend_nation, start, stop, step, price, saturation_function, power_value, num_time=12, num_geo=2614):
-    calibration_factor = calc_calibration_factor(impactable_sales_nation, beta_coeff, spend_nation, saturation_function, power_value, num_time, num_geo)
-    spend_values = list(range(start, stop + 1, step))
+def create_response_curve(
+    channel_name: str,
+    impactable_sales_nation: float,
+    beta_coeff: float,
+    spend_nation: float,
+    start: int,
+    stop: int,
+    step: int,
+    price: float,
+    saturation_function: str,
+    power_value: float = 0.5,
+    log_k: float = 1.0,
+    num_time: int = 12,
+    num_geo: int = 100,
+) -> pd.DataFrame:
+    sat = str(saturation_function or "none").lower()
+    k_val = float(log_k) if log_k and float(log_k) > 0 else 1.0
+    p_val = float(power_value) if power_value and float(power_value) > 0 else 0.5
+    t_g = max(1, int(num_time) * int(num_geo))
+
+    calibration_factor = calc_calibration_factor(
+        impactable_sales_nation=impactable_sales_nation,
+        beta_coeff=beta_coeff,
+        spend_nation=spend_nation,
+        saturation_function=saturation_function,
+        power_value=p_val,
+        log_k=k_val,
+        num_time=num_time,
+        num_geo=num_geo,
+    )
+
+    spend_values = list(range(int(start), int(stop) + 1, max(1, int(step))))
     rows = []
     prev_impactable = None
-    
-    first_step_mroi = 0.0
-    if len(spend_values) > 1 and step > 0:
-        if saturation_function == "log":
-            s1_imp = calibration_factor * beta_coeff * np.log(1 + (step / (num_time * num_geo))) * num_time * num_geo
-        else:
-            s1_imp = calibration_factor * beta_coeff * np.power(step / (num_time * num_geo), power_value) * num_time * num_geo
-        first_step_mroi = float((s1_imp * price) / step)
 
-    for i, spend in enumerate(spend_values):
-        if saturation_function == "log":
-            impactable_geo_time = calibration_factor * beta_coeff * np.log(1 + (spend / (num_time * num_geo)))
+    # First-step marginal ROI baseline
+    x_first = max(1.0, float(step)) / t_g
+    if sat == "log":
+        s1_imp = calibration_factor * float(beta_coeff) * np.log1p(k_val * x_first) * t_g
+    elif sat == "power":
+        s1_imp = calibration_factor * float(beta_coeff) * np.power(x_first, p_val) * t_g
+    else:
+        s1_imp = calibration_factor * float(beta_coeff) * x_first * t_g
+    first_step_mroi = float((s1_imp * float(price)) / max(1.0, float(step)))
+
+    for spend in spend_values:
+        x_loc = float(spend) / t_g
+        if sat == "log":
+            impactable_geo_time = calibration_factor * float(beta_coeff) * np.log1p(k_val * x_loc)
+        elif sat == "power":
+            impactable_geo_time = calibration_factor * float(beta_coeff) * np.power(max(0.0, x_loc), p_val)
         else:
-            impactable_geo_time = calibration_factor * beta_coeff * np.power(spend / (num_time * num_geo), power_value)
-        
-        impactable_nation = impactable_geo_time * num_time * num_geo
-        impactable_nation_currency = impactable_nation * price
-        roi = impactable_nation_currency / spend if spend > 0 else first_step_mroi
-        
-        if prev_impactable is not None and spend > 0:
-            mroi = ((impactable_nation - prev_impactable) * price / step)
+            impactable_geo_time = calibration_factor * float(beta_coeff) * x_loc
+
+        impactable_nation = impactable_geo_time * t_g
+        impactable_nation_currency = impactable_nation * float(price)
+        roi = impactable_nation_currency / float(spend) if float(spend) > 0 else first_step_mroi
+
+        if prev_impactable is not None and float(spend) > 0:
+            mroi = ((impactable_nation - prev_impactable) * float(price)) / float(step)
         else:
             mroi = first_step_mroi
 
         rows.append({
-            "spend": spend,
-            "impactable_geo_time": impactable_geo_time,
-            "impactable_nation": impactable_nation,
-            "impactable_nation_currency": impactable_nation_currency,
-            "roi": roi,
-            "mroi": mroi
+            "spend": int(spend),
+            "impactable_geo_time": float(impactable_geo_time),
+            "impactable_nation": float(impactable_nation),
+            "impactable_nation_currency": float(impactable_nation_currency),
+            "roi": float(roi),
+            "mroi": float(mroi),
         })
         prev_impactable = impactable_nation
 
     return pd.DataFrame(rows)
+
+def run_optuna_channel_tuning(
+    df: pd.DataFrame,
+    channel: str,
+    geo_column: str,
+    dependent_variable: str,
+    date_column: Optional[str] = None,
+    pop_column: Optional[str] = None,
+    n_trials: int = 40,
+    cv_splits: int = 3,
+) -> Dict[str, Any]:
+    """
+    Optuna-based Grid/Bayesian search to find the optimal Normalization,
+    Adstock Decay, Adstock Horizon, Pure Shift Lag, and Saturation Function/Params.
+    """
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    if channel not in df.columns or dependent_variable not in df.columns:
+        raise ValueError(f"Channel '{channel}' or Dependent Variable '{dependent_variable}' not found in dataset.")
+
+    y = pd.to_numeric(df[dependent_variable], errors="coerce").fillna(0.0).values
+    if len(y) < 10:
+        raise ValueError("Dataset has too few records for hyperparameter optimization.")
+
+    # Parameter grid choices
+    norm_choices = ["none", "minmax", "zscore", "iqr"]
+    decay_choices = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    horizon_choices = [1, 2, 3, 4, 6, 8, 12]
+    lag_choices = [0, 1, 2, 3, 4]
+    sat_choices = ["none", "log", "power"]
+    power_k_choices = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    log_k_choices = [0.1, 0.5, 1.0, 1.5, 2.0, 3.0]
+
+    # TimeSeries Cross-Validation
+    use_cv = len(df) >= (cv_splits * 4)
+    tscv = TimeSeriesSplit(n_splits=cv_splits) if use_cv else None
+
+    def objective(trial: optuna.Trial) -> float:
+        norm = trial.suggest_categorical("normalization", norm_choices)
+        decay = trial.suggest_categorical("decay", decay_choices)
+        horizon = trial.suggest_categorical("horizon", horizon_choices)
+        lag = trial.suggest_categorical("lag", lag_choices)
+        sat = trial.suggest_categorical("saturation", sat_choices)
+
+        power_k = trial.suggest_categorical("power_k", power_k_choices) if sat == "power" else 0.5
+        log_k = trial.suggest_categorical("log_k", log_k_choices) if sat == "log" else 1.0
+
+        try:
+            # 1. Pure Lag shift if specified
+            df_work = df.copy()
+            if lag > 0:
+                if geo_column and geo_column in df_work.columns:
+                    df_work[channel] = df_work.groupby(geo_column)[channel].shift(lag, fill_value=0.0)
+                else:
+                    df_work[channel] = df_work[channel].shift(lag, fill_value=0.0)
+
+            # 2. Transform with Normalization, Adstock Decay/Horizon, and Saturation
+            trans_series = transform_single_channel(
+                df=df_work,
+                channel=channel,
+                geo_column=geo_column,
+                normalization=norm,
+                pop_column=pop_column,
+                adstock_coeff=decay,
+                lags=horizon,
+                sat_function=sat if sat != "none" else None,
+                power_k=power_k,
+                log_k=log_k,
+            ).fillna(0.0).values
+
+            if np.all(trans_series == 0) or np.isnan(trans_series).any():
+                return float("inf")
+
+            # 3. Evaluate Fit Quality (Negative Correlation / OLS MSE)
+            if use_cv and tscv is not None:
+                errors = []
+                for train_idx, test_idx in tscv.split(trans_series):
+                    X_tr, X_te = trans_series[train_idx], trans_series[test_idx]
+                    y_tr, y_te = y[train_idx], y[test_idx]
+
+                    if np.std(X_tr) == 0:
+                        return float("inf")
+
+                    slope, intercept, r_val, _, _ = stats.linregress(X_tr, y_tr)
+                    preds = slope * X_te + intercept
+                    errors.append(np.sqrt(mean_squared_error(y_te, preds)))
+                return float(np.mean(errors))
+            else:
+                r, _ = stats.pearsonr(trans_series, y)
+                return -float(abs(r)) if not np.isnan(r) else float("inf")
+        except Exception:
+            return float("inf")
+
+    sampler = optuna.samplers.TPESampler(seed=42)
+    study = optuna.create_study(direction="minimize", sampler=sampler)
+    study.optimize(objective, n_trials=n_trials)
+
+    best_p = study.best_params
+    best_sat = best_p.get("saturation", "none")
+    best_param_val = best_p.get("power_k", 0.5) if best_sat == "power" else (best_p.get("log_k", 1.0) if best_sat == "log" else 1.0)
+
+    # Compute correlation score with best settings
+    df_eval = df.copy()
+    if best_p.get("lag", 0) > 0:
+        if geo_column and geo_column in df_eval.columns:
+            df_eval[channel] = df_eval.groupby(geo_column)[channel].shift(best_p.get("lag", 0), fill_value=0.0)
+        else:
+            df_eval[channel] = df_eval[channel].shift(best_p.get("lag", 0), fill_value=0.0)
+
+    best_transformed = transform_single_channel(
+        df=df_eval,
+        channel=channel,
+        geo_column=geo_column,
+        normalization=best_p.get("normalization", "none"),
+        pop_column=pop_column,
+        adstock_coeff=best_p.get("decay", 0.5),
+        lags=best_p.get("horizon", 2),
+        sat_function=best_sat if best_sat != "none" else None,
+        power_k=best_p.get("power_k", 0.5),
+        log_k=best_p.get("log_k", 1.0),
+    ).fillna(0.0)
+
+    corr_score, _ = stats.pearsonr(best_transformed, y)
+    corr_score = float(abs(corr_score)) if not np.isnan(corr_score) else 0.0
+
+    return {
+        "channel": channel,
+        "normalization": best_p.get("normalization", "none"),
+        "decay": float(best_p.get("decay", 0.5)),
+        "horizon": int(best_p.get("horizon", 2)),
+        "lag": int(best_p.get("lag", 0)),
+        "saturation": best_sat,
+        "param": float(best_param_val),
+        "correlation_score": round(corr_score, 4),
+        "n_trials": n_trials,
+        "source": "auto",
+    }
+def run_grid_search_channel_tuning(
+    df: pd.DataFrame,
+    channel: str,
+    geo_column: Optional[str],
+    dependent_variable: str,
+    date_column: Optional[str] = None,
+    pop_column: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Exhaustive Multi-Dimensional Grid Search Engine for Marketing Channel Transformations.
+    Evaluates every parameter combination against the target KPI.
+    """
+    if channel not in df.columns or dependent_variable not in df.columns:
+        raise ValueError(f"Channel '{channel}' or Target Variable '{dependent_variable}' not found in dataset.")
+
+    y_series = pd.to_numeric(df[dependent_variable], errors="coerce").fillna(0.0).values
+    if len(y_series) < 5:
+        raise ValueError("Insufficient rows to perform grid search optimization.")
+
+    # 1. Full Grid Parameter Space
+    norm_grid = ["none", "minmax", "zscore", "iqr"]
+    lag_grid = [0, 1, 2, 3, 4]
+    decay_grid = [0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    horizon_grid = [1, 2, 3, 4, 6, 8]
+    sat_grid = [
+        ("none", 0.5, 1.0),
+        ("log", 0.5, 0.5),
+        ("log", 0.5, 1.0),
+        ("log", 0.5, 1.5),
+        ("log", 0.5, 2.0),
+        ("power", 0.3, 1.0),
+        ("power", 0.4, 1.0),
+        ("power", 0.5, 1.0),
+        ("power", 0.6, 1.0),
+        ("power", 0.7, 1.0),
+    ]
+
+    best_score = -1.0
+    best_config = {
+        "channel": channel,
+        "normalization": "none",
+        "decay": 0.5,
+        "horizon": 2,
+        "lag": 0,
+        "saturation": "none",
+        "param": 1.0,
+        "correlation_score": 0.0,
+        "total_evaluations": 0,
+        "source": "auto",
+    }
+
+    eval_count = 0
+    primary_geo = geo_column[0] if isinstance(geo_column, list) and len(geo_column) > 0 else geo_column
+
+    # 2. Exhaustive Nested Grid Search Evaluation
+    for lag in lag_grid:
+        df_shifted = df.copy()
+        if lag > 0:
+            if primary_geo and primary_geo in df_shifted.columns:
+                df_shifted[channel] = df_shifted.groupby(primary_geo)[channel].shift(lag, fill_value=0.0)
+            else:
+                df_shifted[channel] = df_shifted[channel].shift(lag, fill_value=0.0)
+
+        for norm in norm_grid:
+            raw_s = df_shifted[channel]
+            pop_s = None
+            if pop_column:
+                if isinstance(pop_column, str) and pop_column in df_shifted.columns:
+                    pop_s = pd.to_numeric(df_shifted[pop_column], errors="coerce").fillna(1.0)
+            norm_s = normalize_series_vectorized(raw_s, norm, pop_s)
+
+            for decay in decay_grid:
+                # If decay is 0.0, different horizons produce identical results; evaluate horizon=1 only
+                tested_horizons = [1] if decay == 0.0 else horizon_grid
+
+                for horizon in tested_horizons:
+                    if decay > 0.0 and horizon > 0:
+                        if primary_geo and primary_geo in df_shifted.columns:
+                            df_temp = pd.DataFrame({"geo": df_shifted[primary_geo].astype(str), "val": norm_s.values})
+                            adstocked = df_temp.groupby("geo", sort=False)["val"].transform(
+                                lambda s: geometric_adstock(s.values, horizon, decay)
+                            ).values
+                        else:
+                            adstocked = geometric_adstock(norm_s.values, horizon, decay)
+                    else:
+                        adstocked = norm_s.values
+
+                    for sat_fn, power_k, log_k in sat_grid:
+                        eval_count += 1
+                        trans = apply_saturation(
+                            adstocked,
+                            sat_fn if sat_fn != "none" else None,
+                            power_k=power_k,
+                            log_k=log_k,
+                        )
+
+                        trans_clean = np.nan_to_num(trans, nan=0.0, posinf=0.0, neginf=0.0)
+                        if np.std(trans_clean) == 0:
+                            continue
+
+                        # Compute Pearson correlation with Target KPI
+                        corr = float(np.corrcoef(trans_clean, y_series)[0, 1])
+                        score = abs(corr) if not np.isnan(corr) else 0.0
+
+                        if score > best_score:
+                            best_score = score
+                            param_val = power_k if sat_fn == "power" else (log_k if sat_fn == "log" else 1.0)
+                            best_config = {
+                                "channel": channel,
+                                "normalization": norm,
+                                "decay": float(decay),
+                                "horizon": int(horizon),
+                                "lag": int(lag),
+                                "saturation": sat_fn,
+                                "param": float(param_val),
+                                "correlation_score": round(score, 4),
+                                "total_evaluations": eval_count,
+                                "source": "auto",
+                            }
+
+    best_config["total_evaluations"] = eval_count
+    return best_config
+
 
 ================================================================================
 FILE: core\profile.py
@@ -4267,7 +4649,7 @@ Multi-step, Grain-Aware Dataset Stitching and Analytical Record Dataset (ARD) En
 
 Supports:
 1. Sequential Relational Joins (left, inner, right, outer, cross)
-2. Grain Rollup (Lower Grain -> Higher Grain aggregation with crosswalk mappings)
+2. Grain Rollup (Lower Grain -> Higher Grain with Equal or Weighted multi-mapping distribution)
 3. Metric Allocation (Higher Grain -> Lower Grain distribution using equal or weighted strategies)
 4. Metric Conservation Verification & Lineage Auditing
 """
@@ -4313,6 +4695,14 @@ class StitchError(Exception):
         return out
 
 
+def _clean_str(val: Any) -> str:
+    """Prevents None or string literals 'None'/'null' from being treated as valid dataset names."""
+    if val is None or val is False:
+        return ""
+    s = str(val).strip()
+    return "" if s.lower() in ("none", "null", "undefined", "") else s
+
+
 def parse_join_type(value: Any) -> str:
     text = str(value or "").strip().lower()
     if text in JOIN_TYPES:
@@ -4331,7 +4721,7 @@ def clean_key_list(value: Any) -> List[str]:
     return []
 
 
-def find_column(df: pd.DataFrame, name: str) -> Optional[str]:
+def find_column(df: Optional[pd.DataFrame], name: Optional[str]) -> Optional[str]:
     if not name or df is None:
         return None
     wanted = str(name).strip().lower()
@@ -4519,8 +4909,10 @@ def execute_rollup_step(
     step: Dict[str, Any],
     source_df: pd.DataFrame,
     mapping_df: Optional[pd.DataFrame],
+    weight_df: Optional[pd.DataFrame],
     source_name: str,
     mapping_name: Optional[str],
+    weight_name: Optional[str],
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     source_df = source_df.loc[:, ~source_df.columns.duplicated()].copy()
     rows_in = len(source_df)
@@ -4529,41 +4921,48 @@ def execute_rollup_step(
     target_entity_keys = clean_key_list(step.get("target_entity_key") or step.get("target_key"))
     time_keys = clean_key_list(step.get("time_key") or step.get("date_key"))
     agg_rules = step.get("agg_rules") or step.get("numeric_aggregations") or {}
+    mapping_method = str(step.get("rollup_mapping_method", "equal_split")).lower()
+    weight_fallback = str(step.get("weight_fallback", "equal_split")).lower()
+    weight_column = step.get("weight_value_column") or step.get("weight_column")
+    weight_match_keys = clean_key_list(step.get("weight_match_key") or source_entity_keys)
 
     if not target_entity_keys:
         raise StitchError(step_idx, "target_key_missing", f"Step {step_idx} (Rollup): Target grain key is required.")
+    if not source_entity_keys:
+        raise StitchError(step_idx, "source_key_missing", f"Step {step_idx} (Rollup): Source entity key is required.")
 
     enriched_df = source_df
+    real_src = [find_column(source_df, k) for k in source_entity_keys]
+    if any(k is None for k in real_src):
+        raise StitchError(step_idx, "source_key_not_found", f"Step {step_idx} (Rollup): Source entity key not found in {source_name}.")
+
+    # Step A: Attach Target Grain using Bridge/Crosswalk Mapping
     if mapping_df is not None:
         mapping_df = mapping_df.loc[:, ~mapping_df.columns.duplicated()].copy()
         map_src_keys = clean_key_list(step.get("mapping_source_key") or source_entity_keys)
 
-        if not map_src_keys:
-            raise StitchError(step_idx, "mapping_keys_missing", f"Step {step_idx} (Rollup): Bridge mapping keys are required.")
-
-        real_src = [find_column(source_df, k) for k in source_entity_keys]
         real_map_src = [find_column(mapping_df, k) for k in map_src_keys]
+        real_m_tgt = [find_column(mapping_df, k) for k in target_entity_keys if find_column(mapping_df, k)]
 
-        if any(k is None for k in real_src) or any(k is None for k in real_map_src):
-            raise StitchError(step_idx, "key_resolution_failed", f"Step {step_idx} (Rollup): Source entity keys not found in datasets.")
+        if any(k is None for k in real_map_src) or not real_m_tgt:
+            raise StitchError(step_idx, "key_resolution_failed", f"Step {step_idx} (Rollup): Keys not found in mapping dataset {mapping_name}.")
 
         for sk, mk in zip(real_src, real_map_src):
             enriched_df[sk] = normalize_key(enriched_df[sk], looks_like_date_key(sk))
             mapping_df[mk] = normalize_key(mapping_df[mk], looks_like_date_key(mk))
 
-        # Only retain mapping keys and target grain keys from mapping dataset
-        real_m_tgt = [find_column(mapping_df, k) for k in target_entity_keys if find_column(mapping_df, k)]
+        # Retain all mapping pairs (Do not drop duplicates to allow multi-mapping)
         needed_map_cols = list(set(real_map_src + real_m_tgt))
-        mapping_clean = mapping_df[needed_map_cols].loc[:, ~mapping_df[needed_map_cols].columns.duplicated()].drop_duplicates(subset=real_map_src)
+        mapping_clean = mapping_df[needed_map_cols].drop_duplicates(subset=real_map_src + real_m_tgt)
 
         rename_map = {mk: sk for sk, mk in zip(real_src, real_map_src) if mk != sk}
         if rename_map:
             mapping_clean = mapping_clean.rename(columns=rename_map)
 
-        mapping_clean = mapping_clean.loc[:, ~mapping_clean.columns.duplicated()]
         enriched_df = pd.merge(enriched_df, mapping_clean, on=real_src, how="inner", suffixes=("", "_map"))
         enriched_df = enriched_df.loc[:, ~enriched_df.columns.duplicated()]
 
+    # Step B: Identify Group-By columns
     group_cols = []
     for k in target_entity_keys:
         real_k = find_column(enriched_df, k)
@@ -4579,19 +4978,17 @@ def execute_rollup_step(
             if real_tk not in group_cols:
                 group_cols.append(real_tk)
 
+    # Step C: Identify Metric Columns
     id_tokens = ["npi", "id", "zip", "fips", "code", "account", "dma", "state", "key"]
     exclude_from_agg = set(group_cols) | set(source_entity_keys)
-
     agg_dict: Dict[str, Any] = {}
     metric_cols = []
 
     for col in enriched_df.columns:
         if col in exclude_from_agg or col.endswith("_map"):
             continue
-
         col_lower = col.lower()
         is_id_col = any(tok == col_lower or col_lower.startswith(f"{tok}_") or col_lower.endswith(f"_{tok}") for tok in id_tokens)
-
         num_series = pd.to_numeric(enriched_df[col], errors="coerce")
         has_numeric_data = num_series.notna().sum() > 0
 
@@ -4605,6 +5002,60 @@ def execute_rollup_step(
             agg_dict[col] = "sum"
             metric_cols.append(col)
 
+    # Step D: Apply Multi-Mapping Split Weights (Equal or Weighted)
+    if mapping_method == "weighted_split":
+        if weight_df is not None:
+            weight_df = weight_df.loc[:, ~weight_df.columns.duplicated()].copy()
+            real_w_keys = [find_column(weight_df, k) for k in weight_match_keys if find_column(weight_df, k)]
+            real_e_w_keys = [find_column(enriched_df, k) for k in weight_match_keys if find_column(enriched_df, k)]
+
+            if not real_w_keys or not real_e_w_keys:
+                raise StitchError(step_idx, "weight_key_missing", f"Step {step_idx} (Rollup): Weight match key not found in weight dataset.")
+
+            for ek, wk in zip(real_e_w_keys, real_w_keys):
+                enriched_df[ek] = normalize_key(enriched_df[ek], looks_like_date_key(ek))
+                weight_df[wk] = normalize_key(weight_df[wk], looks_like_date_key(wk))
+
+            real_wgt_col = find_column(weight_df, weight_column)
+            if not real_wgt_col:
+                raise StitchError(step_idx, "weight_col_missing", f"Step {step_idx} (Rollup): Weight column '{weight_column}' not found in {weight_name}.")
+
+            needed_w_cols = list(set(real_w_keys + [real_wgt_col]))
+            w_clean = weight_df[needed_w_cols].drop_duplicates(subset=real_w_keys)
+            rename_w = {wk: ek for ek, wk in zip(real_e_w_keys, real_w_keys) if wk != ek}
+            if rename_w:
+                w_clean = w_clean.rename(columns=rename_w)
+
+            enriched_df = pd.merge(enriched_df, w_clean, on=real_e_w_keys, how="left", suffixes=("", "_wgt"))
+            raw_w_series = pd.to_numeric(enriched_df[real_wgt_col], errors="coerce")
+        else:
+            real_wgt_col = find_column(enriched_df, weight_column)
+            raw_w_series = pd.to_numeric(enriched_df[real_wgt_col], errors="coerce") if real_wgt_col else pd.Series(np.nan, index=enriched_df.index)
+
+        missing_mask = raw_w_series.isna() | (raw_w_series <= 0)
+        if weight_fallback == "exclude":
+            enriched_df = enriched_df[~missing_mask].copy()
+            raw_w_series = raw_w_series[~missing_mask]
+            group_sum = enriched_df.groupby(real_src)[real_wgt_col].transform("sum")
+            enriched_df["__split_weight__"] = np.where(group_sum > 1e-9, raw_w_series / group_sum, 0.0)
+        else:
+            target_counts = enriched_df.groupby(real_src)[group_cols[0]].transform("count")
+            equal_weights = 1.0 / np.maximum(target_counts, 1.0)
+            group_sum = enriched_df.groupby(real_src)[real_wgt_col].transform("sum")
+            normalized_wgt = np.where(group_sum > 1e-9, raw_w_series / group_sum, equal_weights)
+            enriched_df["__split_weight__"] = np.where(missing_mask, equal_weights, normalized_wgt)
+    else:
+        # Equal Distribution (1/n per mapped target)
+        target_counts = enriched_df.groupby(real_src)[group_cols[0]].transform("count")
+        enriched_df["__split_weight__"] = 1.0 / np.maximum(target_counts, 1.0)
+
+    # Multiply metrics by the split weight before grouping
+    for col in metric_cols:
+        enriched_df[col] = pd.to_numeric(enriched_df[col], errors="coerce").fillna(0.0) * enriched_df["__split_weight__"]
+
+    enriched_df.drop(columns=["__split_weight__"], inplace=True, errors="ignore")
+
+    # Step E: GroupBy Aggregation
     if not agg_dict:
         rolled_df = enriched_df[group_cols].drop_duplicates()
     else:
@@ -4622,6 +5073,8 @@ def execute_rollup_step(
         "type": "rollup",
         "source": source_name,
         "mapping": mapping_name,
+        "mapping_method": mapping_method,
+        "weight_dataset": weight_name if mapping_method == "weighted_split" else "1/n (Equal)",
         "source_grain": step.get("source_grain", "unknown"),
         "target_grain": step.get("target_grain", "unknown"),
         "group_by": group_cols,
@@ -4677,11 +5130,18 @@ def execute_allocation_step(
 
         real_m_tgt = [find_column(mapping_df, k) for k in target_grain_keys if find_column(mapping_df, k)]
         real_t_tgt = [find_column(target_structure_df, k) for k in target_grain_keys if find_column(target_structure_df, k)]
-        real_m_src = [find_column(mapping_df, k) for k in source_grain_keys if find_column(mapping_df, k)]
+        
+        map_src_grain_keys = clean_key_list(
+            step.get("mapping_source_grain_key")
+            or step.get("crosswalk_match_key")
+            or step.get("mapping_source_key")
+            or source_grain_keys
+        )
+        real_m_src = [find_column(mapping_df, k) for k in map_src_grain_keys if find_column(mapping_df, k)]
 
         if not real_m_src:
             for col in mapping_df.columns:
-                if "dma" in col.lower() or "geo" in col.lower() or "market" in col.lower():
+                if any(k.lower() in col.lower() for k in source_grain_keys) or "dma" in col.lower() or "geo" in col.lower() or "market" in col.lower():
                     real_m_src.append(col)
                     break
 
@@ -4694,7 +5154,6 @@ def execute_allocation_step(
             enriched_target[tk] = normalize_key(enriched_target[tk], looks_like_date_key(tk))
             mapping_df[mk] = normalize_key(mapping_df[mk], looks_like_date_key(mk))
 
-        # Select only needed mapping columns to prevent duplicate column conflicts
         needed_map_cols = list(set(real_m_tgt + real_m_src))
         clean_map = mapping_df[needed_map_cols].loc[:, ~mapping_df[needed_map_cols].columns.duplicated()].drop_duplicates(subset=real_m_tgt)
 
@@ -4882,24 +5341,28 @@ def execute_pipeline(
         step_type = str(step.get("step_type", step.get("type", "join"))).lower()
 
         if step_type == "rollup":
-            src_name = str(step.get("source_file") or step.get("left_file", "")).strip()
-            map_name = str(step.get("mapping_file", "")).strip()
+            src_name = _clean_str(step.get("source_file") or step.get("left_file"))
+            map_name = _clean_str(step.get("mapping_file"))
+            wgt_name = _clean_str(step.get("weight_file"))
 
             src_df = lookup(src_name)
             map_df = lookup(map_name) if map_name else None
+            wgt_df = lookup(wgt_name) if wgt_name else None
 
             if src_df is None or src_df.empty:
                 raise StitchError(idx, "source_not_found", f'Step {idx} (Rollup): Source dataset "{src_name}" not found.')
             if map_name and (map_df is None or map_df.empty):
                 raise StitchError(idx, "mapping_not_found", f'Step {idx} (Rollup): Mapping dataset "{map_name}" not found.')
+            if wgt_name and (wgt_df is None or wgt_df.empty):
+                raise StitchError(idx, "weight_not_found", f'Step {idx} (Rollup): Weight dataset "{wgt_name}" not found.')
 
-            current, entry = execute_rollup_step(idx, step, src_df, map_df, src_name, map_name)
+            current, entry = execute_rollup_step(idx, step, src_df, map_df, wgt_df, src_name, map_name, wgt_name)
 
         elif step_type == "allocate":
-            src_name = str(step.get("source_file") or step.get("right_file", "")).strip()
-            tgt_name = str(step.get("target_file") or step.get("left_file", "")).strip()
-            map_name = str(step.get("mapping_file", "")).strip()
-            wgt_name = str(step.get("weight_file", "")).strip()
+            src_name = _clean_str(step.get("source_file") or step.get("right_file"))
+            tgt_name = _clean_str(step.get("target_file") or step.get("left_file"))
+            map_name = _clean_str(step.get("mapping_file"))
+            wgt_name = _clean_str(step.get("weight_file"))
 
             src_df = lookup(src_name)
             tgt_df = lookup(tgt_name)
@@ -4916,10 +5379,22 @@ def execute_pipeline(
                 raise StitchError(idx, "weight_not_found", f'Step {idx} (Allocate): Weight dataset "{wgt_name}" not found.')
 
             current, entry = execute_allocation_step(idx, step, src_df, tgt_df, map_df, wgt_df, src_name, tgt_name, map_name, wgt_name)
+        
 
+        elif step_type == "carryover":
+            src_name = _clean_str(step.get("source_file") or (f"Step {idx-1} Result" if idx > 1 else ""))
+            src_df = lookup(src_name)
+            if src_df is None or src_df.empty:
+                if current is not None and not current.empty:
+                    src_df = current
+                    src_name = f"Step {idx-1} Result"
+                else:
+                    raise StitchError(idx, "source_not_found", f'Step {idx} (Carryover): Source dataset "{src_name}" not found.')
+
+            current, entry = execute_carryover_step(idx, step, src_df, src_name)
         else:
-            left_name = str(step.get("left_file", "")).strip()
-            right_name = str(step.get("right_file", "")).strip()
+            left_name = _clean_str(step.get("left_file"))
+            right_name = _clean_str(step.get("right_file"))
 
             left_df = lookup(left_name)
             right_df = lookup(right_name)
@@ -4946,6 +5421,93 @@ def execute_pipeline(
         "preview": out.head(preview_rows).to_dict(orient="records"),
         "lineage": {"steps_executed": lineage},
     }
+
+def execute_carryover_step(
+    step_idx: int,
+    step: Dict[str, Any],
+    source_df: pd.DataFrame,
+    source_name: str,
+) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    df = source_df.loc[:, ~source_df.columns.duplicated()].copy()
+    rows_in = len(df)
+
+    entity_keys = clean_key_list(step.get("entity_keys") or step.get("source_entity_key"))
+    time_key = step.get("time_key") or step.get("date_key")
+    metric_col = step.get("metric_column") or step.get("sales_column")
+    output_col = step.get("output_column_name") or f"carryover_{metric_col}"
+    decay_rate = float(step.get("decay_rate", 0.6) if step.get("decay_rate") is not None else 0.6)
+    first_period_val = str(step.get("first_period_value", "zero")).lower()
+    time_gap_handling = str(step.get("time_gap_handling", "reset")).lower()
+    negative_handling = str(step.get("negative_handling", "floor_zero")).lower()
+
+    real_metric = find_column(df, metric_col)
+    real_time = find_column(df, time_key)
+    real_entities = [find_column(df, k) for k in entity_keys if find_column(df, k)]
+
+    if not real_metric:
+        raise StitchError(step_idx, "metric_not_found", f'Step {step_idx} (Carryover): Metric column "{metric_col}" not found.')
+    if not real_time:
+        raise StitchError(step_idx, "time_key_not_found", f'Step {step_idx} (Carryover): Time key "{time_key}" not found.')
+
+    parsed_dates = _parse_dates_robust(df[real_time].astype(str).str.strip())
+    df["__sort_date__"] = pd.to_datetime(parsed_dates, errors="coerce")
+
+    for ek in real_entities:
+        df[ek] = normalize_key(df[ek], looks_like_date_key(ek))
+
+    sort_cols = (real_entities + ["__sort_date__"]) if real_entities else ["__sort_date__"]
+    df = df.sort_values(by=sort_cols).reset_index(drop=True)
+
+    s = pd.to_numeric(df[real_metric], errors="coerce").fillna(0.0)
+    if negative_handling == "floor_zero":
+        s = np.maximum(0.0, s)
+
+    def _compute_carryover(sub_idx):
+        g_s = s.loc[sub_idx]
+        g_dates = df.loc[sub_idx, "__sort_date__"]
+
+        lagged = g_s.shift(1)
+
+        if time_gap_handling == "reset" and len(g_dates) > 1:
+            # ✅ FIXED: Use .dt.total_seconds() / 86400.0 instead of .dt.total_days()
+            diff_days = (g_dates - g_dates.shift(1)).dt.total_seconds() / 86400.0
+            med_days = diff_days.dropna().median()
+            if pd.notna(med_days) and med_days > 0:
+                gap_mask = diff_days > (med_days * 1.8)
+                lagged = lagged.mask(gap_mask, 0.0 if first_period_val == "zero" else np.nan)
+
+        val = lagged * decay_rate
+        if first_period_val == "zero":
+            val = val.fillna(0.0)
+        return val
+
+    if real_entities:
+        carryover_vals = pd.Series(index=df.index, dtype=float)
+        for _, grp in df.groupby(real_entities, sort=False):
+            carryover_vals.loc[grp.index] = _compute_carryover(grp.index)
+        df[output_col] = carryover_vals
+    else:
+        df[output_col] = _compute_carryover(df.index)
+
+    df.drop(columns=["__sort_date__"], inplace=True, errors="ignore")
+
+    lineage_entry = {
+        "step": step_idx,
+        "type": "carryover",
+        "source": source_name,
+        "entity_keys": real_entities,
+        "time_key": real_time,
+        "metric_column": real_metric,
+        "output_column": output_col,
+        "decay_rate": decay_rate,
+        "first_period_value": first_period_val,
+        "time_gap_handling": time_gap_handling,
+        "negative_handling": negative_handling,
+        "rows_in": rows_in,
+        "rows_out": int(len(df)),
+        "columns": [str(c) for c in df.columns],
+    }
+    return df, lineage_entry
 
 ================================================================================
 FILE: core\transform.py
@@ -6957,21 +7519,11 @@ router = APIRouter()
 
 @router.post("/generate")
 async def generate_response_curves(payload: dict):
-    """
-    Generate response curves for each channel.
-    payload: {
-        channels: [{
-            name, impactable_sales_nation, beta_coeff, spend_nation,
-            start, stop, step, price, saturation_function, power_value
-        }],
-        num_time, num_geo
-    }
-    """
     try:
         results = {}
         num_time = payload.get("num_time", 12)
-        num_geo = payload.get("num_geo", 2614)
-        
+        num_geo = payload.get("num_geo", 100)
+
         for ch in payload.get("channels", []):
             channel_name = ch["name"]
             impactable_sales = float(ch.get("impactable_sales_nation", 0.0))
@@ -6983,35 +7535,24 @@ async def generate_response_curves(payload: dict):
             price = float(ch.get("price", 1.0))
             sat_fn = ch.get("saturation_function", "log")
             power_val = float(ch.get("power_value", 0.5))
+            log_k = float(ch.get("log_k", 1.0))
 
-            # Named, so a channel that cannot be calibrated says which one it
-            # is rather than failing the whole batch anonymously.
-            try:
-                df = create_response_curve(
-                    channel_name=channel_name,
-                    impactable_sales_nation=impactable_sales,
-                    beta_coeff=beta_coeff,
-                    spend_nation=spend,
-                    start=start,
-                    stop=stop,
-                    step=step,
-                    price=price,
-                    saturation_function=sat_fn,
-                    power_value=power_val,
-                    num_time=num_time,
-                    num_geo=num_geo,
-                )
-            except ValueError as exc:
-                raise ValueError(f"{channel_name}: {exc}") from exc
+            df = create_response_curve(
+                channel_name=channel_name,
+                impactable_sales_nation=impactable_sales,
+                beta_coeff=beta_coeff,
+                spend_nation=spend,
+                start=start,
+                stop=stop,
+                step=step,
+                price=price,
+                saturation_function=sat_fn,
+                power_value=power_val,
+                log_k=log_k,
+                num_time=num_time,
+                num_geo=num_geo,
+            )
 
-
-            # Clean non-finite floats. This used to replace NaN only, which
-            # left inf and -inf in the frame. Starlette's JSONResponse calls
-            # json.dumps with allow_nan=False, so those raised while the
-            # response was being rendered - after this handler returned, and
-            # so past the except below. The client got a bare 500 with no CORS
-            # headers, which a browser reports as "the backend did not
-            # respond" rather than as a server error.
             clean_records = (
                 df.replace([np.inf, -np.inf], np.nan).replace({np.nan: None})
                   .to_dict(orient="records")
@@ -7035,7 +7576,7 @@ router = APIRouter()
 # ─── Exact Industry Benchmark Reference Matrix ──────────────────────────────
 DERMATOLOGY_BENCHMARK_MATRIX = {
     "Launch (<1 Year)": {
-        "Low Competition": {
+        "Low / Niche Competition": {
             "baseline_impact": "30–45%",
             "salesforce_impact": "25–35%",
             "hcp_pp_impact": "5–9%",
@@ -7076,7 +7617,7 @@ DERMATOLOGY_BENCHMARK_MATRIX = {
         },
     },
     "Growth (1–3 Years)": {
-        "Low Competition": {
+        "Low / Niche Competition": {
             "baseline_impact": "45–60%",
             "salesforce_impact": "25–33%",
             "hcp_pp_impact": "5–9%",
@@ -7116,8 +7657,8 @@ DERMATOLOGY_BENCHMARK_MATRIX = {
             "consumer_npp_roi": "3.5–5.8x",
         },
     },
-    "Maturity (3–7 Years)": {
-        "Low Competition": {
+    "Mature (3–7 Years)": {
+        "Low / Niche Competition": {
             "baseline_impact": "60–75%",
             "salesforce_impact": "25–32%",
             "hcp_pp_impact": "6–10%",
@@ -7158,7 +7699,7 @@ DERMATOLOGY_BENCHMARK_MATRIX = {
         },
     },
     "Late Lifecycle (7+ Years)": {
-        "Low Competition": {
+        "Low / Niche Competition": {
             "baseline_impact": "75–90%",
             "salesforce_impact": "22–29%",
             "hcp_pp_impact": "5–8%",
@@ -7213,7 +7754,7 @@ async def results_summary(payload: dict):
 @router.post("/benchmarks")
 async def benchmark_comparison(payload: dict):
     try:
-        disease_area = payload.get("disease_area", "Dermatology (Specialty)")
+        disease_area = payload.get("disease_area") or payload.get("therapy_type") or "Dermatology (Specialty)"
         maturity = payload.get("maturity_stage", "Launch (<1 Year)")
         competition = payload.get("competition_level", "High Competition")
         channels = payload.get("channels", [])
@@ -7224,10 +7765,12 @@ async def benchmark_comparison(payload: dict):
         bench_row = DERMATOLOGY_BENCHMARK_MATRIX[maturity_key][comp_key]
 
         def get_status(user_pct_val, bench_str):
+            if user_pct_val == 0.0:
+                return "Not Active in Model"
             try:
                 parts = bench_str.replace("%", "").split("–")
                 lo, hi = float(parts[0]), float(parts[1])
-                if user_pct_val >= lo and user_pct_val <= hi:
+                if lo <= user_pct_val <= hi:
                     return "Within Benchmark"
                 elif user_pct_val > hi:
                     return "Above Benchmark"
@@ -7236,54 +7779,35 @@ async def benchmark_comparison(payload: dict):
             except Exception:
                 return "Within Benchmark"
 
-        impact_benchmarks = [
-            {
-                "category": "Baseline Impact %",
-                "your_impact_pct": f"{float(user_impact_shares.get('baseline', 48.5)):.1f}%",
-                "benchmark": bench_row["baseline_impact"],
-                "status": get_status(float(user_impact_shares.get('baseline', 48.5)), bench_row["baseline_impact"])
-            },
-            {
-                "category": "Salesforce Impact %",
-                "your_impact_pct": f"{float(user_impact_shares.get('salesforce', 26.2)):.1f}%",
-                "benchmark": bench_row["salesforce_impact"],
-                "status": get_status(float(user_impact_shares.get('salesforce', 26.2)), bench_row["salesforce_impact"])
-            },
-            {
-                "category": "HCP PP (Personal Promo) Impact %",
-                "your_impact_pct": f"{float(user_impact_shares.get('hcp_pp', 6.4)):.1f}%",
-                "benchmark": bench_row["hcp_pp_impact"],
-                "status": get_status(float(user_impact_shares.get('hcp_pp', 6.4)), bench_row["hcp_pp_impact"])
-            },
-            {
-                "category": "Access Impact %",
-                "your_impact_pct": f"{float(user_impact_shares.get('access', 14.1)):.1f}%",
-                "benchmark": bench_row["access_impact"],
-                "status": get_status(float(user_impact_shares.get('access', 14.1)), bench_row["access_impact"])
-            },
-            {
-                "category": "HCP NPP (Non-Personal Promo) Impact %",
-                "your_impact_pct": f"{float(user_impact_shares.get('hcp_npp', 7.5)):.1f}%",
-                "benchmark": bench_row["hcp_npp_impact"],
-                "status": get_status(float(user_impact_shares.get('hcp_npp', 7.5)), bench_row["hcp_npp_impact"])
-            },
-            {
-                "category": "Consumer NPP / DTC Impact %",
-                "your_impact_pct": f"{float(user_impact_shares.get('consumer_npp', 8.3)):.1f}%",
-                "benchmark": bench_row["consumer_npp_impact"],
-                "status": get_status(float(user_impact_shares.get('consumer_npp', 8.3)), bench_row["consumer_npp_impact"])
-            },
+        # 👈 FIXED: Use real 0.0 defaults instead of fake numbers (26.2, 14.1, etc.)
+        categories = [
+            ("Baseline Impact %", "baseline", bench_row["baseline_impact"]),
+            ("Salesforce Impact %", "salesforce", bench_row["salesforce_impact"]),
+            ("HCP PP (Personal Promo) Impact %", "hcp_pp", bench_row["hcp_pp_impact"]),
+            ("Access Impact %", "access", bench_row["access_impact"]),
+            ("HCP NPP (Non-Personal Promo) Impact %", "hcp_npp", bench_row["hcp_npp_impact"]),
+            ("Consumer NPP / DTC Impact %", "consumer_npp", bench_row["consumer_npp_impact"]),
         ]
+
+        impact_benchmarks = []
+        for label, key, bench_val in categories:
+            user_val = float(user_impact_shares.get(key, 0.0))
+            impact_benchmarks.append({
+                "category": label,
+                "your_impact_pct": f"{user_val:.1f}%" if user_val > 0 else "0.0% (Not in Model)",
+                "benchmark": bench_val,
+                "status": get_status(user_val, bench_val),
+            })
 
         channel_benchmarks = []
         for ch in channels:
             ch_name = ch.get("channel", "")
-            user_roi = float(ch.get("roi", 2.0))
+            user_roi = float(ch.get("roi", 0.0))
             l = ch_name.lower()
 
             if "call" in l or "rep" in l or "detail" in l:
                 bench_roi_str = bench_row["salesforce_roi"]
-                category_label = "Personal Promotion"
+                category_label = "Salesforce Promotion"
             elif "samp" in l or "speaker" in l or "spk" in l or "event" in l:
                 bench_roi_str = bench_row["hcp_pp_roi"]
                 category_label = "Personal Promotion"
@@ -7346,8 +7870,7 @@ from core.processing import (
     compute_poor_mans_curve_data,
     compute_correlation_matrix,
     compute_corr_pairs,
-    run_optuna_optimization,
-    optuna_params_to_transform_rows,
+    run_grid_search_channel_tuning,
 )
 
 router = APIRouter()
@@ -7376,6 +7899,60 @@ def _safe_float(val: Any, default: float = 0.0) -> float:
         return round(f, 4)
     except (ValueError, TypeError):
         return default
+
+
+@router.post("/grid-search-single")
+@router.post("/optuna-single")  # Alias to prevent any 404 mismatch
+async def grid_search_single_channel(payload: dict):
+    """
+    Exhaustively evaluate transformation permutations (Normalization, Decay, Horizon, Lag, Saturation).
+    """
+    try:
+        df = _parse_csv(payload["csv_data"])
+        channel = payload.get("channel", "")
+        geo_col = _sanitize_col_param(payload.get("geo_column"))
+        date_col = _sanitize_col_param(payload.get("date_column"))
+        dep_var = _sanitize_col_param(payload.get("dependent_variable"))
+        pop_col = _sanitize_col_param(payload.get("pop_column")) or None
+
+        derived_variables = payload.get("derived_variables", [])
+        if channel not in df.columns and derived_variables:
+            for d in derived_variables:
+                if d.get("name") == channel:
+                    vars_list = [v for v in d.get("variables", []) if v in df.columns]
+                    if len(vars_list) >= 2:
+                        weights = d.get("weights", {})
+                        op = d.get("operator", "+")
+                        res_s = pd.to_numeric(df[vars_list[0]], errors="coerce").fillna(0.0) * float(weights.get(vars_list[0], 1.0))
+                        for next_v in vars_list[1:]:
+                            w = float(weights.get(next_v, 1.0))
+                            s_next = pd.to_numeric(df[next_v], errors="coerce").fillna(0.0) * w
+                            if op == "+":
+                                res_s = res_s + s_next
+                            elif op == "-":
+                                res_s = res_s - s_next
+                            elif op == "*":
+                                res_s = res_s * s_next
+                            elif op == "/":
+                                res_s = (res_s / (s_next.replace(0, pd.NA))).fillna(0.0)
+                        df[channel] = res_s
+
+        if channel not in df.columns:
+            raise HTTPException(status_code=400, detail=f"Channel '{channel}' not found in dataset.")
+
+        result = run_grid_search_channel_tuning(
+            df=df,
+            channel=channel,
+            geo_column=geo_col,
+            dependent_variable=dep_var,
+            date_column=date_col,
+            pop_column=pop_col,
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Grid search tuning failed for '{payload.get('channel')}': {str(e)}")
 
 
 @router.post("/apply")
@@ -7421,58 +7998,6 @@ async def apply_transformations(payload: dict):
         raise HTTPException(status_code=400, detail=f"Transformation execution failed: {str(e)}")
 
 
-@router.post("/auto-select")
-async def auto_select_route(payload: dict):
-    try:
-        df = _parse_csv(payload["csv_data"])
-        geo_col = _sanitize_col_param(payload.get("geo_column"))
-        date_col = _sanitize_col_param(payload.get("date_column"))
-        dep_var = _sanitize_col_param(payload.get("dependent_variable"))
-        channels = payload.get("channels", [])
-        derived_variables = payload.get("derived_variables", [])
-        pop_col = _sanitize_col_param(payload.get("pop_column")) or None
-
-        # Compute any derived channels in df first
-        if derived_variables:
-            for d in derived_variables:
-                out_name = d.get("name")
-                op = d.get("operator", "+")
-                vars_list = [v for v in d.get("variables", []) if v in df.columns]
-                if out_name and len(vars_list) >= 2:
-                    weights = d.get("weights", {})
-                    res_s = pd.to_numeric(df[vars_list[0]], errors="coerce").fillna(0.0) * float(weights.get(vars_list[0], 1.0))
-                    for next_v in vars_list[1:]:
-                        w = float(weights.get(next_v, 1.0))
-                        s_next = pd.to_numeric(df[next_v], errors="coerce").fillna(0.0) * w
-                        if op == "+":
-                            res_s = res_s + s_next
-                        elif op == "-":
-                            res_s = res_s - s_next
-                        elif op == "*":
-                            res_s = res_s * s_next
-                        elif op == "/":
-                            res_s = (res_s / (s_next.replace(0, pd.NA))).fillna(0.0)
-                    df[out_name] = res_s
-
-        # Exclude sales KPI
-        channels_to_tune = [c for c in channels if c in df.columns and str(c).strip() != str(dep_var).strip()]
-
-        recommendations = []
-        for ch in channels_to_tune:
-            rec = auto_select_channel_params(
-                df=df,
-                channel=ch,
-                geo_column=geo_col,
-                dependent_variable=dep_var,
-                pop_column=pop_col,
-            )
-            recommendations.append(rec)
-
-        return {"recommendations": recommendations, "count": len(recommendations)}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Auto-selection failed: {str(e)}")
-
-
 @router.post("/preview-single")
 async def preview_single_route(payload: dict):
     try:
@@ -7485,7 +8010,6 @@ async def preview_single_route(payload: dict):
         derived_variables = payload.get("derived_variables", [])
         pop_col = _sanitize_col_param(payload.get("pop_column")) or None
 
-        # Compute derived channel if this channel is an arithmetic derived variable
         if channel not in df.columns and derived_variables:
             for d in derived_variables:
                 if d.get("name") == channel:
@@ -7530,7 +8054,6 @@ async def preview_single_route(payload: dict):
         if dep_var and dep_var in df.columns:
             df_preview[dep_var] = pd.to_numeric(df[dep_var], errors="coerce").fillna(0.0)
 
-        # 1. Summary Statistics with full NaN protection
         stats_table = [
             {"metric": "Mean", "original": _safe_float(raw_s.mean()), "transformed": _safe_float(trans_s.mean())},
             {"metric": "Median", "original": _safe_float(raw_s.median()), "transformed": _safe_float(trans_s.median())},
@@ -7541,7 +8064,6 @@ async def preview_single_route(payload: dict):
             {"metric": "75th Percentile", "original": _safe_float(raw_s.quantile(0.75)), "transformed": _safe_float(trans_s.quantile(0.75))},
         ]
 
-        # 2. Side-by-Side Histograms with Zero-Variance protection
         def make_hist(series, num_bins=12):
             vals = pd.to_numeric(series, errors="coerce").dropna().values
             if len(vals) == 0:
@@ -7555,7 +8077,6 @@ async def preview_single_route(payload: dict):
         raw_hist = make_hist(raw_s)
         trans_hist = make_hist(trans_s)
 
-        # 3. Before & After Relationships with KPI (Poor Man's Curves)
         raw_curve = compute_poor_mans_curve_data(df, channel, dep_var, n_bins=10) if (dep_var and dep_var in df.columns) else None
         trans_curve = compute_poor_mans_curve_data(df_preview, "transformed", dep_var, n_bins=10) if (dep_var and dep_var in df.columns) else None
 
@@ -7595,54 +8116,6 @@ async def transformation_correlation(payload: dict):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Transformed correlation failed: {str(e)}")
 
-
-@router.post("/optuna")
-async def run_optuna(payload: dict):
-    try:
-        df = _parse_csv(payload["csv_data"])
-        date_col = _sanitize_col_param(payload.get("date_column"))
-        geo_col = _sanitize_col_param(payload.get("geo_column"))
-        dep_var = _sanitize_col_param(payload.get("dependent_variable"))
-
-        df[date_col] = pd.to_datetime(df[date_col])
-
-        channels_cfg = payload["channels_cfg"]
-        channel_feature_names = payload.get("channel_feature_names") or [
-            f"{c['name']}_transformed" if c.get("has_adstock") or c.get("sat_method") else c["name"]
-            for c in channels_cfg
-        ]
-
-        negative_channels = set(payload.get("negative_channels", []))
-
-        result = run_optuna_optimization(
-            df=df,
-            geo_column=geo_col,
-            dependent_variable=dep_var,
-            channels_cfg=channels_cfg,
-            channel_feature_names=channel_feature_names,
-            n_trials=int(payload.get("n_trials", 50)),
-            cv_splits=int(payload.get("cv_splits", 3)),
-            use_sign_pen=payload.get("use_sign_pen", True),
-            use_mag_pen=payload.get("use_mag_pen", True),
-            use_stab_pen=payload.get("use_stab_pen", True),
-            lambda_sign=float(payload.get("lambda_sign", 10.0)),
-            lambda_mag=float(payload.get("lambda_mag", 1.0)),
-            lambda_stab=float(payload.get("lambda_stab", 5.0)),
-            negative_channels=negative_channels,
-            power_choices=[float(v) for v in payload.get("power_choices", [0.2, 0.3, 0.4, 0.5, 0.6, 0.7])],
-            decay_choices=[float(v) for v in payload.get("decay_choices", [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8])],
-            lag_choices=[int(v) for v in payload.get("lag_choices", [2, 3, 4, 5, 6, 7])],
-        )
-
-        suggested_rows = optuna_params_to_transform_rows(channels_cfg, result["best_params"])
-        return {
-            "best_params": result["best_params"],
-            "best_value": result["best_value"],
-            "n_trials": result["n_trials"],
-            "suggested_transformations": suggested_rows,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
 ================================================================================
 FILE: routers\v1_storage.py
@@ -8503,6 +8976,7 @@ Endpoints:
 - GET  /v2/workflows/{id}/ard
 """
 
+import json
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
@@ -8582,11 +9056,28 @@ class StitchStep(BaseModel):
     target_entity_key: Any = None
     mapping_source_key: Any = None
     mapping_target_key: Any = None
+    mapping_source_grain_key: Any = None
+    crosswalk_match_key: Any = None
     time_key: Any = None
     agg_rules: Optional[Dict[str, str]] = None
     allocation_method: Optional[str] = "equal"
     weight_column: Optional[str] = None
+    weight_value_column: Optional[str] = None
     allocated_metrics: Any = None
+
+    # Rollup Multi-mapping fields
+    rollup_mapping_method: Optional[str] = "equal_split"
+    weight_match_key: Any = None
+    weight_fallback: Optional[str] = "equal_split"
+
+    # Carryover fields
+    entity_keys: Optional[Any] = None
+    metric_column: Optional[str] = None
+    output_column_name: Optional[str] = None
+    decay_rate: Optional[float] = 0.6
+    first_period_value: Optional[str] = "zero"
+    time_gap_handling: Optional[str] = "reset"
+    negative_handling: Optional[str] = "floor_zero"
 
 
 class BuildArdBody(BaseModel):
@@ -8677,6 +9168,14 @@ async def build_ard(
             "lineage": result["lineage"],
         }
 
+    # Collect automatic column roles for any Carryover columns generated in pipeline
+    column_roles = {}
+    for s in body.steps:
+        s_dict = s.model_dump()
+        if s_dict.get("step_type") == "carryover":
+            out_col = s_dict.get("output_column_name") or f"carryover_{s_dict.get('metric_column') or 'sales'}"
+            column_roles[out_col] = "Baseline Variables"
+
     try:
         meta = await datasets.store_derived(
             workflow_id, output, result["df"], kind="ard",
@@ -8686,6 +9185,24 @@ async def build_ard(
                 **result["lineage"],
             },
         )
+
+        # Persist column roles metadata into the ARD dataset spec
+        if column_roles:
+            spec = meta.get("spec") or {}
+            config_meta = spec.get("config_metadata") or {}
+            existing_roles = config_meta.get("column_roles") or {}
+            existing_roles.update(column_roles)
+            config_meta["column_roles"] = existing_roles
+            spec["config_metadata"] = config_meta
+
+            pool = await datasets._pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE workflow_files SET spec = $1::jsonb WHERE workflow_id = $2 AND filename = $3",
+                    json.dumps(spec), workflow_id, output
+                )
+            meta["spec"] = spec
+
     except DatasetError as exc:
         return problem(request, exc.status, exc.title, exc.detail, kind=f"{PROBLEM_BASE}/dataset")
 

@@ -2264,3 +2264,263 @@ def create_response_curve(
         prev_impactable = impactable_nation
 
     return pd.DataFrame(rows)
+
+def run_optuna_channel_tuning(
+    df: pd.DataFrame,
+    channel: str,
+    geo_column: str,
+    dependent_variable: str,
+    date_column: Optional[str] = None,
+    pop_column: Optional[str] = None,
+    n_trials: int = 40,
+    cv_splits: int = 3,
+) -> Dict[str, Any]:
+    """
+    Optuna-based Grid/Bayesian search to find the optimal Normalization,
+    Adstock Decay, Adstock Horizon, Pure Shift Lag, and Saturation Function/Params.
+    """
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    if channel not in df.columns or dependent_variable not in df.columns:
+        raise ValueError(f"Channel '{channel}' or Dependent Variable '{dependent_variable}' not found in dataset.")
+
+    y = pd.to_numeric(df[dependent_variable], errors="coerce").fillna(0.0).values
+    if len(y) < 10:
+        raise ValueError("Dataset has too few records for hyperparameter optimization.")
+
+    # Parameter grid choices
+    norm_choices = ["none", "minmax", "zscore", "iqr"]
+    decay_choices = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    horizon_choices = [1, 2, 3, 4, 6, 8, 12]
+    lag_choices = [0, 1, 2, 3, 4]
+    sat_choices = ["none", "log", "power"]
+    power_k_choices = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    log_k_choices = [0.1, 0.5, 1.0, 1.5, 2.0, 3.0]
+
+    # TimeSeries Cross-Validation
+    use_cv = len(df) >= (cv_splits * 4)
+    tscv = TimeSeriesSplit(n_splits=cv_splits) if use_cv else None
+
+    def objective(trial: optuna.Trial) -> float:
+        norm = trial.suggest_categorical("normalization", norm_choices)
+        decay = trial.suggest_categorical("decay", decay_choices)
+        horizon = trial.suggest_categorical("horizon", horizon_choices)
+        lag = trial.suggest_categorical("lag", lag_choices)
+        sat = trial.suggest_categorical("saturation", sat_choices)
+
+        power_k = trial.suggest_categorical("power_k", power_k_choices) if sat == "power" else 0.5
+        log_k = trial.suggest_categorical("log_k", log_k_choices) if sat == "log" else 1.0
+
+        try:
+            # 1. Pure Lag shift if specified
+            df_work = df.copy()
+            if lag > 0:
+                if geo_column and geo_column in df_work.columns:
+                    df_work[channel] = df_work.groupby(geo_column)[channel].shift(lag, fill_value=0.0)
+                else:
+                    df_work[channel] = df_work[channel].shift(lag, fill_value=0.0)
+
+            # 2. Transform with Normalization, Adstock Decay/Horizon, and Saturation
+            trans_series = transform_single_channel(
+                df=df_work,
+                channel=channel,
+                geo_column=geo_column,
+                normalization=norm,
+                pop_column=pop_column,
+                adstock_coeff=decay,
+                lags=horizon,
+                sat_function=sat if sat != "none" else None,
+                power_k=power_k,
+                log_k=log_k,
+            ).fillna(0.0).values
+
+            if np.all(trans_series == 0) or np.isnan(trans_series).any():
+                return float("inf")
+
+            # 3. Evaluate Fit Quality (Negative Correlation / OLS MSE)
+            if use_cv and tscv is not None:
+                errors = []
+                for train_idx, test_idx in tscv.split(trans_series):
+                    X_tr, X_te = trans_series[train_idx], trans_series[test_idx]
+                    y_tr, y_te = y[train_idx], y[test_idx]
+
+                    if np.std(X_tr) == 0:
+                        return float("inf")
+
+                    slope, intercept, r_val, _, _ = stats.linregress(X_tr, y_tr)
+                    preds = slope * X_te + intercept
+                    errors.append(np.sqrt(mean_squared_error(y_te, preds)))
+                return float(np.mean(errors))
+            else:
+                r, _ = stats.pearsonr(trans_series, y)
+                return -float(abs(r)) if not np.isnan(r) else float("inf")
+        except Exception:
+            return float("inf")
+
+    sampler = optuna.samplers.TPESampler(seed=42)
+    study = optuna.create_study(direction="minimize", sampler=sampler)
+    study.optimize(objective, n_trials=n_trials)
+
+    best_p = study.best_params
+    best_sat = best_p.get("saturation", "none")
+    best_param_val = best_p.get("power_k", 0.5) if best_sat == "power" else (best_p.get("log_k", 1.0) if best_sat == "log" else 1.0)
+
+    # Compute correlation score with best settings
+    df_eval = df.copy()
+    if best_p.get("lag", 0) > 0:
+        if geo_column and geo_column in df_eval.columns:
+            df_eval[channel] = df_eval.groupby(geo_column)[channel].shift(best_p.get("lag", 0), fill_value=0.0)
+        else:
+            df_eval[channel] = df_eval[channel].shift(best_p.get("lag", 0), fill_value=0.0)
+
+    best_transformed = transform_single_channel(
+        df=df_eval,
+        channel=channel,
+        geo_column=geo_column,
+        normalization=best_p.get("normalization", "none"),
+        pop_column=pop_column,
+        adstock_coeff=best_p.get("decay", 0.5),
+        lags=best_p.get("horizon", 2),
+        sat_function=best_sat if best_sat != "none" else None,
+        power_k=best_p.get("power_k", 0.5),
+        log_k=best_p.get("log_k", 1.0),
+    ).fillna(0.0)
+
+    corr_score, _ = stats.pearsonr(best_transformed, y)
+    corr_score = float(abs(corr_score)) if not np.isnan(corr_score) else 0.0
+
+    return {
+        "channel": channel,
+        "normalization": best_p.get("normalization", "none"),
+        "decay": float(best_p.get("decay", 0.5)),
+        "horizon": int(best_p.get("horizon", 2)),
+        "lag": int(best_p.get("lag", 0)),
+        "saturation": best_sat,
+        "param": float(best_param_val),
+        "correlation_score": round(corr_score, 4),
+        "n_trials": n_trials,
+        "source": "auto",
+    }
+def run_grid_search_channel_tuning(
+    df: pd.DataFrame,
+    channel: str,
+    geo_column: Optional[str],
+    dependent_variable: str,
+    date_column: Optional[str] = None,
+    pop_column: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Exhaustive Multi-Dimensional Grid Search Engine for Marketing Channel Transformations.
+    Evaluates every parameter combination against the target KPI.
+    """
+    if channel not in df.columns or dependent_variable not in df.columns:
+        raise ValueError(f"Channel '{channel}' or Target Variable '{dependent_variable}' not found in dataset.")
+
+    y_series = pd.to_numeric(df[dependent_variable], errors="coerce").fillna(0.0).values
+    if len(y_series) < 5:
+        raise ValueError("Insufficient rows to perform grid search optimization.")
+
+    # 1. Full Grid Parameter Space
+    norm_grid = ["none", "minmax", "zscore", "iqr"]
+    lag_grid = [0, 1, 2, 3, 4]
+    decay_grid = [0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    horizon_grid = [1, 2, 3, 4, 6, 8]
+    sat_grid = [
+        ("none", 0.5, 1.0),
+        ("log", 0.5, 0.5),
+        ("log", 0.5, 1.0),
+        ("log", 0.5, 1.5),
+        ("log", 0.5, 2.0),
+        ("power", 0.3, 1.0),
+        ("power", 0.4, 1.0),
+        ("power", 0.5, 1.0),
+        ("power", 0.6, 1.0),
+        ("power", 0.7, 1.0),
+    ]
+
+    best_score = -1.0
+    best_config = {
+        "channel": channel,
+        "normalization": "none",
+        "decay": 0.5,
+        "horizon": 2,
+        "lag": 0,
+        "saturation": "none",
+        "param": 1.0,
+        "correlation_score": 0.0,
+        "total_evaluations": 0,
+        "source": "auto",
+    }
+
+    eval_count = 0
+    primary_geo = geo_column[0] if isinstance(geo_column, list) and len(geo_column) > 0 else geo_column
+
+    # 2. Exhaustive Nested Grid Search Evaluation
+    for lag in lag_grid:
+        df_shifted = df.copy()
+        if lag > 0:
+            if primary_geo and primary_geo in df_shifted.columns:
+                df_shifted[channel] = df_shifted.groupby(primary_geo)[channel].shift(lag, fill_value=0.0)
+            else:
+                df_shifted[channel] = df_shifted[channel].shift(lag, fill_value=0.0)
+
+        for norm in norm_grid:
+            raw_s = df_shifted[channel]
+            pop_s = None
+            if pop_column:
+                if isinstance(pop_column, str) and pop_column in df_shifted.columns:
+                    pop_s = pd.to_numeric(df_shifted[pop_column], errors="coerce").fillna(1.0)
+            norm_s = normalize_series_vectorized(raw_s, norm, pop_s)
+
+            for decay in decay_grid:
+                # If decay is 0.0, different horizons produce identical results; evaluate horizon=1 only
+                tested_horizons = [1] if decay == 0.0 else horizon_grid
+
+                for horizon in tested_horizons:
+                    if decay > 0.0 and horizon > 0:
+                        if primary_geo and primary_geo in df_shifted.columns:
+                            df_temp = pd.DataFrame({"geo": df_shifted[primary_geo].astype(str), "val": norm_s.values})
+                            adstocked = df_temp.groupby("geo", sort=False)["val"].transform(
+                                lambda s: geometric_adstock(s.values, horizon, decay)
+                            ).values
+                        else:
+                            adstocked = geometric_adstock(norm_s.values, horizon, decay)
+                    else:
+                        adstocked = norm_s.values
+
+                    for sat_fn, power_k, log_k in sat_grid:
+                        eval_count += 1
+                        trans = apply_saturation(
+                            adstocked,
+                            sat_fn if sat_fn != "none" else None,
+                            power_k=power_k,
+                            log_k=log_k,
+                        )
+
+                        trans_clean = np.nan_to_num(trans, nan=0.0, posinf=0.0, neginf=0.0)
+                        if np.std(trans_clean) == 0:
+                            continue
+
+                        # Compute Pearson correlation with Target KPI
+                        corr = float(np.corrcoef(trans_clean, y_series)[0, 1])
+                        score = abs(corr) if not np.isnan(corr) else 0.0
+
+                        if score > best_score:
+                            best_score = score
+                            param_val = power_k if sat_fn == "power" else (log_k if sat_fn == "log" else 1.0)
+                            best_config = {
+                                "channel": channel,
+                                "normalization": norm,
+                                "decay": float(decay),
+                                "horizon": int(horizon),
+                                "lag": int(lag),
+                                "saturation": sat_fn,
+                                "param": float(param_val),
+                                "correlation_score": round(score, 4),
+                                "total_evaluations": eval_count,
+                                "source": "auto",
+                            }
+
+    best_config["total_evaluations"] = eval_count
+    return best_config

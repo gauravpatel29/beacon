@@ -13,8 +13,7 @@ from core.processing import (
     compute_poor_mans_curve_data,
     compute_correlation_matrix,
     compute_corr_pairs,
-    run_optuna_optimization,
-    optuna_params_to_transform_rows,
+    run_grid_search_channel_tuning,
 )
 
 router = APIRouter()
@@ -43,6 +42,60 @@ def _safe_float(val: Any, default: float = 0.0) -> float:
         return round(f, 4)
     except (ValueError, TypeError):
         return default
+
+
+@router.post("/grid-search-single")
+@router.post("/optuna-single")  # Alias to prevent any 404 mismatch
+async def grid_search_single_channel(payload: dict):
+    """
+    Exhaustively evaluate transformation permutations (Normalization, Decay, Horizon, Lag, Saturation).
+    """
+    try:
+        df = _parse_csv(payload["csv_data"])
+        channel = payload.get("channel", "")
+        geo_col = _sanitize_col_param(payload.get("geo_column"))
+        date_col = _sanitize_col_param(payload.get("date_column"))
+        dep_var = _sanitize_col_param(payload.get("dependent_variable"))
+        pop_col = _sanitize_col_param(payload.get("pop_column")) or None
+
+        derived_variables = payload.get("derived_variables", [])
+        if channel not in df.columns and derived_variables:
+            for d in derived_variables:
+                if d.get("name") == channel:
+                    vars_list = [v for v in d.get("variables", []) if v in df.columns]
+                    if len(vars_list) >= 2:
+                        weights = d.get("weights", {})
+                        op = d.get("operator", "+")
+                        res_s = pd.to_numeric(df[vars_list[0]], errors="coerce").fillna(0.0) * float(weights.get(vars_list[0], 1.0))
+                        for next_v in vars_list[1:]:
+                            w = float(weights.get(next_v, 1.0))
+                            s_next = pd.to_numeric(df[next_v], errors="coerce").fillna(0.0) * w
+                            if op == "+":
+                                res_s = res_s + s_next
+                            elif op == "-":
+                                res_s = res_s - s_next
+                            elif op == "*":
+                                res_s = res_s * s_next
+                            elif op == "/":
+                                res_s = (res_s / (s_next.replace(0, pd.NA))).fillna(0.0)
+                        df[channel] = res_s
+
+        if channel not in df.columns:
+            raise HTTPException(status_code=400, detail=f"Channel '{channel}' not found in dataset.")
+
+        result = run_grid_search_channel_tuning(
+            df=df,
+            channel=channel,
+            geo_column=geo_col,
+            dependent_variable=dep_var,
+            date_column=date_col,
+            pop_column=pop_col,
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Grid search tuning failed for '{payload.get('channel')}': {str(e)}")
 
 
 @router.post("/apply")
@@ -88,58 +141,6 @@ async def apply_transformations(payload: dict):
         raise HTTPException(status_code=400, detail=f"Transformation execution failed: {str(e)}")
 
 
-@router.post("/auto-select")
-async def auto_select_route(payload: dict):
-    try:
-        df = _parse_csv(payload["csv_data"])
-        geo_col = _sanitize_col_param(payload.get("geo_column"))
-        date_col = _sanitize_col_param(payload.get("date_column"))
-        dep_var = _sanitize_col_param(payload.get("dependent_variable"))
-        channels = payload.get("channels", [])
-        derived_variables = payload.get("derived_variables", [])
-        pop_col = _sanitize_col_param(payload.get("pop_column")) or None
-
-        # Compute any derived channels in df first
-        if derived_variables:
-            for d in derived_variables:
-                out_name = d.get("name")
-                op = d.get("operator", "+")
-                vars_list = [v for v in d.get("variables", []) if v in df.columns]
-                if out_name and len(vars_list) >= 2:
-                    weights = d.get("weights", {})
-                    res_s = pd.to_numeric(df[vars_list[0]], errors="coerce").fillna(0.0) * float(weights.get(vars_list[0], 1.0))
-                    for next_v in vars_list[1:]:
-                        w = float(weights.get(next_v, 1.0))
-                        s_next = pd.to_numeric(df[next_v], errors="coerce").fillna(0.0) * w
-                        if op == "+":
-                            res_s = res_s + s_next
-                        elif op == "-":
-                            res_s = res_s - s_next
-                        elif op == "*":
-                            res_s = res_s * s_next
-                        elif op == "/":
-                            res_s = (res_s / (s_next.replace(0, pd.NA))).fillna(0.0)
-                    df[out_name] = res_s
-
-        # Exclude sales KPI
-        channels_to_tune = [c for c in channels if c in df.columns and str(c).strip() != str(dep_var).strip()]
-
-        recommendations = []
-        for ch in channels_to_tune:
-            rec = auto_select_channel_params(
-                df=df,
-                channel=ch,
-                geo_column=geo_col,
-                dependent_variable=dep_var,
-                pop_column=pop_col,
-            )
-            recommendations.append(rec)
-
-        return {"recommendations": recommendations, "count": len(recommendations)}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Auto-selection failed: {str(e)}")
-
-
 @router.post("/preview-single")
 async def preview_single_route(payload: dict):
     try:
@@ -152,7 +153,6 @@ async def preview_single_route(payload: dict):
         derived_variables = payload.get("derived_variables", [])
         pop_col = _sanitize_col_param(payload.get("pop_column")) or None
 
-        # Compute derived channel if this channel is an arithmetic derived variable
         if channel not in df.columns and derived_variables:
             for d in derived_variables:
                 if d.get("name") == channel:
@@ -197,7 +197,6 @@ async def preview_single_route(payload: dict):
         if dep_var and dep_var in df.columns:
             df_preview[dep_var] = pd.to_numeric(df[dep_var], errors="coerce").fillna(0.0)
 
-        # 1. Summary Statistics with full NaN protection
         stats_table = [
             {"metric": "Mean", "original": _safe_float(raw_s.mean()), "transformed": _safe_float(trans_s.mean())},
             {"metric": "Median", "original": _safe_float(raw_s.median()), "transformed": _safe_float(trans_s.median())},
@@ -208,7 +207,6 @@ async def preview_single_route(payload: dict):
             {"metric": "75th Percentile", "original": _safe_float(raw_s.quantile(0.75)), "transformed": _safe_float(trans_s.quantile(0.75))},
         ]
 
-        # 2. Side-by-Side Histograms with Zero-Variance protection
         def make_hist(series, num_bins=12):
             vals = pd.to_numeric(series, errors="coerce").dropna().values
             if len(vals) == 0:
@@ -222,7 +220,6 @@ async def preview_single_route(payload: dict):
         raw_hist = make_hist(raw_s)
         trans_hist = make_hist(trans_s)
 
-        # 3. Before & After Relationships with KPI (Poor Man's Curves)
         raw_curve = compute_poor_mans_curve_data(df, channel, dep_var, n_bins=10) if (dep_var and dep_var in df.columns) else None
         trans_curve = compute_poor_mans_curve_data(df_preview, "transformed", dep_var, n_bins=10) if (dep_var and dep_var in df.columns) else None
 
@@ -261,52 +258,3 @@ async def transformation_correlation(payload: dict):
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Transformed correlation failed: {str(e)}")
-
-
-@router.post("/optuna")
-async def run_optuna(payload: dict):
-    try:
-        df = _parse_csv(payload["csv_data"])
-        date_col = _sanitize_col_param(payload.get("date_column"))
-        geo_col = _sanitize_col_param(payload.get("geo_column"))
-        dep_var = _sanitize_col_param(payload.get("dependent_variable"))
-
-        df[date_col] = pd.to_datetime(df[date_col])
-
-        channels_cfg = payload["channels_cfg"]
-        channel_feature_names = payload.get("channel_feature_names") or [
-            f"{c['name']}_transformed" if c.get("has_adstock") or c.get("sat_method") else c["name"]
-            for c in channels_cfg
-        ]
-
-        negative_channels = set(payload.get("negative_channels", []))
-
-        result = run_optuna_optimization(
-            df=df,
-            geo_column=geo_col,
-            dependent_variable=dep_var,
-            channels_cfg=channels_cfg,
-            channel_feature_names=channel_feature_names,
-            n_trials=int(payload.get("n_trials", 50)),
-            cv_splits=int(payload.get("cv_splits", 3)),
-            use_sign_pen=payload.get("use_sign_pen", True),
-            use_mag_pen=payload.get("use_mag_pen", True),
-            use_stab_pen=payload.get("use_stab_pen", True),
-            lambda_sign=float(payload.get("lambda_sign", 10.0)),
-            lambda_mag=float(payload.get("lambda_mag", 1.0)),
-            lambda_stab=float(payload.get("lambda_stab", 5.0)),
-            negative_channels=negative_channels,
-            power_choices=[float(v) for v in payload.get("power_choices", [0.2, 0.3, 0.4, 0.5, 0.6, 0.7])],
-            decay_choices=[float(v) for v in payload.get("decay_choices", [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8])],
-            lag_choices=[int(v) for v in payload.get("lag_choices", [2, 3, 4, 5, 6, 7])],
-        )
-
-        suggested_rows = optuna_params_to_transform_rows(channels_cfg, result["best_params"])
-        return {
-            "best_params": result["best_params"],
-            "best_value": result["best_value"],
-            "n_trials": result["n_trials"],
-            "suggested_transformations": suggested_rows,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))

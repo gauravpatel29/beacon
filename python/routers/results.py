@@ -211,7 +211,6 @@ async def benchmark_comparison(payload: dict):
             except Exception:
                 return "Within Benchmark"
 
-        # 👈 FIXED: Use real 0.0 defaults instead of fake numbers (26.2, 14.1, etc.)
         categories = [
             ("Baseline Impact %", "baseline", bench_row["baseline_impact"]),
             ("Salesforce Impact %", "salesforce", bench_row["salesforce_impact"]),
@@ -260,17 +259,23 @@ async def benchmark_comparison(payload: dict):
             except Exception:
                 min_roi, max_roi = 1.0, 3.0
 
-            if user_roi >= min_roi:
-                status = "Within/Above Benchmark"
+            # Distinct status logic (either 'Above Benchmark' or 'Within Benchmark')
+            if user_roi > max_roi:
+                status = "Above Benchmark"
+            elif user_roi >= min_roi:
+                status = "Within Benchmark"
             elif user_roi >= (min_roi * 0.75):
                 status = "Near Benchmark"
             else:
                 status = "Below Benchmark"
 
+            # Format >10x if greater than 10
+            yours_formatted = ">10x" if user_roi > 10.0 else f"{user_roi:.2f}x"
+
             channel_benchmarks.append({
                 "channel": ch_name,
                 "category": category_label,
-                "yours": f"{user_roi:.2f}x",
+                "yours": yours_formatted,
                 "benchmark": bench_roi_str,
                 "status": status,
             })
