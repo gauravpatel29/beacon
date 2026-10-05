@@ -1,7 +1,3 @@
-/* ==========================================================================
-   DataTransformation.css
-   ========================================================================== */
-
 .transform-page {
   padding: var(--spacing-lg);
   background-color: #f5f7fa;
@@ -15,22 +11,9 @@
   margin-bottom: var(--spacing-md);
 }
 
-.page-header-icon {
-  font-size: 1.4rem;
-  line-height: 1.4;
-}
-
-.page-header-title {
-  font-size: 1.4rem;
-  font-weight: var(--font-weight-bold);
-  color: var(--color-text-primary);
-}
-
-.page-header-subtitle {
-  font-size: var(--font-size-small);
-  color: var(--color-text-secondary);
-  margin-top: 0.15rem;
-}
+.page-header-icon { font-size: 1.4rem; line-height: 1.4; }
+.page-header-title { font-size: 1.4rem; font-weight: var(--font-weight-bold); color: var(--color-text-primary); }
+.page-header-subtitle { font-size: var(--font-size-small); color: var(--color-text-secondary); margin-top: 0.15rem; }
 
 .transform-card {
   background-color: var(--color-white);
@@ -367,9 +350,6 @@
   min-width: 100px;
 }
 
-/* The .pop-weight-* rules went with the Population Based normalization
-   option and the weight picker that belonged to it. */
-
 .source-badge {
   font-size: 0.68rem;
   font-weight: var(--font-weight-semibold);
@@ -463,7 +443,7 @@
 
 .stat-card-row-transform.cols-4 { grid-template-columns: repeat(4, 1fr); }
 
-/* ---- Step 1 (new): Outlier Diagnostics & Pre-Treatment ---- */
+/* ---- Step 1: Outlier Diagnostics & Pre-Treatment ---- */
 .outlier-controls-row-t {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -944,6 +924,7 @@
     grid-template-columns: 1fr;
   }
 }
+
 /* ---- Derived variable builder ---- */
 .derived-builder {
   margin: var(--spacing-md) 0;
@@ -992,8 +973,6 @@
   margin-bottom: var(--spacing-sm);
 }
 
-/* The expression as it will be sent, so the operator and the order of the
-   parts are visible before the column is created. */
 .derived-builder-preview {
   font-size: 0.75rem;
   font-family: var(--font-mono, monospace);
@@ -1014,7 +993,6 @@
   gap: var(--spacing-md);
 }
 
-/* The title block takes the space; the button keeps its size. */
 .transform-card-titlebar > div {
   flex: 1 1 auto;
   min-width: 0;
@@ -1034,15 +1012,12 @@
   background-color: var(--color-primary-dark);
 }
 
-/* Saved, or nothing applied yet: both mean there is nothing to press. */
 .save-set-btn:disabled {
   background-color: #eef1f6;
   color: var(--color-text-light);
 }
 
 /* ---- Step 1 pickers: category-scoped ---- */
-/* The escape hatch out of a category, and back into it. Reads as a link
-   because it changes what is listed, not what is selected. */
 .pill-group-toggle {
   color: var(--color-primary);
   font-size: inherit;
@@ -1099,8 +1074,6 @@
   letter-spacing: 0.02em;
 }
 
-/* Selected over available, so a card nobody has touched still says how much
-   is in it. */
 .category-card-count {
   flex: 0 0 auto;
   padding: 0.1rem 0.5rem;
@@ -1140,7 +1113,6 @@
   color: var(--color-text-light);
 }
 
-/* The sixth panel: not a category, so it is tinted to read as a control. */
 .formulation-card {
   border: 1px solid var(--color-primary);
   border-radius: var(--radius-md);
@@ -1177,8 +1149,6 @@
   color: #a8710d;
 }
 
-/* What the row will actually do, which the decay and horizon labels alone do
-   not say. */
 .effect-cell {
   font-size: 0.7rem;
   color: var(--color-text-light);
@@ -1205,8 +1175,6 @@
   background-color: var(--color-primary-light);
 }
 
-/* Inline under the table rather than a modal over it: the point is to compare
-   the benchmark against the row that is still on screen. */
 .guidance-panel {
   margin-top: var(--spacing-md);
   padding: 0.9rem 1rem;
@@ -1277,6 +1245,7 @@
   font-size: 0.72rem;
   color: var(--color-text-secondary);
 }
+
 .auto-optuna-btn {
   padding: 0.35rem 0.65rem;
   border-radius: var(--radius-sm);

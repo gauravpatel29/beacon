@@ -1043,7 +1043,7 @@ function DataTransformation() {
                   <p className="transform-section-title">Transformation Configuration Table</p>
                   <p className="transform-section-desc">
                     Configure Normalization, Adstock Decay, Adstock Horizon, Lag, and Saturation curves per channel.
-                    Click <strong>⚡ Auto</strong> for automated multi-dimensional Grid Search optimization or <strong>i</strong> for channel benchmarks.
+                    Click <strong>Auto</strong> for automated multi-dimensional Grid Search optimization or <strong>i</strong> for channel benchmarks.
                   </p>
 
                   <div className="step-toolbar">
@@ -1255,7 +1255,7 @@ function DataTransformation() {
                                   onClick={() => handleOpenGridSearch(name)}
                                   title="Run Grid Search optimization on this channel"
                                 >
-                                  ⚡ Auto
+                                  Auto
                                 </button>
                               </td>
                               <td>
@@ -1281,7 +1281,7 @@ function DataTransformation() {
                         <div className="optuna-modal-head">
                           <div>
                             <p className="optuna-modal-title">
-                              ⚡ Grid Search Parameter Optimization: {gridSearchModal.channel}
+                              Grid Search Parameter Optimization: {gridSearchModal.channel}
                             </p>
                             <p className="optuna-modal-subtitle">
                               Exhaustively evaluating combinations of Normalization, Adstock Decay, Horizon, Lag, and Saturation curves
@@ -1768,3 +1768,4 @@ function MiniBarChart({ bins, color, xLabel = '', yLabel = 'Records', binLabels 
 }
 
 export default DataTransformation;
+
