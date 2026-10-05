@@ -1223,6 +1223,170 @@ def transform_single_channel(
     return pd.Series(final_s, index=df.index)
 
 
+# ---------------------------------------------------------------------------
+# Strict Channel-Specific Optimization Search Spaces
+# ---------------------------------------------------------------------------
+def get_channel_parameter_search_space(channel_name: str) -> Dict[str, Any]:
+    """
+    Returns search grids for Lag, Decay (α), Horizon, Saturation, and Param (k / p)
+    strictly within domain-specific bounds.
+    """
+    l = str(channel_name or '').strip().lower()
+
+    # 1. Calls: Lag [0-2], Decay [0.5-0.8], Horizon [2-4], Power [0.4-0.7]
+    if bool(re.search(r"call|rep|det|f2f", l)):
+        return {
+            "lags": [0, 1, 2],
+            "decays": [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8],
+            "horizons": [2, 3, 4],
+            "saturations": [("power", 0.4, 1.0), ("power", 0.5, 1.0), ("power", 0.6, 1.0), ("power", 0.7, 1.0)],
+            "sat_choice_optuna": ["power"],
+            "power_k_optuna": [0.4, 0.5, 0.6, 0.7],
+            "log_k_optuna": [1.0],
+            "default_sat": "power",
+            "default_param": 0.55,
+        }
+
+    # 2. Samples: Lag [0-1], Decay [0.4-0.7], Horizon [2-4], Log [0.5-1.5]
+    if bool(re.search(r"sample|samp|voucher|copay", l)):
+        return {
+            "lags": [0, 1],
+            "decays": [0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7],
+            "horizons": [2, 3, 4],
+            "saturations": [("log", 0.5, 0.5), ("log", 0.5, 0.75), ("log", 0.5, 1.0), ("log", 0.5, 1.25), ("log", 0.5, 1.5)],
+            "sat_choice_optuna": ["log"],
+            "power_k_optuna": [0.5],
+            "log_k_optuna": [0.5, 0.75, 1.0, 1.25, 1.5],
+            "default_sat": "log",
+            "default_param": 1.0,
+        }
+
+    # 3. Speaker: Lag [1-2], Decay [0.5-0.85], Horizon [3-6], Power [0.5-0.8]
+    if bool(re.search(r"speak|dinner|event|symposia|conf", l)):
+        return {
+            "lags": [1, 2],
+            "decays": [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85],
+            "horizons": [3, 4, 5, 6],
+            "saturations": [("power", 0.5, 1.0), ("power", 0.6, 1.0), ("power", 0.7, 1.0), ("power", 0.8, 1.0)],
+            "sat_choice_optuna": ["power"],
+            "power_k_optuna": [0.5, 0.6, 0.7, 0.8],
+            "log_k_optuna": [1.0],
+            "default_sat": "power",
+            "default_param": 0.65,
+        }
+
+    # 4. HCP Emails: Lag [0-1], Decay [0.3-0.6], Horizon [1-3], Log [0.5-1.5]
+    if bool(re.search(r"email|hcp_email", l)):
+        return {
+            "lags": [0, 1],
+            "decays": [0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6],
+            "horizons": [1, 2, 3],
+            "saturations": [("log", 0.5, 0.5), ("log", 0.5, 0.75), ("log", 0.5, 1.0), ("log", 0.5, 1.25), ("log", 0.5, 1.5)],
+            "sat_choice_optuna": ["log"],
+            "power_k_optuna": [0.5],
+            "log_k_optuna": [0.5, 0.75, 1.0, 1.25, 1.5],
+            "default_sat": "log",
+            "default_param": 1.0,
+        }
+
+    # 5. HCP Doximity: Lag [0-1], Decay [0.3-0.6], Horizon [1-3], Power [0.4-0.7]
+    if bool(re.search(r"doximity", l)):
+        return {
+            "lags": [0, 1],
+            "decays": [0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6],
+            "horizons": [1, 2, 3],
+            "saturations": [("power", 0.4, 1.0), ("power", 0.5, 1.0), ("power", 0.6, 1.0), ("power", 0.7, 1.0)],
+            "sat_choice_optuna": ["power"],
+            "power_k_optuna": [0.4, 0.5, 0.6, 0.7],
+            "log_k_optuna": [1.0],
+            "default_sat": "power",
+            "default_param": 0.55,
+        }
+
+    # 6. HCP Digital: Lag [0-1], Decay [0.2-0.5], Horizon [1-3], Power [0.5-0.8]
+    if bool(re.search(r"hcp_digital|hcp_web|web_detail|portal|banner", l)) or (bool(re.search(r"digital", l)) and not bool(re.search(r"dtc|social|search", l))):
+        return {
+            "lags": [0, 1],
+            "decays": [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5],
+            "horizons": [1, 2, 3],
+            "saturations": [("power", 0.5, 1.0), ("power", 0.6, 1.0), ("power", 0.7, 1.0), ("power", 0.8, 1.0)],
+            "sat_choice_optuna": ["power"],
+            "power_k_optuna": [0.5, 0.6, 0.7, 0.8],
+            "log_k_optuna": [1.0],
+            "default_sat": "power",
+            "default_param": 0.65,
+        }
+
+    # 7. DTC Paid Social Impressions: Lag [0-1], Decay [0.2-0.5], Horizon [1-3], Log [0.5-1.5]
+    if bool(re.search(r"social|facebook|fb|instagram|meta|insta", l)):
+        return {
+            "lags": [0, 1],
+            "decays": [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5],
+            "horizons": [1, 2, 3],
+            "saturations": [("log", 0.5, 0.5), ("log", 0.5, 0.75), ("log", 0.5, 1.0), ("log", 0.5, 1.25), ("log", 0.5, 1.5)],
+            "sat_choice_optuna": ["log"],
+            "power_k_optuna": [0.5],
+            "log_k_optuna": [0.5, 0.75, 1.0, 1.25, 1.5],
+            "default_sat": "log",
+            "default_param": 1.0,
+        }
+
+    # 8. DTC Paid Search: Lag [0-1], Decay [0.0-0.3], Horizon [1-2], Log [0.5-1.0]
+    if bool(re.search(r"search|sem|seo|google|adwords", l)):
+        return {
+            "lags": [0, 1],
+            "decays": [0.0, 0.1, 0.2, 0.3],
+            "horizons": [1, 2],
+            "saturations": [("log", 0.5, 0.5), ("log", 0.5, 0.75), ("log", 0.5, 1.0)],
+            "sat_choice_optuna": ["log"],
+            "power_k_optuna": [0.5],
+            "log_k_optuna": [0.5, 0.75, 1.0],
+            "default_sat": "log",
+            "default_param": 0.75,
+        }
+
+    # 9. Competitor Spend: Lag [0-2], Decay [0.2-0.5], Horizon [1-3], Power [0.3-0.6]
+    if bool(re.search(r"competitor|comp_|comp\b", l)):
+        return {
+            "lags": [0, 1, 2],
+            "decays": [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5],
+            "horizons": [1, 2, 3],
+            "saturations": [("power", 0.3, 1.0), ("power", 0.4, 1.0), ("power", 0.5, 1.0), ("power", 0.6, 1.0)],
+            "sat_choice_optuna": ["power"],
+            "power_k_optuna": [0.3, 0.4, 0.5, 0.6],
+            "log_k_optuna": [1.0],
+            "default_sat": "power",
+            "default_param": 0.45,
+        }
+
+    # 10. RTE: Lag [0-2], Decay [0.3-0.6], Horizon [1-3], Power [0.4-0.7]
+    if bool(re.search(r"rte|rep_trigger|trigger", l)):
+        return {
+            "lags": [0, 1, 2],
+            "decays": [0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6],
+            "horizons": [1, 2, 3],
+            "saturations": [("power", 0.4, 1.0), ("power", 0.5, 1.0), ("power", 0.6, 1.0), ("power", 0.7, 1.0)],
+            "sat_choice_optuna": ["power"],
+            "power_k_optuna": [0.4, 0.5, 0.6, 0.7],
+            "log_k_optuna": [1.0],
+            "default_sat": "power",
+            "default_param": 0.55,
+        }
+
+    # Generic / Default Media Channel Fallback
+    return {
+        "lags": [0, 1, 2],
+        "decays": [0.1, 0.3, 0.5, 0.7],
+        "horizons": [1, 2, 3, 4],
+        "saturations": [("none", 0.5, 1.0), ("log", 0.5, 1.0), ("power", 0.5, 1.0)],
+        "sat_choice_optuna": ["none", "log", "power"],
+        "power_k_optuna": [0.4, 0.5, 0.6],
+        "log_k_optuna": [0.5, 1.0, 1.5],
+        "default_sat": "log",
+        "default_param": 1.0,
+    }
+
+
 def auto_select_channel_params(
     df: pd.DataFrame,
     channel: str,
@@ -1243,68 +1407,70 @@ def auto_select_channel_params(
             "fit_score": 0.0,
         }
 
+    space = get_channel_parameter_search_space(channel)
     y = pd.to_numeric(df[dependent_variable], errors="coerce").fillna(0.0)
     best_score = -1.0
     best_cfg = {
         "Channel Name": channel,
         "Normalization": "none",
-        "Adstock": 0.5,
-        "Lags": 2,
-        "Saturation Function": "Log",
-        "Power (k)": 0.5,
-        "Log (k)": 1.0,
+        "Adstock": space["decays"][0],
+        "Lags": space["horizons"][0],
+        "Saturation Function": space["default_sat"].capitalize() if space["default_sat"] != "none" else None,
+        "Power (k)": space["default_param"] if space["default_sat"] == "power" else 0.5,
+        "Log (k)": space["default_param"] if space["default_sat"] == "log" else 1.0,
         "auto_selected": True,
         "fit_score": 0.0,
     }
 
-    norm_candidates = ["none", "minmax", "zscore"]
+    norm_candidates = ["none", "minmax", "zscore", "iqr"]
     if pop_column and pop_column in df.columns:
         norm_candidates.append("population")
 
-    adstock_grid = [(0.0, 0), (0.3, 1), (0.5, 2), (0.7, 4)]
-    sat_grid = [
-        (None, 0.5, 1.0),
-        ("Log", 0.5, 1.0),
-        ("Log", 0.5, 2.0),
-        ("Power", 0.3, 1.0),
-        ("Power", 0.5, 1.0),
-        ("Power", 0.7, 1.0),
-    ]
-
     for norm in norm_candidates:
-        for ads, lag in adstock_grid:
-            for sat_fn, p_k, l_k in sat_grid:
-                try:
-                    cand_s = transform_single_channel(
-                        df=df,
-                        channel=channel,
-                        geo_column=geo_column,
-                        normalization=norm,
-                        pop_column=pop_column,
-                        adstock_coeff=ads,
-                        lags=lag,
-                        sat_function=sat_fn,
-                        power_k=p_k,
-                        log_k=l_k,
-                    )
-                    r = cand_s.corr(y)
-                    score = abs(float(r)) if pd.notna(r) else 0.0
+        for lag in space["lags"]:
+            for ads in space["decays"]:
+                tested_horizons = [1] if ads == 0.0 else space["horizons"]
+                for hor in tested_horizons:
+                    for sat_fn, p_k, l_k in space["saturations"]:
+                        try:
+                            df_work = df.copy()
+                            primary_geo = geo_column[0] if isinstance(geo_column, list) and len(geo_column) > 0 else geo_column
+                            if lag > 0:
+                                if primary_geo and primary_geo in df_work.columns:
+                                    df_work[channel] = df_work.groupby(primary_geo)[channel].shift(lag, fill_value=0.0)
+                                else:
+                                    df_work[channel] = df_work[channel].shift(lag, fill_value=0.0)
 
-                    if score > best_score:
-                        best_score = score
-                        best_cfg = {
-                            "Channel Name": channel,
-                            "Normalization": norm,
-                            "Adstock": ads if ads > 0 else 0.0,
-                            "Lags": lag if lag > 0 else 1,
-                            "Saturation Function": sat_fn,
-                            "Power (k)": p_k,
-                            "Log (k)": l_k,
-                            "auto_selected": True,
-                            "fit_score": round(score, 4),
-                        }
-                except Exception:
-                    continue
+                            cand_s = transform_single_channel(
+                                df=df_work,
+                                channel=channel,
+                                geo_column=geo_column,
+                                normalization=norm,
+                                pop_column=pop_column,
+                                adstock_coeff=ads,
+                                lags=hor,
+                                sat_function=sat_fn if sat_fn != "none" else None,
+                                power_k=p_k,
+                                log_k=l_k,
+                            )
+                            r = cand_s.corr(y)
+                            score = abs(float(r)) if pd.notna(r) else 0.0
+
+                            if score > best_score:
+                                best_score = score
+                                best_cfg = {
+                                    "Channel Name": channel,
+                                    "Normalization": norm,
+                                    "Adstock": ads if ads > 0 else 0.0,
+                                    "Lags": hor if hor > 0 else 1,
+                                    "Saturation Function": sat_fn.capitalize() if sat_fn != "none" else None,
+                                    "Power (k)": p_k,
+                                    "Log (k)": l_k,
+                                    "auto_selected": True,
+                                    "fit_score": round(score, 4),
+                                }
+                        except Exception:
+                            continue
 
     return best_cfg
 
@@ -1351,15 +1517,25 @@ def apply_full_transformations_pipeline(
 
             df_out[out_name] = res_series
 
+    primary_geo = geo_column[0] if isinstance(geo_column, list) and len(geo_column) > 0 else geo_column
+
     for t in transformations:
         channel = t.get("Channel Name")
         if not channel or channel not in df_out.columns:
             continue
 
         ch_pop = t.get("pop_column") or t.get("Population Column") or pop_column
+        lag_shift = int(t.get("Lag", 0)) if pd.notna(t.get("Lag")) else 0
+
+        df_channel_work = df_out.copy()
+        if lag_shift > 0:
+            if primary_geo and primary_geo in df_channel_work.columns:
+                df_channel_work[channel] = df_channel_work.groupby(primary_geo)[channel].shift(lag_shift, fill_value=0.0)
+            else:
+                df_channel_work[channel] = df_channel_work[channel].shift(lag_shift, fill_value=0.0)
 
         transformed_s = transform_single_channel(
-            df=df_out,
+            df=df_channel_work,
             channel=channel,
             geo_column=geo_column,
             normalization=t.get("Normalization", "none"),
@@ -1372,7 +1548,6 @@ def apply_full_transformations_pipeline(
         )
         df_out[f"{channel}_transformed"] = transformed_s
 
-    primary_geo = geo_column[0] if isinstance(geo_column, list) and len(geo_column) > 0 else geo_column
     if add_carryover and dependent_variable in df_out.columns:
         if primary_geo and primary_geo in df_out.columns:
             df_out["Carryover"] = df_out.groupby(primary_geo)[dependent_variable].shift(1, fill_value=0.0)
@@ -1429,161 +1604,252 @@ def transform_edited_df(df: pd.DataFrame, edited_df: pd.DataFrame, geo_column: s
     return transformed_df
 
 
-def run_optuna_optimization(
+def run_optuna_channel_tuning(
     df: pd.DataFrame,
+    channel: str,
     geo_column: str,
     dependent_variable: str,
-    channels_cfg: List[Dict],
-    channel_feature_names: List[str],
-    n_trials: int,
-    cv_splits: int,
-    use_sign_pen: bool,
-    use_mag_pen: bool,
-    use_stab_pen: bool,
-    lambda_sign: float,
-    lambda_mag: float,
-    lambda_stab: float,
-    negative_channels: set,
-    power_choices: List[float],
-    decay_choices: List[float],
-    lag_choices: List[int],
-) -> dict:
+    date_column: Optional[str] = None,
+    pop_column: Optional[str] = None,
+    n_trials: int = 40,
+    cv_splits: int = 3,
+) -> Dict[str, Any]:
+    """
+    Optuna-based tuning obeying strict channel-specific parameter boundaries.
+    """
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-    tscv = TimeSeriesSplit(n_splits=cv_splits)
+    if channel not in df.columns or dependent_variable not in df.columns:
+        raise ValueError(f"Channel '{channel}' or Dependent Variable '{dependent_variable}' not found in dataset.")
 
-    def _apply_optuna_adstock(series, decay, lag):
-        result = np.array(series, dtype=np.float64)
-        arr = np.array(series, dtype=np.float64)
-        for l in range(1, lag + 1):
-            shifted = np.concatenate([np.zeros(l), arr[:-l]]) if l < len(arr) else np.zeros(len(arr))
-            result += (decay ** l) * shifted
-        return result
+    y = pd.to_numeric(df[dependent_variable], errors="coerce").fillna(0.0).values
+    if len(y) < 10:
+        raise ValueError("Dataset has too few records for hyperparameter optimization.")
 
-    def objective(trial):
-        params = {}
-        for cfg in channels_cfg:
-            ch = cfg["name"]
-            if cfg["has_adstock"]:
-                params[f"{ch}_decay"] = trial.suggest_categorical(f"{ch}_decay", decay_choices)
-                params[f"{ch}_lag"] = trial.suggest_categorical(f"{ch}_lag", lag_choices)
-            if cfg.get("sat_method") == "Power":
-                params[f"{ch}_power"] = trial.suggest_categorical(f"{ch}_power", power_choices)
+    space = get_channel_parameter_search_space(channel)
+    norm_choices = ["none", "minmax", "zscore", "iqr"]
 
-        df_temp = df.copy()
-        for cfg in channels_cfg:
-            ch = cfg["name"]
-            if ch not in df_temp.columns:
-                continue
-            has_ads = cfg["has_adstock"]
-            sat_m = cfg.get("sat_method")
-            decay = params.get(f"{ch}_decay", 0.5)
-            lag = int(params.get(f"{ch}_lag", 1))
-            power = params.get(f"{ch}_power", 0.5)
+    use_cv = len(df) >= (cv_splits * 4)
+    tscv = TimeSeriesSplit(n_splits=cv_splits) if use_cv else None
 
-            if has_ads:
-                trans = df_temp.groupby(geo_column)[ch].transform(
-                    lambda x: _apply_optuna_adstock(x.values, decay, lag)
-                )
+    def objective(trial: optuna.Trial) -> float:
+        norm = trial.suggest_categorical("normalization", norm_choices)
+        decay = trial.suggest_categorical("decay", space["decays"])
+        horizon = trial.suggest_categorical("horizon", space["horizons"])
+        lag = trial.suggest_categorical("lag", space["lags"])
+        sat = trial.suggest_categorical("saturation", space["sat_choice_optuna"])
+
+        power_k = trial.suggest_categorical("power_k", space["power_k_optuna"]) if sat == "power" else 0.5
+        log_k = trial.suggest_categorical("log_k", space["log_k_optuna"]) if sat == "log" else 1.0
+
+        try:
+            df_work = df.copy()
+            if lag > 0:
+                if geo_column and geo_column in df_work.columns:
+                    df_work[channel] = df_work.groupby(geo_column)[channel].shift(lag, fill_value=0.0)
+                else:
+                    df_work[channel] = df_work[channel].shift(lag, fill_value=0.0)
+
+            trans_series = transform_single_channel(
+                df=df_work,
+                channel=channel,
+                geo_column=geo_column,
+                normalization=norm,
+                pop_column=pop_column,
+                adstock_coeff=decay,
+                lags=horizon,
+                sat_function=sat if sat != "none" else None,
+                power_k=power_k,
+                log_k=log_k,
+            ).fillna(0.0).values
+
+            if np.all(trans_series == 0) or np.isnan(trans_series).any():
+                return float("inf")
+
+            if use_cv and tscv is not None:
+                errors = []
+                for train_idx, test_idx in tscv.split(trans_series):
+                    X_tr, X_te = trans_series[train_idx], trans_series[test_idx]
+                    y_tr, y_te = y[train_idx], y[test_idx]
+
+                    if np.std(X_tr) == 0:
+                        return float("inf")
+
+                    slope, intercept, _, _, _ = stats.linregress(X_tr, y_tr)
+                    preds = slope * X_te + intercept
+                    errors.append(np.sqrt(mean_squared_error(y_te, preds)))
+                return float(np.mean(errors))
             else:
-                trans = df_temp[ch].copy()
-
-            if sat_m == "Power":
-                df_temp[f"{ch}_transformed"] = np.power(np.abs(trans), power)
-            elif sat_m == "Log":
-                df_temp[f"{ch}_transformed"] = np.log1p(np.abs(trans))
-            else:
-                df_temp[f"{ch}_transformed"] = trans
-
-        feat_cols = [c for c in channel_feature_names if c in df_temp.columns]
-        df_model = df_temp.dropna(subset=[dependent_variable] + feat_cols)
-
-        if df_model.empty or len(df_model) < cv_splits * 2:
+                r, _ = stats.pearsonr(trans_series, y)
+                return -float(abs(r)) if not np.isnan(r) else float("inf")
+        except Exception:
             return float("inf")
-
-        X = sm.add_constant(df_model[feat_cols].astype(float))
-        y = df_model[dependent_variable].astype(float)
-
-        errors = []
-        beta_list = []
-        for train_idx, test_idx in tscv.split(X):
-            try:
-                X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
-                y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
-                m = sm.OLS(y_tr, X_tr).fit()
-                preds = m.predict(X_te)
-                errors.append(float(np.sqrt(mean_squared_error(y_te, preds))))
-                b = m.params.to_dict()
-                b.pop("const", None)
-                beta_list.append(b)
-            except Exception:
-                errors.append(float("inf"))
-
-        base_error = float(np.mean(errors))
-        if not np.isfinite(base_error):
-            return float("inf")
-
-        avg_betas = pd.DataFrame(beta_list).mean().to_dict() if beta_list else {}
-        total_loss = base_error
-        if use_sign_pen and avg_betas:
-            for name, beta in avg_betas.items():
-                if name in negative_channels and beta > 0:
-                    total_loss += lambda_sign * abs(beta)
-                elif name not in negative_channels and beta < 0:
-                    total_loss += lambda_sign * abs(beta)
-        if use_mag_pen and avg_betas:
-            total_loss += lambda_mag * sum(b ** 2 for b in avg_betas.values())
-        if use_stab_pen and len(beta_list) >= 2:
-            total_loss += lambda_stab * float(pd.DataFrame(beta_list).var().mean())
-        return total_loss
 
     sampler = optuna.samplers.TPESampler(seed=42)
     study = optuna.create_study(direction="minimize", sampler=sampler)
     study.optimize(objective, n_trials=n_trials)
 
+    best_p = study.best_params
+    best_sat = best_p.get("saturation", space["default_sat"])
+    best_param_val = best_p.get("power_k", 0.5) if best_sat == "power" else (best_p.get("log_k", 1.0) if best_sat == "log" else 1.0)
+
+    df_eval = df.copy()
+    if best_p.get("lag", 0) > 0:
+        if geo_column and geo_column in df_eval.columns:
+            df_eval[channel] = df_eval.groupby(geo_column)[channel].shift(best_p.get("lag", 0), fill_value=0.0)
+        else:
+            df_eval[channel] = df_eval[channel].shift(best_p.get("lag", 0), fill_value=0.0)
+
+    best_transformed = transform_single_channel(
+        df=df_eval,
+        channel=channel,
+        geo_column=geo_column,
+        normalization=best_p.get("normalization", "none"),
+        pop_column=pop_column,
+        adstock_coeff=best_p.get("decay", space["decays"][0]),
+        lags=best_p.get("horizon", space["horizons"][0]),
+        sat_function=best_sat if best_sat != "none" else None,
+        power_k=best_p.get("power_k", 0.5),
+        log_k=best_p.get("log_k", 1.0),
+    ).fillna(0.0)
+
+    corr_score, _ = stats.pearsonr(best_transformed, y)
+    corr_score = float(abs(corr_score)) if not np.isnan(corr_score) else 0.0
+
     return {
-        "best_params": study.best_params,
-        "best_value": float(study.best_value) if study.best_value != float("inf") else None,
+        "channel": channel,
+        "normalization": best_p.get("normalization", "none"),
+        "decay": float(best_p.get("decay", space["decays"][0])),
+        "horizon": int(best_p.get("horizon", space["horizons"][0])),
+        "lag": int(best_p.get("lag", 0)),
+        "saturation": best_sat,
+        "param": float(best_param_val),
+        "correlation_score": round(corr_score, 4),
         "n_trials": n_trials,
+        "source": "auto",
     }
 
 
-def optuna_params_to_transform_rows(channels_cfg: List[Dict], best_params: Dict) -> List[Dict]:
-    rows = []
-    for cfg in channels_cfg:
-        ch = cfg["name"]
-        row = {"Channel Name": ch, "Normalization": "none"}
-        if cfg["has_adstock"]:
-            row["Adstock"] = round(float(best_params.get(f"{ch}_decay", 0.5)), 2)
-            row["Lags"] = int(best_params.get(f"{ch}_lag", 1))
-        else:
-            row["Adstock"] = None
-            row["Lags"] = None
-        if cfg.get("sat_method") == "Power":
-            row["Saturation Function"] = "Power"
-            row["Power (k)"] = round(float(best_params.get(f"{ch}_power", 0.5)), 2)
-            row["Log (k)"] = 1.0
-        else:
-            row["Saturation Function"] = None
-            row["Power (k)"] = None
-            row["Log (k)"] = 1.0
-        rows.append(row)
-    return rows
+def run_grid_search_channel_tuning(
+    df: pd.DataFrame,
+    channel: str,
+    geo_column: Optional[str],
+    dependent_variable: str,
+    date_column: Optional[str] = None,
+    pop_column: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Exhaustive Multi-Dimensional Grid Search Engine for Marketing Channel Transformations
+    strictly constrained to domain-specific channel thresholds.
+    """
+    if channel not in df.columns or dependent_variable not in df.columns:
+        raise ValueError(f"Channel '{channel}' or Target Variable '{dependent_variable}' not found in dataset.")
+
+    y_series = pd.to_numeric(df[dependent_variable], errors="coerce").fillna(0.0).values
+    if len(y_series) < 5:
+        raise ValueError("Insufficient rows to perform grid search optimization.")
+
+    space = get_channel_parameter_search_space(channel)
+
+    norm_grid = ["none", "minmax", "zscore", "iqr"]
+    lag_grid = space["lags"]
+    decay_grid = space["decays"]
+    horizon_grid = space["horizons"]
+    sat_grid = space["saturations"]
+
+    best_score = -1.0
+    best_config = {
+        "channel": channel,
+        "normalization": "none",
+        "decay": float(decay_grid[0]),
+        "horizon": int(horizon_grid[0]),
+        "lag": int(lag_grid[0]),
+        "saturation": space["default_sat"],
+        "param": float(space["default_param"]),
+        "correlation_score": 0.0,
+        "total_evaluations": 0,
+        "source": "auto",
+    }
+
+    eval_count = 0
+    primary_geo = geo_column[0] if isinstance(geo_column, list) and len(geo_column) > 0 else geo_column
+
+    for lag in lag_grid:
+        df_shifted = df.copy()
+        if lag > 0:
+            if primary_geo and primary_geo in df_shifted.columns:
+                df_shifted[channel] = df_shifted.groupby(primary_geo)[channel].shift(lag, fill_value=0.0)
+            else:
+                df_shifted[channel] = df_shifted[channel].shift(lag, fill_value=0.0)
+
+        for norm in norm_grid:
+            raw_s = df_shifted[channel]
+            pop_s = None
+            if pop_column:
+                if isinstance(pop_column, str) and pop_column in df_shifted.columns:
+                    pop_s = pd.to_numeric(df_shifted[pop_column], errors="coerce").fillna(1.0)
+            norm_s = normalize_series_vectorized(raw_s, norm, pop_s)
+
+            for decay in decay_grid:
+                tested_horizons = [1] if decay == 0.0 else horizon_grid
+
+                for horizon in tested_horizons:
+                    if decay > 0.0 and horizon > 0:
+                        if primary_geo and primary_geo in df_shifted.columns:
+                            df_temp = pd.DataFrame({"geo": df_shifted[primary_geo].astype(str), "val": norm_s.values})
+                            adstocked = df_temp.groupby("geo", sort=False)["val"].transform(
+                                lambda s: geometric_adstock(s.values, horizon, decay)
+                            ).values
+                        else:
+                            adstocked = geometric_adstock(norm_s.values, horizon, decay)
+                    else:
+                        adstocked = norm_s.values
+
+                    for sat_fn, power_k, log_k in sat_grid:
+                        eval_count += 1
+                        trans = apply_saturation(
+                            adstocked,
+                            sat_fn if sat_fn != "none" else None,
+                            power_k=power_k,
+                            log_k=log_k,
+                        )
+
+                        trans_clean = np.nan_to_num(trans, nan=0.0, posinf=0.0, neginf=0.0)
+                        if np.std(trans_clean) == 0:
+                            continue
+
+                        corr = float(np.corrcoef(trans_clean, y_series)[0, 1])
+                        score = abs(corr) if not np.isnan(corr) else 0.0
+
+                        if score > best_score:
+                            best_score = score
+                            param_val = power_k if sat_fn == "power" else (log_k if sat_fn == "log" else 1.0)
+                            best_config = {
+                                "channel": channel,
+                                "normalization": norm,
+                                "decay": float(decay),
+                                "horizon": int(horizon),
+                                "lag": int(lag),
+                                "saturation": sat_fn,
+                                "param": float(param_val),
+                                "correlation_score": round(score, 4),
+                                "total_evaluations": eval_count,
+                                "source": "auto",
+                            }
+
+    best_config["total_evaluations"] = eval_count
+    return best_config
 
 
 # ---------------------------------------------------------------------------
 # MODELLING REGRESSION ENGINES (WITH FULL STATISTICAL INFERENCE FOR OLS & RIDGE)
 # ---------------------------------------------------------------------------
 
-LAMBDA_CAP = 0.95  # Documented safety cap to prevent division by zero on carryover rate
+LAMBDA_CAP = 0.95
 
 
 def calculate_long_term_factor(carryover_rate: float) -> float:
-    """
-    Standard MMx infinite geometric carryover multiplier: 1 / (1 - lambda).
-    Capped at LAMBDA_CAP (0.95) to prevent explosive multipliers.
-    """
     if carryover_rate <= 0.0:
         return 1.0
     lam = min(float(carryover_rate), LAMBDA_CAP)
@@ -1603,10 +1869,6 @@ def _calculate_attribution_table(
     ci_lower_series: Optional[np.ndarray] = None,
     ci_upper_series: Optional[np.ndarray] = None,
 ) -> Tuple[pd.DataFrame, float, Dict[str, Any]]:
-    """
-    Unified Attribution Engine for BOTH OLS and Ridge.
-    Guarantees standard denominators (Sum Actual Sales) and consistent units.
-    """
     tdf_copy = tdf.copy()
     gdf_copy = gdf.copy()
     tdf_copy["const"] = 1.0
@@ -1615,13 +1877,11 @@ def _calculate_attribution_table(
     y_modeled = pd.to_numeric(tdf_copy[dependent_variable_user_input], errors="coerce").fillna(0.0)
     sum_modeled_sales = float(y_modeled.sum())
 
-    # Actual observed raw sales in natural volume units (e.g. TRx)
     if dependent_variable in gdf_copy.columns:
         sum_raw_sales = float(pd.to_numeric(gdf_copy[dependent_variable], errors="coerce").sum())
     else:
         sum_raw_sales = sum_modeled_sales
 
-    # Prior period raw sales
     has_prior_data = False
     sum_raw_sales_prior = 0.0
     if len(gdf_prior) > 0 and dependent_variable in gdf_prior.columns:
@@ -1678,21 +1938,16 @@ def _calculate_attribution_table(
 
     coefficients["Spend"] = coefficients["Raw Variable"].apply(calc_spend)
 
-    # 1. Real Mathematical Contribution (beta * Modelled Activity)
     coefficients["Contribution"] = coefficients["Coefficient"].astype(float) * coefficients["Modelled Activity"].astype(float)
 
-    # 2. Raw Unforced Impact % = (Contribution / Sum Actual Observed Sales) * 100
     if sum_modeled_sales != 0:
         coefficients["Impactable %"] = (coefficients["Contribution"] / sum_modeled_sales) * 100.0
     else:
         coefficients["Impactable %"] = 0.0
 
     coefficients["Impactable (%)"] = coefficients["Impactable %"].apply(lambda x: f"{float(x):.2f}%")
-
-    # 3. Impactable Sales in Real Units (Rescaled to natural volume)
     coefficients["Impactable Sales"] = (coefficients["Impactable %"] / 100.0) * sum_raw_sales
 
-    # 4. Marketing ROI = Impactable Sales / Spend
     coefficients["ROI"] = coefficients.apply(
         lambda row: float(row["Impactable Sales"]) / float(row["Spend"]) if float(row["Spend"]) > 0 else 0.0,
         axis=1
@@ -1702,7 +1957,6 @@ def _calculate_attribution_table(
         lambda var: "Intercept" if var == "const" else ("Carryover" if var == "Carryover" else "")
     )
 
-    # 5. Long-Term ROI & Carryover Multiplier Calculation
     long_term_factor = 1.0
     carryover_rows = coefficients[coefficients["Note"] == "Carryover"]
     prior_warning = None
@@ -1785,6 +2039,7 @@ def run_ols_regression(
         "rmse": float(np.sqrt(model.mse_resid)),
     }
 
+
 def get_original_scale_coefficients(model, scaler, selected_channels, prior_weights, use_custom_penalties):
     coef_scaled = model.coef_[1:] if len(model.coef_) > len(selected_channels) else model.coef_
     intercept_scaled = model.coef_[0] if len(model.coef_) > len(selected_channels) else 0.0
@@ -1793,66 +2048,9 @@ def get_original_scale_coefficients(model, scaler, selected_channels, prior_weig
         std = float(scaler.scale_[i]) if scaler.scale_[i] != 0 else 1.0
         w = float(prior_weights.get(col, 1.0)) if use_custom_penalties else 1.0
         coef_original[i] = float(coef_scaled[i]) / (std * w)
-    # StandardScaler(with_mean=False) - the no-intercept path - leaves mean_
-    # as None rather than zeros, and there is no centring to undo.
     means = scaler.mean_ if scaler.mean_ is not None else np.zeros(len(selected_channels))
     intercept_original = float(intercept_scaled) - float(np.sum(coef_original * means))
     return intercept_original, coef_original
-
-
-def _build_coefficients_table(
-    params_series, transformed_df_channel_filtered, granular_df_date_filtered,
-    granular_df_prior_date_filtered, dependent_variable, dependent_variable_user_input,
-    se_series=None, t_stat_series=None, p_val_series=None, ci_lower_series=None, ci_upper_series=None
-):
-    transformed_df_copy = transformed_df_channel_filtered.copy()
-    granular_df_copy = granular_df_date_filtered.copy()
-    y = pd.to_numeric(transformed_df_copy[dependent_variable_user_input], errors="coerce").fillna(0.0)
-    sum_sales = float(y.sum())
-    transformed_df_copy["const"] = 1.0
-    granular_df_copy["const"] = 1.0
-
-    coefficients = pd.DataFrame({
-        "Variable": params_series.index,
-        "Coefficient": [float(v) for v in params_series.values]
-    })
-
-    if se_series is not None:
-        coefficients["Std Error"] = [float(v) for v in se_series]
-    if t_stat_series is not None:
-        coefficients["t-stat"] = [float(v) for v in t_stat_series]
-    if p_val_series is not None:
-        coefficients["P-value"] = [float(v) for v in p_val_series]
-    if ci_lower_series is not None:
-        coefficients["CI Lower (2.5%)"] = [float(v) for v in ci_lower_series]
-    if ci_upper_series is not None:
-        coefficients["CI Upper (97.5%)"] = [float(v) for v in ci_upper_series]
-    
-    def calc_raw(var):
-        raw_name = var.replace("_transformed", "")
-        if raw_name in granular_df_copy.columns:
-            return float(pd.to_numeric(granular_df_copy[raw_name], errors="coerce").sum())
-        return 0.0
-
-    def calc_mod(var):
-        if var in transformed_df_copy.columns:
-            return float(pd.to_numeric(transformed_df_copy[var], errors="coerce").sum())
-        return 0.0
-
-    coefficients["Raw Activity"] = coefficients["Variable"].apply(calc_raw)
-    coefficients["Modelled Activity"] = coefficients["Variable"].apply(calc_mod)
-    lagged_col = "Carryover"
-    coefficients["Note"] = coefficients["Variable"].apply(
-        lambda var: "Intercept" if var == "const" else ("Carryover" if var.replace("_transformed", "") == lagged_col else "")
-    )
-    coefficients["Contribution"] = coefficients["Coefficient"].astype(float) * coefficients["Modelled Activity"].astype(float)
-    total_contribution = float(coefficients["Contribution"].sum())
-    coefficients["Impactable %"] = coefficients["Contribution"].apply(
-        lambda c: ((float(c) / total_contribution) * 100.0) if total_contribution != 0 else 0.0
-    )
-    coefficients["Impactable (%)"] = coefficients["Impactable %"].apply(lambda x: f"{float(x):.2f}%")
-    coefficients["Impactable Sales"] = coefficients["Impactable %"].astype(float) * sum_sales / 100.0
-    return coefficients.drop(columns=["Contribution"])
 
 
 def _build_stage2_coefficients_table(
@@ -1871,13 +2069,13 @@ def _build_stage2_coefficients_table(
             return float(pd.to_numeric(gran_copy[raw_name], errors="coerce").sum())
         return 0.0
 
-    def calc_mod(var):
+    def calc_model(var):
         if var in df_copy.columns:
             return float(pd.to_numeric(df_copy[var], errors="coerce").sum())
         return 0.0
 
     coefficients["Raw Activity"] = coefficients["Variable"].apply(calc_raw)
-    coefficients["Modelled Activity"] = coefficients["Variable"].apply(calc_mod)
+    coefficients["Modelled Activity"] = coefficients["Variable"].apply(calc_model)
     coefficients["Note"] = coefficients["Variable"].apply(lambda var: "Intercept" if var == "const" else "")
     coefficients["Contribution"] = coefficients["Coefficient"].astype(float) * coefficients["Modelled Activity"].astype(float)
     total_contribution = float(coefficients["Contribution"].sum())
@@ -2019,7 +2217,6 @@ def run_ridge_regression(
     n, k = len(y_raw), len(channels)
     adj_r2 = 1.0 - (1.0 - r2) * (n - 1) / (n - k - 1) if (n - k - 1) > 0 else float("nan")
 
-    # Ridge Inference
     dof = max(1, n - k - 1)
     sigma_sq = float(np.sum(residuals ** 2) / dof)
     XtX = np.dot(X_scaled.T, X_scaled)
@@ -2073,6 +2270,7 @@ def run_ridge_regression(
         "end_date": str(end_date),
         "params": {k: float(v) for k, v in params_series.items()},
     }
+
 
 def build_combined_table(s1_coeff_df: pd.DataFrame, s2_coeff_df: pd.DataFrame, parent_channel: str) -> pd.DataFrame:
     rows = []
@@ -2225,7 +2423,6 @@ def create_response_curve(
     rows = []
     prev_impactable = None
 
-    # First-step marginal ROI baseline
     x_first = max(1.0, float(step)) / t_g
     if sat == "log":
         s1_imp = calibration_factor * float(beta_coeff) * np.log1p(k_val * x_first) * t_g
@@ -2264,263 +2461,3 @@ def create_response_curve(
         prev_impactable = impactable_nation
 
     return pd.DataFrame(rows)
-
-def run_optuna_channel_tuning(
-    df: pd.DataFrame,
-    channel: str,
-    geo_column: str,
-    dependent_variable: str,
-    date_column: Optional[str] = None,
-    pop_column: Optional[str] = None,
-    n_trials: int = 40,
-    cv_splits: int = 3,
-) -> Dict[str, Any]:
-    """
-    Optuna-based Grid/Bayesian search to find the optimal Normalization,
-    Adstock Decay, Adstock Horizon, Pure Shift Lag, and Saturation Function/Params.
-    """
-    import optuna
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-
-    if channel not in df.columns or dependent_variable not in df.columns:
-        raise ValueError(f"Channel '{channel}' or Dependent Variable '{dependent_variable}' not found in dataset.")
-
-    y = pd.to_numeric(df[dependent_variable], errors="coerce").fillna(0.0).values
-    if len(y) < 10:
-        raise ValueError("Dataset has too few records for hyperparameter optimization.")
-
-    # Parameter grid choices
-    norm_choices = ["none", "minmax", "zscore", "iqr"]
-    decay_choices = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
-    horizon_choices = [1, 2, 3, 4, 6, 8, 12]
-    lag_choices = [0, 1, 2, 3, 4]
-    sat_choices = ["none", "log", "power"]
-    power_k_choices = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
-    log_k_choices = [0.1, 0.5, 1.0, 1.5, 2.0, 3.0]
-
-    # TimeSeries Cross-Validation
-    use_cv = len(df) >= (cv_splits * 4)
-    tscv = TimeSeriesSplit(n_splits=cv_splits) if use_cv else None
-
-    def objective(trial: optuna.Trial) -> float:
-        norm = trial.suggest_categorical("normalization", norm_choices)
-        decay = trial.suggest_categorical("decay", decay_choices)
-        horizon = trial.suggest_categorical("horizon", horizon_choices)
-        lag = trial.suggest_categorical("lag", lag_choices)
-        sat = trial.suggest_categorical("saturation", sat_choices)
-
-        power_k = trial.suggest_categorical("power_k", power_k_choices) if sat == "power" else 0.5
-        log_k = trial.suggest_categorical("log_k", log_k_choices) if sat == "log" else 1.0
-
-        try:
-            # 1. Pure Lag shift if specified
-            df_work = df.copy()
-            if lag > 0:
-                if geo_column and geo_column in df_work.columns:
-                    df_work[channel] = df_work.groupby(geo_column)[channel].shift(lag, fill_value=0.0)
-                else:
-                    df_work[channel] = df_work[channel].shift(lag, fill_value=0.0)
-
-            # 2. Transform with Normalization, Adstock Decay/Horizon, and Saturation
-            trans_series = transform_single_channel(
-                df=df_work,
-                channel=channel,
-                geo_column=geo_column,
-                normalization=norm,
-                pop_column=pop_column,
-                adstock_coeff=decay,
-                lags=horizon,
-                sat_function=sat if sat != "none" else None,
-                power_k=power_k,
-                log_k=log_k,
-            ).fillna(0.0).values
-
-            if np.all(trans_series == 0) or np.isnan(trans_series).any():
-                return float("inf")
-
-            # 3. Evaluate Fit Quality (Negative Correlation / OLS MSE)
-            if use_cv and tscv is not None:
-                errors = []
-                for train_idx, test_idx in tscv.split(trans_series):
-                    X_tr, X_te = trans_series[train_idx], trans_series[test_idx]
-                    y_tr, y_te = y[train_idx], y[test_idx]
-
-                    if np.std(X_tr) == 0:
-                        return float("inf")
-
-                    slope, intercept, r_val, _, _ = stats.linregress(X_tr, y_tr)
-                    preds = slope * X_te + intercept
-                    errors.append(np.sqrt(mean_squared_error(y_te, preds)))
-                return float(np.mean(errors))
-            else:
-                r, _ = stats.pearsonr(trans_series, y)
-                return -float(abs(r)) if not np.isnan(r) else float("inf")
-        except Exception:
-            return float("inf")
-
-    sampler = optuna.samplers.TPESampler(seed=42)
-    study = optuna.create_study(direction="minimize", sampler=sampler)
-    study.optimize(objective, n_trials=n_trials)
-
-    best_p = study.best_params
-    best_sat = best_p.get("saturation", "none")
-    best_param_val = best_p.get("power_k", 0.5) if best_sat == "power" else (best_p.get("log_k", 1.0) if best_sat == "log" else 1.0)
-
-    # Compute correlation score with best settings
-    df_eval = df.copy()
-    if best_p.get("lag", 0) > 0:
-        if geo_column and geo_column in df_eval.columns:
-            df_eval[channel] = df_eval.groupby(geo_column)[channel].shift(best_p.get("lag", 0), fill_value=0.0)
-        else:
-            df_eval[channel] = df_eval[channel].shift(best_p.get("lag", 0), fill_value=0.0)
-
-    best_transformed = transform_single_channel(
-        df=df_eval,
-        channel=channel,
-        geo_column=geo_column,
-        normalization=best_p.get("normalization", "none"),
-        pop_column=pop_column,
-        adstock_coeff=best_p.get("decay", 0.5),
-        lags=best_p.get("horizon", 2),
-        sat_function=best_sat if best_sat != "none" else None,
-        power_k=best_p.get("power_k", 0.5),
-        log_k=best_p.get("log_k", 1.0),
-    ).fillna(0.0)
-
-    corr_score, _ = stats.pearsonr(best_transformed, y)
-    corr_score = float(abs(corr_score)) if not np.isnan(corr_score) else 0.0
-
-    return {
-        "channel": channel,
-        "normalization": best_p.get("normalization", "none"),
-        "decay": float(best_p.get("decay", 0.5)),
-        "horizon": int(best_p.get("horizon", 2)),
-        "lag": int(best_p.get("lag", 0)),
-        "saturation": best_sat,
-        "param": float(best_param_val),
-        "correlation_score": round(corr_score, 4),
-        "n_trials": n_trials,
-        "source": "auto",
-    }
-def run_grid_search_channel_tuning(
-    df: pd.DataFrame,
-    channel: str,
-    geo_column: Optional[str],
-    dependent_variable: str,
-    date_column: Optional[str] = None,
-    pop_column: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Exhaustive Multi-Dimensional Grid Search Engine for Marketing Channel Transformations.
-    Evaluates every parameter combination against the target KPI.
-    """
-    if channel not in df.columns or dependent_variable not in df.columns:
-        raise ValueError(f"Channel '{channel}' or Target Variable '{dependent_variable}' not found in dataset.")
-
-    y_series = pd.to_numeric(df[dependent_variable], errors="coerce").fillna(0.0).values
-    if len(y_series) < 5:
-        raise ValueError("Insufficient rows to perform grid search optimization.")
-
-    # 1. Full Grid Parameter Space
-    norm_grid = ["none", "minmax", "zscore", "iqr"]
-    lag_grid = [0, 1, 2, 3, 4]
-    decay_grid = [0.0, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
-    horizon_grid = [1, 2, 3, 4, 6, 8]
-    sat_grid = [
-        ("none", 0.5, 1.0),
-        ("log", 0.5, 0.5),
-        ("log", 0.5, 1.0),
-        ("log", 0.5, 1.5),
-        ("log", 0.5, 2.0),
-        ("power", 0.3, 1.0),
-        ("power", 0.4, 1.0),
-        ("power", 0.5, 1.0),
-        ("power", 0.6, 1.0),
-        ("power", 0.7, 1.0),
-    ]
-
-    best_score = -1.0
-    best_config = {
-        "channel": channel,
-        "normalization": "none",
-        "decay": 0.5,
-        "horizon": 2,
-        "lag": 0,
-        "saturation": "none",
-        "param": 1.0,
-        "correlation_score": 0.0,
-        "total_evaluations": 0,
-        "source": "auto",
-    }
-
-    eval_count = 0
-    primary_geo = geo_column[0] if isinstance(geo_column, list) and len(geo_column) > 0 else geo_column
-
-    # 2. Exhaustive Nested Grid Search Evaluation
-    for lag in lag_grid:
-        df_shifted = df.copy()
-        if lag > 0:
-            if primary_geo and primary_geo in df_shifted.columns:
-                df_shifted[channel] = df_shifted.groupby(primary_geo)[channel].shift(lag, fill_value=0.0)
-            else:
-                df_shifted[channel] = df_shifted[channel].shift(lag, fill_value=0.0)
-
-        for norm in norm_grid:
-            raw_s = df_shifted[channel]
-            pop_s = None
-            if pop_column:
-                if isinstance(pop_column, str) and pop_column in df_shifted.columns:
-                    pop_s = pd.to_numeric(df_shifted[pop_column], errors="coerce").fillna(1.0)
-            norm_s = normalize_series_vectorized(raw_s, norm, pop_s)
-
-            for decay in decay_grid:
-                # If decay is 0.0, different horizons produce identical results; evaluate horizon=1 only
-                tested_horizons = [1] if decay == 0.0 else horizon_grid
-
-                for horizon in tested_horizons:
-                    if decay > 0.0 and horizon > 0:
-                        if primary_geo and primary_geo in df_shifted.columns:
-                            df_temp = pd.DataFrame({"geo": df_shifted[primary_geo].astype(str), "val": norm_s.values})
-                            adstocked = df_temp.groupby("geo", sort=False)["val"].transform(
-                                lambda s: geometric_adstock(s.values, horizon, decay)
-                            ).values
-                        else:
-                            adstocked = geometric_adstock(norm_s.values, horizon, decay)
-                    else:
-                        adstocked = norm_s.values
-
-                    for sat_fn, power_k, log_k in sat_grid:
-                        eval_count += 1
-                        trans = apply_saturation(
-                            adstocked,
-                            sat_fn if sat_fn != "none" else None,
-                            power_k=power_k,
-                            log_k=log_k,
-                        )
-
-                        trans_clean = np.nan_to_num(trans, nan=0.0, posinf=0.0, neginf=0.0)
-                        if np.std(trans_clean) == 0:
-                            continue
-
-                        # Compute Pearson correlation with Target KPI
-                        corr = float(np.corrcoef(trans_clean, y_series)[0, 1])
-                        score = abs(corr) if not np.isnan(corr) else 0.0
-
-                        if score > best_score:
-                            best_score = score
-                            param_val = power_k if sat_fn == "power" else (log_k if sat_fn == "log" else 1.0)
-                            best_config = {
-                                "channel": channel,
-                                "normalization": norm,
-                                "decay": float(decay),
-                                "horizon": int(horizon),
-                                "lag": int(lag),
-                                "saturation": sat_fn,
-                                "param": float(param_val),
-                                "correlation_score": round(score, 4),
-                                "total_evaluations": eval_count,
-                                "source": "auto",
-                            }
-
-    best_config["total_evaluations"] = eval_count
-    return best_config
