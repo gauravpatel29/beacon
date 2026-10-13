@@ -484,3 +484,8 @@ export const transformationOptunaSingle = (payload) =>
 export const transformationGridSearchSingle = (payload) =>
   transformationPost('grid-search-single', payload);
 
+
+export const transformationGridSearchBatch = (payload) =>
+  transformationPost('grid-search-batch', payload);
+
+

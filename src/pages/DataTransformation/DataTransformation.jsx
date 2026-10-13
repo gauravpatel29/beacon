@@ -6,7 +6,7 @@ import {
 } from 'recharts';
 import {
   ensureWorkflow, listFiles, problemMessage, transformationApply,
-  transformationCorrelation, transformationPreviewSingle, transformationGridSearchSingle,
+  transformationCorrelation, transformationPreviewSingle, transformationGridSearchBatch,
   v2GetCsv, v2ListArds, edaHistogram, edaDetectOutliers,
   correlationMatrix as fetchPreCorrelationMatrix,
 } from '../../services/api.js';
@@ -124,8 +124,14 @@ function DataTransformation() {
   const [derivedDraft, setDerivedDraft] = useState(null);
   const [guidanceFor, setGuidanceFor] = useState('');
 
-  // Grid Search Modal State
-  const [gridSearchModal, setGridSearchModal] = useState(null);
+  // ── Multi-Channel Grid Search Modal State ─────────────────────────────
+  const [batchModalOpen, setBatchModalOpen] = useState(false);
+  const [batchSelectedChannels, setBatchSelectedChannels] = useState([]);
+  const [isBatchTuning, setIsBatchTuning] = useState(false);
+  const [batchResults, setBatchResults] = useState(null);
+  const [batchError, setBatchError] = useState(null);
+  const [batchAppliedChannels, setBatchAppliedChannels] = useState(new Set());
+  const [expandedLeaderboards, setExpandedLeaderboards] = useState(new Set());
 
   const [configs, setConfigs] = useState({});
   const [lagDrafts, setLagDrafts] = useState({});
@@ -360,56 +366,74 @@ function DataTransformation() {
     ? inspectVar
     : (selectedList[0] || '');
 
-  // ── Grid Search Auto-Tune Handlers ──────────────────────────────────────
-  const handleOpenGridSearch = async (channelName) => {
-    if (!effectiveCsv || !dependentVars.length) {
-      setApplyError('Dependent variable must be selected in Step 2 to tune channel parameters.');
+  // ── Overall Multi-Channel Auto-Configuration Logic ────────────────────────
+  const handleOpenBatchModal = () => {
+    if (!dependentVars.length) {
+      setApplyError('Please designate a Dependent Variable (Sales KPI) in Step 2 first.');
       return;
     }
-    setGridSearchModal({
-      channel: channelName,
-      isTuning: true,
-      result: null,
-      error: null,
-      current: configFor(channelName),
+    setBatchSelectedChannels(selectedList);
+    setBatchResults(null);
+    setBatchError(null);
+    setBatchAppliedChannels(new Set());
+    setExpandedLeaderboards(new Set());
+    setBatchModalOpen(true);
+  };
+
+  const handleRunBatchGridSearch = async () => {
+    if (!batchSelectedChannels.length) return;
+    setIsBatchTuning(true);
+    setBatchError(null);
+
+    const currentConfigsMap = {};
+    batchSelectedChannels.forEach((ch) => {
+      currentConfigsMap[ch] = configFor(ch);
     });
 
     try {
-      const res = await transformationGridSearchSingle({
+      const res = await transformationGridSearchBatch({
         csv_data: effectiveCsv,
-        channel: channelName,
+        channels: batchSelectedChannels,
         geo_column: geoKeys[0] || '',
         date_column: dateKeys[0] || '',
         dependent_variable: dependentVars[0],
-        derived_variables: toDerivedVariables(),
         pop_column: popKeys[0] || null,
+        current_configs: currentConfigsMap,
       });
-      setGridSearchModal((prev) => (prev && prev.channel === channelName ? {
-        ...prev,
-        isTuning: false,
-        result: res,
-      } : prev));
+      setBatchResults(res.results || {});
+      setBatchAppliedChannels(new Set(Object.keys(res.results || {})));
     } catch (err) {
-      setGridSearchModal((prev) => (prev && prev.channel === channelName ? {
-        ...prev,
-        isTuning: false,
-        error: problemMessage(err, 'Grid search parameter optimization failed.'),
-      } : prev));
+      setBatchError(problemMessage(err, 'Multi-channel Grid Search parameter tuning failed.'));
+    } finally {
+      setIsBatchTuning(false);
     }
   };
 
-  const handleApplyGridSearchResult = (channelName, gridResult) => {
-    if (!gridResult) return;
-    updateConfig(channelName, {
-      normalization: gridResult.normalization || 'none',
-      decay: gridResult.decay ?? 0.5,
-      horizon: gridResult.horizon ?? 2,
-      lag: gridResult.lag ?? 0,
-      saturation: gridResult.saturation || 'none',
-      param: gridResult.param ?? 1.0,
-      source: 'auto',
+  const handleApplyAllBatch = () => {
+    if (!batchResults) return;
+    Object.entries(batchResults).forEach(([ch, res]) => {
+      if (res && !res.error && batchAppliedChannels.has(ch)) {
+        updateConfig(ch, {
+          normalization: res.normalization || 'none',
+          decay: res.decay ?? 0.5,
+          horizon: res.horizon ?? 2,
+          lag: res.lag ?? 0,
+          saturation: res.saturation || 'none',
+          param: res.param ?? 1.0,
+          source: 'auto',
+        });
+      }
     });
-    setGridSearchModal(null);
+    setBatchModalOpen(false);
+  };
+
+  const toggleExpandLeaderboard = (ch) => {
+    setExpandedLeaderboards((prev) => {
+      const next = new Set(prev);
+      if (next.has(ch)) next.delete(ch);
+      else next.add(ch);
+      return next;
+    });
   };
 
   const handleSaveApply = async () => {
@@ -1043,10 +1067,19 @@ function DataTransformation() {
                   <p className="transform-section-title">Transformation Configuration Table</p>
                   <p className="transform-section-desc">
                     Configure Normalization, Adstock Decay, Adstock Horizon, Lag, and Saturation curves per channel.
-                    Click <strong>Auto</strong> for automated multi-dimensional Grid Search optimization or <strong>i</strong> for channel benchmarks.
+                    Click <strong>Auto Configure Channels (Grid Search)</strong> to optimize parameters across your selected marketing channels with full mathematical transparency.
                   </p>
 
                   <div className="step-toolbar">
+                    <button
+                      type="button"
+                      className="auto-config-master-btn"
+                      onClick={handleOpenBatchModal}
+                      title="Run transparent Grid Search across selected channels"
+                    >
+                      Auto Configure Channels (Grid Search)
+                    </button>
+
                     <button
                       className="add-derived-btn" onClick={openDerivedBuilder}
                       disabled={eligibleColumns.length < 2}
@@ -1121,7 +1154,6 @@ function DataTransformation() {
                           <th>Lag (Shift)</th>
                           <th>Saturation Curve</th>
                           <th>Param (k / p)</th>
-                          <th>Auto-Tune</th>
                           <th>Guidance</th>
                         </tr>
                       </thead>
@@ -1250,16 +1282,6 @@ function DataTransformation() {
                               </td>
                               <td>
                                 <button
-                                  type="button"
-                                  className="auto-optuna-btn"
-                                  onClick={() => handleOpenGridSearch(name)}
-                                  title="Run Grid Search optimization on this channel"
-                                >
-                                  Auto
-                                </button>
-                              </td>
-                              <td>
-                                <button
                                   type="button" className="guidance-btn"
                                   onClick={() => setGuidanceFor(name)}
                                   title="Benchmarks for this kind of channel"
@@ -1274,83 +1296,227 @@ function DataTransformation() {
                     </table>
                   </div>
 
-                  {/* Exhaustive Grid Search Modal */}
-                  {gridSearchModal && (
-                    <div className="modal-overlay" onClick={() => setGridSearchModal(null)}>
-                      <div className="optuna-tune-modal" onClick={(e) => e.stopPropagation()}>
+                  {/* ── Transparent Multi-Channel Grid Search Modal ── */}
+                  {batchModalOpen && (
+                    <div className="modal-overlay" onClick={() => setBatchModalOpen(false)}>
+                      <div className="optuna-tune-modal batch-modal-wide" onClick={(e) => e.stopPropagation()}>
                         <div className="optuna-modal-head">
                           <div>
                             <p className="optuna-modal-title">
-                              Grid Search Parameter Optimization: {gridSearchModal.channel}
+                              Multi-Channel Grid Search Parameter Optimization
                             </p>
                             <p className="optuna-modal-subtitle">
-                              Exhaustively evaluating combinations of Normalization, Adstock Decay, Horizon, Lag, and Saturation curves
+                              Exhaustively evaluate all parameter combinations within strict pharmaceutical benchmark constraints against <strong>{dependentVars[0]}</strong>
                             </p>
                           </div>
-                          <button type="button" className="optuna-modal-close" onClick={() => setGridSearchModal(null)}>✕</button>
+                          <button type="button" className="optuna-modal-close" onClick={() => setBatchModalOpen(false)}>✕</button>
                         </div>
 
                         <div className="optuna-modal-body">
-                          {gridSearchModal.isTuning && (
+                          {/* Channel Selector Section */}
+                          <div className="batch-channel-select-bar">
+                            <div className="batch-select-actions">
+                              <span className="batch-select-label">Select Channels to Optimize ({batchSelectedChannels.length} of {selectedList.length}):</span>
+                              <button
+                                type="button"
+                                className="mc-link"
+                                onClick={() => setBatchSelectedChannels(selectedList)}
+                              >
+                                Select All
+                              </button>
+                              <span>|</span>
+                              <button
+                                type="button"
+                                className="mc-link"
+                                onClick={() => setBatchSelectedChannels([])}
+                              >
+                                Deselect All
+                              </button>
+                            </div>
+                            <div className="batch-pills-row">
+                              {selectedList.map((ch) => {
+                                const isSel = batchSelectedChannels.includes(ch);
+                                return (
+                                  <span
+                                    key={ch}
+                                    className={`col-pill${isSel ? ' selected' : ''}`}
+                                    onClick={() => {
+                                      setBatchSelectedChannels((prev) =>
+                                        prev.includes(ch) ? prev.filter((c) => c !== ch) : [...prev, ch]
+                                      );
+                                    }}
+                                  >
+                                    {isSel ? '✓ ' : '+ '}{ch}
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          </div>
+
+                          <div className="batch-run-action-row">
+                            <button
+                              type="button"
+                              className="batch-execute-btn"
+                              disabled={isBatchTuning || !batchSelectedChannels.length}
+                              onClick={handleRunBatchGridSearch}
+                            >
+                              {isBatchTuning ? 'Evaluating Search Spaces...' : `Run Grid Search (${batchSelectedChannels.length} Channels)`}
+                            </button>
+                          </div>
+
+                          {isBatchTuning && (
                             <div className="optuna-tuning-state">
                               <span className="loading-spinner" aria-hidden="true" />
-                              <p>Evaluating multi-dimensional grid search permutations against {dependentVars[0]}...</p>
+                              <p>Evaluating multi-dimensional parameter grids against {dependentVars[0]}...</p>
                             </div>
                           )}
 
-                          {gridSearchModal.error && (
-                            <div className="transform-error-banner">{gridSearchModal.error}</div>
+                          {batchError && (
+                            <div className="transform-error-banner">{batchError}</div>
                           )}
 
-                          {gridSearchModal.result && (
-                            <>
-                              <div className="optuna-comparison-table-wrap">
-                                <table className="optuna-comparison-table">
-                                  <thead>
-                                    <tr>
-                                      <th>Parameter</th>
-                                      <th>Current Settings</th>
-                                      <th>Grid Search Best Settings</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    <tr>
-                                      <td><strong>Normalization</strong></td>
-                                      <td>{gridSearchModal.current.normalization || 'none'}</td>
-                                      <td className="optuna-highlight">{gridSearchModal.result.normalization}</td>
-                                    </tr>
-                                    <tr>
-                                      <td><strong>Adstock Decay (&alpha;)</strong></td>
-                                      <td>{gridSearchModal.current.decay}</td>
-                                      <td className="optuna-highlight">{gridSearchModal.result.decay}</td>
-                                    </tr>
-                                    <tr>
-                                      <td><strong>Adstock Horizon</strong></td>
-                                      <td>{pluralUnit(gridSearchModal.current.horizon, granularityUnitLabel)}</td>
-                                      <td className="optuna-highlight">{pluralUnit(gridSearchModal.result.horizon, granularityUnitLabel)}</td>
-                                    </tr>
-                                    <tr>
-                                      <td><strong>Pure Shift Lag</strong></td>
-                                      <td>{pluralUnit(gridSearchModal.current.lag, granularityUnitLabel)}</td>
-                                      <td className="optuna-highlight">{pluralUnit(gridSearchModal.result.lag, granularityUnitLabel)}</td>
-                                    </tr>
-                                    <tr>
-                                      <td><strong>Saturation Function</strong></td>
-                                      <td>{gridSearchModal.current.saturation}</td>
-                                      <td className="optuna-highlight">{gridSearchModal.result.saturation}</td>
-                                    </tr>
-                                    <tr>
-                                      <td><strong>Saturation Parameter (k / p)</strong></td>
-                                      <td>{gridSearchModal.current.saturation === 'none' ? '-' : gridSearchModal.current.param}</td>
-                                      <td className="optuna-highlight">{gridSearchModal.result.saturation === 'none' ? '-' : gridSearchModal.result.param}</td>
-                                    </tr>
-                                  </tbody>
-                                </table>
+                          {/* Transparent Results: Side-by-Side Comparison & Leaderboards */}
+                          {batchResults && Object.keys(batchResults).length > 0 && (
+                            <div className="batch-results-container">
+                              <div className="batch-channel-cards">
+                                {Object.entries(batchResults).map(([ch, r]) => {
+                                  if (r.error) {
+                                    return (
+                                      <div key={ch} className="batch-card error">
+                                        <strong>{ch}</strong>: {r.error}
+                                      </div>
+                                    );
+                                  }
+                                  const isApplied = batchAppliedChannels.has(ch);
+                                  const isExpanded = expandedLeaderboards.has(ch);
+                                  const cur = r.current_config || {};
+                                  return (
+                                    <div key={ch} className="batch-card">
+                                      <div className="batch-card-header">
+                                        <div className="batch-card-title-group">
+                                          <input
+                                            type="checkbox"
+                                            checked={isApplied}
+                                            onChange={(e) => {
+                                              setBatchAppliedChannels((prev) => {
+                                                const next = new Set(prev);
+                                                if (e.target.checked) next.add(ch);
+                                                else next.delete(ch);
+                                                return next;
+                                              });
+                                            }}
+                                          />
+                                          <span className="batch-card-ch-name">{ch}</span>
+                                        </div>
+
+                                        <div className="batch-fit-scores">
+                                          <span className="batch-score-label">Current: r = <strong>{r.current_correlation}</strong></span>
+                                          <span className="batch-score-arrow">→</span>
+                                          <span className="batch-score-label opt">Grid Search: r = <strong>{r.correlation_score}</strong></span>
+                                          <span className={`batch-gain-badge${r.correlation_gain < 0 ? ' negative' : ''}`}>
+                                            {r.correlation_gain >= 0 ? '+' : ''}{r.correlation_gain} (Δr)
+                                          </span>
+                                        </div>
+                                      </div>
+
+                                      <div className="batch-card-body">
+                                        {/* Side-by-Side Comparison: Current vs Grid Search */}
+                                        <div className="batch-compare-table-wrap">
+                                          <table className="batch-compare-table">
+                                            <thead>
+                                              <tr>
+                                                <th>Parameter</th>
+                                                <th>Current / Default Settings</th>
+                                                <th>Grid Search Optimum</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody>
+                                              <tr>
+                                                <td>Normalization</td>
+                                                <td>{cur.normalization || 'none'}</td>
+                                                <td className="opt-highlight">{r.normalization}</td>
+                                              </tr>
+                                              <tr>
+                                                <td>Adstock Decay (α)</td>
+                                                <td>{cur.decay}</td>
+                                                <td className="opt-highlight">{r.decay}</td>
+                                              </tr>
+                                              <tr>
+                                                <td>Adstock Horizon</td>
+                                                <td>{pluralUnit(cur.horizon, granularityUnitLabel)}</td>
+                                                <td className="opt-highlight">{pluralUnit(r.horizon, granularityUnitLabel)}</td>
+                                              </tr>
+                                              <tr>
+                                                <td>Pure Shift Lag</td>
+                                                <td>{pluralUnit(cur.lag, granularityUnitLabel)}</td>
+                                                <td className="opt-highlight">{pluralUnit(r.lag, granularityUnitLabel)}</td>
+                                              </tr>
+                                              <tr>
+                                                <td>Saturation Curve</td>
+                                                <td>{cur.saturation}</td>
+                                                <td className="opt-highlight">{r.saturation}</td>
+                                              </tr>
+                                              <tr>
+                                                <td>Saturation Param (k / p)</td>
+                                                <td>{cur.saturation === 'none' ? '-' : cur.param}</td>
+                                                <td className="opt-highlight">{r.saturation === 'none' ? '-' : r.param}</td>
+                                              </tr>
+                                            </tbody>
+                                          </table>
+                                        </div>
+
+                                        <div className="batch-card-footer">
+                                          <span className="batch-eval-count">
+                                            ✓ {r.total_evaluations} permutations evaluated within {r.rule_description}
+                                          </span>
+                                          <button
+                                            type="button"
+                                            className="batch-leaderboard-toggle"
+                                            onClick={() => toggleExpandLeaderboard(ch)}
+                                          >
+                                            {isExpanded ? 'Hide Top 3 Combinations ▴' : 'Show Top 3 Combinations ▾'}
+                                          </button>
+                                        </div>
+
+                                        {/* Top 3 Transparency Leaderboard */}
+                                        {isExpanded && r.top_3_leaderboard && (
+                                          <div className="batch-leaderboard-wrap">
+                                            <table className="batch-leaderboard-table">
+                                              <thead>
+                                                <tr>
+                                                  <th>Rank</th>
+                                                  <th>Normalization</th>
+                                                  <th>Decay (α)</th>
+                                                  <th>Horizon</th>
+                                                  <th>Lag</th>
+                                                  <th>Saturation</th>
+                                                  <th>Param</th>
+                                                  <th>Fit Score (r)</th>
+                                                </tr>
+                                              </thead>
+                                              <tbody>
+                                                {r.top_3_leaderboard.map((row, idx) => (
+                                                  <tr key={idx} className={idx === 0 ? 'top-winner' : ''}>
+                                                    <td><strong>#{idx + 1} {idx === 0 ? '(Selected)' : ''}</strong></td>
+                                                    <td>{row.normalization}</td>
+                                                    <td>{row.decay}</td>
+                                                    <td>{pluralUnit(row.horizon, granularityUnitLabel)}</td>
+                                                    <td>{pluralUnit(row.lag, granularityUnitLabel)}</td>
+                                                    <td>{row.saturation}</td>
+                                                    <td>{row.param}</td>
+                                                    <td className="score-cell">{row.correlation_score}</td>
+                                                  </tr>
+                                                ))}
+                                              </tbody>
+                                            </table>
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
                               </div>
-                              <p className="optuna-note">
-                                Applying Grid Search recommendations will immediately update this row in the Transformation Configuration Table.
-                              </p>
-                            </>
+                            </div>
                           )}
                         </div>
 
@@ -1358,56 +1524,24 @@ function DataTransformation() {
                           <button
                             type="button"
                             className="mapping-btn secondary"
-                            onClick={() => setGridSearchModal(null)}
+                            onClick={() => setBatchModalOpen(false)}
                           >
-                            Dismiss
+                            Cancel
                           </button>
-                          {gridSearchModal.result && (
+                          {batchResults && (
                             <button
                               type="button"
                               className="mapping-btn primary"
-                              onClick={() => handleApplyGridSearchResult(gridSearchModal.channel, gridSearchModal.result)}
+                              onClick={handleApplyAllBatch}
+                              disabled={batchAppliedChannels.size === 0}
                             >
-                              ✓ Apply Grid Search Settings
+                              ✓ Apply Selected Recommendations ({batchAppliedChannels.size} Channels)
                             </button>
                           )}
                         </div>
                       </div>
                     </div>
                   )}
-
-                  {/* Benchmark Guidance Panel */}
-                  {guidanceFor && (() => {
-                    const g = getChannelGuidance(guidanceFor);
-                    return (
-                      <div className="guidance-panel">
-                        <div className="guidance-head">
-                          <p className="guidance-title">{guidanceFor} - {g.tacticType}</p>
-                          <button
-                            type="button" className="guidance-close"
-                            onClick={() => setGuidanceFor('')} aria-label="Close guidance"
-                          >
-                            ✕
-                          </button>
-                        </div>
-                        <p className="guidance-rationale">{g.rationale}</p>
-                        <div className="guidance-grid">
-                          <div><span>Adstock decay</span><strong>{g.adstockDecay}</strong></div>
-                          <div><span>Adstock horizon</span><strong>{g.adstockHorizon}</strong></div>
-                          <div><span>Saturation</span><strong>{g.saturation}</strong></div>
-                        </div>
-                        <button
-                          type="button" className="mapping-btn"
-                          onClick={() => {
-                            updateConfig(guidanceFor, { ...g.suggested, source: 'guided' });
-                            setGuidanceFor('');
-                          }}
-                        >
-                          Apply these settings to {guidanceFor}
-                        </button>
-                      </div>
-                    );
-                  })()}
 
                   <div className="set-name-row">
                     <div className="set-name-field">
@@ -1768,4 +1902,3 @@ function MiniBarChart({ bins, color, xLabel = '', yLabel = 'Records', binLabels 
 }
 
 export default DataTransformation;
-
