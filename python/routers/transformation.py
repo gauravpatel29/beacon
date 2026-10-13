@@ -14,6 +14,7 @@ from core.processing import (
     compute_correlation_matrix,
     compute_corr_pairs,
     run_grid_search_channel_tuning,
+    run_grid_search_batch_tuning,
 )
 
 router = APIRouter()
@@ -45,11 +46,8 @@ def _safe_float(val: Any, default: float = 0.0) -> float:
 
 
 @router.post("/grid-search-single")
-@router.post("/optuna-single")  # Alias to prevent any 404 mismatch
+@router.post("/optuna-single")
 async def grid_search_single_channel(payload: dict):
-    """
-    Exhaustively evaluate transformation permutations (Normalization, Decay, Horizon, Lag, Saturation).
-    """
     try:
         df = _parse_csv(payload["csv_data"])
         channel = payload.get("channel", "")
@@ -57,6 +55,7 @@ async def grid_search_single_channel(payload: dict):
         date_col = _sanitize_col_param(payload.get("date_column"))
         dep_var = _sanitize_col_param(payload.get("dependent_variable"))
         pop_col = _sanitize_col_param(payload.get("pop_column")) or None
+        current_config = payload.get("current_config")
 
         derived_variables = payload.get("derived_variables", [])
         if channel not in df.columns and derived_variables:
@@ -90,12 +89,43 @@ async def grid_search_single_channel(payload: dict):
             dependent_variable=dep_var,
             date_column=date_col,
             pop_column=pop_col,
+            current_config=current_config,
         )
         return result
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Grid search tuning failed for '{payload.get('channel')}': {str(e)}")
+
+
+@router.post("/grid-search-batch")
+async def grid_search_batch_channels(payload: dict):
+    try:
+        df = _parse_csv(payload["csv_data"])
+        channels = payload.get("channels", [])
+        geo_col = _sanitize_col_param(payload.get("geo_column"))
+        date_col = _sanitize_col_param(payload.get("date_column"))
+        dep_var = _sanitize_col_param(payload.get("dependent_variable"))
+        pop_col = _sanitize_col_param(payload.get("pop_column")) or None
+        current_configs = payload.get("current_configs", {})
+
+        if not channels or not dep_var:
+            raise HTTPException(status_code=400, detail="Channels list and Dependent Variable are required.")
+
+        result = run_grid_search_batch_tuning(
+            df=df,
+            channels=channels,
+            geo_column=geo_col,
+            dependent_variable=dep_var,
+            date_column=date_col,
+            pop_column=pop_col,
+            current_configs=current_configs,
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Batch grid search optimization failed: {str(e)}")
 
 
 @router.post("/apply")

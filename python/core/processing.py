@@ -1224,164 +1224,191 @@ def transform_single_channel(
 
 
 # ---------------------------------------------------------------------------
-# Strict Channel-Specific Optimization Search Spaces
+# Strict Channel-Specific Optimization Search Spaces (Decay step 0.05, Power/Log step 0.10)
 # ---------------------------------------------------------------------------
 def get_channel_parameter_search_space(channel_name: str) -> Dict[str, Any]:
     """
     Returns search grids for Lag, Decay (α), Horizon, Saturation, and Param (k / p)
-    strictly within domain-specific bounds.
+    strictly within domain-specific bounds with step sizes:
+    Decay: 0.05, Power: 0.10, Log: 0.10
     """
     l = str(channel_name or '').strip().lower()
 
-    # 1. Calls: Lag [0-2], Decay [0.5-0.8], Horizon [2-4], Power [0.4-0.7]
+    # 1. Calls: Lag [0-2], Decay [0.5-0.8 (step 0.05)], Horizon [2-4], Power [0.4-0.7 (step 0.10)]
     if bool(re.search(r"call|rep|det|f2f", l)):
         return {
+            "rule_description": "Lag [0-2], Decay [0.5-0.8 (step 0.05)], Horizon [2-4], Power [0.4-0.7 (step 0.10)]",
             "lags": [0, 1, 2],
-            "decays": [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8],
+            "decays": [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80],
             "horizons": [2, 3, 4],
             "saturations": [("power", 0.4, 1.0), ("power", 0.5, 1.0), ("power", 0.6, 1.0), ("power", 0.7, 1.0)],
             "sat_choice_optuna": ["power"],
             "power_k_optuna": [0.4, 0.5, 0.6, 0.7],
             "log_k_optuna": [1.0],
             "default_sat": "power",
-            "default_param": 0.55,
+            "default_param": 0.5,
         }
 
-    # 2. Samples: Lag [0-1], Decay [0.4-0.7], Horizon [2-4], Log [0.5-1.5]
+    # 2. Samples: Lag [0-1], Decay [0.4-0.7 (step 0.05)], Horizon [2-4], Log [0.5-1.5 (step 0.10)]
     if bool(re.search(r"sample|samp|voucher|copay", l)):
         return {
+            "rule_description": "Lag [0-1], Decay [0.4-0.7 (step 0.05)], Horizon [2-4], Log [0.5-1.5 (step 0.10)]",
             "lags": [0, 1],
-            "decays": [0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7],
+            "decays": [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70],
             "horizons": [2, 3, 4],
-            "saturations": [("log", 0.5, 0.5), ("log", 0.5, 0.75), ("log", 0.5, 1.0), ("log", 0.5, 1.25), ("log", 0.5, 1.5)],
+            "saturations": [
+                ("log", 0.5, 0.5), ("log", 0.5, 0.6), ("log", 0.5, 0.7), ("log", 0.5, 0.8),
+                ("log", 0.5, 0.9), ("log", 0.5, 1.0), ("log", 0.5, 1.1), ("log", 0.5, 1.2),
+                ("log", 0.5, 1.3), ("log", 0.5, 1.4), ("log", 0.5, 1.5)
+            ],
             "sat_choice_optuna": ["log"],
             "power_k_optuna": [0.5],
-            "log_k_optuna": [0.5, 0.75, 1.0, 1.25, 1.5],
+            "log_k_optuna": [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5],
             "default_sat": "log",
             "default_param": 1.0,
         }
 
-    # 3. Speaker: Lag [1-2], Decay [0.5-0.85], Horizon [3-6], Power [0.5-0.8]
+    # 3. Speaker: Lag [1-2], Decay [0.5-0.85 (step 0.05)], Horizon [3-6], Power [0.5-0.8 (step 0.10)]
     if bool(re.search(r"speak|dinner|event|symposia|conf", l)):
         return {
+            "rule_description": "Lag [1-2], Decay [0.5-0.85 (step 0.05)], Horizon [3-6], Power [0.5-0.8 (step 0.10)]",
             "lags": [1, 2],
-            "decays": [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85],
+            "decays": [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85],
             "horizons": [3, 4, 5, 6],
             "saturations": [("power", 0.5, 1.0), ("power", 0.6, 1.0), ("power", 0.7, 1.0), ("power", 0.8, 1.0)],
             "sat_choice_optuna": ["power"],
             "power_k_optuna": [0.5, 0.6, 0.7, 0.8],
             "log_k_optuna": [1.0],
             "default_sat": "power",
-            "default_param": 0.65,
+            "default_param": 0.6,
         }
 
-    # 4. HCP Emails: Lag [0-1], Decay [0.3-0.6], Horizon [1-3], Log [0.5-1.5]
+    # 4. HCP Emails: Lag [0-1], Decay [0.3-0.6 (step 0.05)], Horizon [1-3], Log [0.5-1.5 (step 0.10)]
     if bool(re.search(r"email|hcp_email", l)):
         return {
+            "rule_description": "Lag [0-1], Decay [0.3-0.6 (step 0.05)], Horizon [1-3], Log [0.5-1.5 (step 0.10)]",
             "lags": [0, 1],
-            "decays": [0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6],
+            "decays": [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60],
             "horizons": [1, 2, 3],
-            "saturations": [("log", 0.5, 0.5), ("log", 0.5, 0.75), ("log", 0.5, 1.0), ("log", 0.5, 1.25), ("log", 0.5, 1.5)],
+            "saturations": [
+                ("log", 0.5, 0.5), ("log", 0.5, 0.6), ("log", 0.5, 0.7), ("log", 0.5, 0.8),
+                ("log", 0.5, 0.9), ("log", 0.5, 1.0), ("log", 0.5, 1.1), ("log", 0.5, 1.2),
+                ("log", 0.5, 1.3), ("log", 0.5, 1.4), ("log", 0.5, 1.5)
+            ],
             "sat_choice_optuna": ["log"],
             "power_k_optuna": [0.5],
-            "log_k_optuna": [0.5, 0.75, 1.0, 1.25, 1.5],
+            "log_k_optuna": [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5],
             "default_sat": "log",
             "default_param": 1.0,
         }
 
-    # 5. HCP Doximity: Lag [0-1], Decay [0.3-0.6], Horizon [1-3], Power [0.4-0.7]
+    # 5. HCP Doximity: Lag [0-1], Decay [0.3-0.6 (step 0.05)], Horizon [1-3], Power [0.4-0.7 (step 0.10)]
     if bool(re.search(r"doximity", l)):
         return {
+            "rule_description": "Lag [0-1], Decay [0.3-0.6 (step 0.05)], Horizon [1-3], Power [0.4-0.7 (step 0.10)]",
             "lags": [0, 1],
-            "decays": [0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6],
+            "decays": [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60],
             "horizons": [1, 2, 3],
             "saturations": [("power", 0.4, 1.0), ("power", 0.5, 1.0), ("power", 0.6, 1.0), ("power", 0.7, 1.0)],
             "sat_choice_optuna": ["power"],
             "power_k_optuna": [0.4, 0.5, 0.6, 0.7],
             "log_k_optuna": [1.0],
             "default_sat": "power",
-            "default_param": 0.55,
+            "default_param": 0.5,
         }
 
-    # 6. HCP Digital: Lag [0-1], Decay [0.2-0.5], Horizon [1-3], Power [0.5-0.8]
+    # 6. HCP Digital: Lag [0-1], Decay [0.2-0.5 (step 0.05)], Horizon [1-3], Power [0.5-0.8 (step 0.10)]
     if bool(re.search(r"hcp_digital|hcp_web|web_detail|portal|banner", l)) or (bool(re.search(r"digital", l)) and not bool(re.search(r"dtc|social|search", l))):
         return {
+            "rule_description": "Lag [0-1], Decay [0.2-0.5 (step 0.05)], Horizon [1-3], Power [0.5-0.8 (step 0.10)]",
             "lags": [0, 1],
-            "decays": [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5],
+            "decays": [0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50],
             "horizons": [1, 2, 3],
             "saturations": [("power", 0.5, 1.0), ("power", 0.6, 1.0), ("power", 0.7, 1.0), ("power", 0.8, 1.0)],
             "sat_choice_optuna": ["power"],
             "power_k_optuna": [0.5, 0.6, 0.7, 0.8],
             "log_k_optuna": [1.0],
             "default_sat": "power",
-            "default_param": 0.65,
+            "default_param": 0.6,
         }
 
-    # 7. DTC Paid Social Impressions: Lag [0-1], Decay [0.2-0.5], Horizon [1-3], Log [0.5-1.5]
+    # 7. DTC Paid Social Impressions: Lag [0-1], Decay [0.2-0.5 (step 0.05)], Horizon [1-3], Log [0.5-1.5 (step 0.10)]
     if bool(re.search(r"social|facebook|fb|instagram|meta|insta", l)):
         return {
+            "rule_description": "Lag [0-1], Decay [0.2-0.5 (step 0.05)], Horizon [1-3], Log [0.5-1.5 (step 0.10)]",
             "lags": [0, 1],
-            "decays": [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5],
+            "decays": [0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50],
             "horizons": [1, 2, 3],
-            "saturations": [("log", 0.5, 0.5), ("log", 0.5, 0.75), ("log", 0.5, 1.0), ("log", 0.5, 1.25), ("log", 0.5, 1.5)],
+            "saturations": [
+                ("log", 0.5, 0.5), ("log", 0.5, 0.6), ("log", 0.5, 0.7), ("log", 0.5, 0.8),
+                ("log", 0.5, 0.9), ("log", 0.5, 1.0), ("log", 0.5, 1.1), ("log", 0.5, 1.2),
+                ("log", 0.5, 1.3), ("log", 0.5, 1.4), ("log", 0.5, 1.5)
+            ],
             "sat_choice_optuna": ["log"],
             "power_k_optuna": [0.5],
-            "log_k_optuna": [0.5, 0.75, 1.0, 1.25, 1.5],
+            "log_k_optuna": [0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5],
             "default_sat": "log",
             "default_param": 1.0,
         }
 
-    # 8. DTC Paid Search: Lag [0-1], Decay [0.0-0.3], Horizon [1-2], Log [0.5-1.0]
+    # 8. DTC Paid Search: Lag [0-1], Decay [0.0-0.3 (step 0.05)], Horizon [1-2], Log [0.5-1.0 (step 0.10)]
     if bool(re.search(r"search|sem|seo|google|adwords", l)):
         return {
+            "rule_description": "Lag [0-1], Decay [0.0-0.3 (step 0.05)], Horizon [1-2], Log [0.5-1.0 (step 0.10)]",
             "lags": [0, 1],
-            "decays": [0.0, 0.1, 0.2, 0.3],
+            "decays": [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30],
             "horizons": [1, 2],
-            "saturations": [("log", 0.5, 0.5), ("log", 0.5, 0.75), ("log", 0.5, 1.0)],
+            "saturations": [
+                ("log", 0.5, 0.5), ("log", 0.5, 0.6), ("log", 0.5, 0.7),
+                ("log", 0.5, 0.8), ("log", 0.5, 0.9), ("log", 0.5, 1.0)
+            ],
             "sat_choice_optuna": ["log"],
             "power_k_optuna": [0.5],
-            "log_k_optuna": [0.5, 0.75, 1.0],
+            "log_k_optuna": [0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
             "default_sat": "log",
-            "default_param": 0.75,
+            "default_param": 0.8,
         }
 
-    # 9. Competitor Spend: Lag [0-2], Decay [0.2-0.5], Horizon [1-3], Power [0.3-0.6]
+    # 9. Competitor Spend: Lag [0-2], Decay [0.2-0.5 (step 0.05)], Horizon [1-3], Power [0.3-0.6 (step 0.10)]
     if bool(re.search(r"competitor|comp_|comp\b", l)):
         return {
+            "rule_description": "Lag [0-2], Decay [0.2-0.5 (step 0.05)], Horizon [1-3], Power [0.3-0.6 (step 0.10)]",
             "lags": [0, 1, 2],
-            "decays": [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5],
+            "decays": [0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50],
             "horizons": [1, 2, 3],
             "saturations": [("power", 0.3, 1.0), ("power", 0.4, 1.0), ("power", 0.5, 1.0), ("power", 0.6, 1.0)],
             "sat_choice_optuna": ["power"],
             "power_k_optuna": [0.3, 0.4, 0.5, 0.6],
             "log_k_optuna": [1.0],
             "default_sat": "power",
-            "default_param": 0.45,
+            "default_param": 0.4,
         }
 
-    # 10. RTE: Lag [0-2], Decay [0.3-0.6], Horizon [1-3], Power [0.4-0.7]
+    # 10. RTE: Lag [0-2], Decay [0.3-0.6 (step 0.05)], Horizon [1-3], Power [0.4-0.7 (step 0.10)]
     if bool(re.search(r"rte|rep_trigger|trigger", l)):
         return {
+            "rule_description": "Lag [0-2], Decay [0.3-0.6 (step 0.05)], Horizon [1-3], Power [0.4-0.7 (step 0.10)]",
             "lags": [0, 1, 2],
-            "decays": [0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6],
+            "decays": [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60],
             "horizons": [1, 2, 3],
             "saturations": [("power", 0.4, 1.0), ("power", 0.5, 1.0), ("power", 0.6, 1.0), ("power", 0.7, 1.0)],
             "sat_choice_optuna": ["power"],
             "power_k_optuna": [0.4, 0.5, 0.6, 0.7],
             "log_k_optuna": [1.0],
             "default_sat": "power",
-            "default_param": 0.55,
+            "default_param": 0.5,
         }
 
-    # Generic / Default Media Channel Fallback
+    # Generic Fallback
     return {
+        "rule_description": "Lag [0-2], Decay [0.1-0.7 (step 0.05)], Horizon [1-4], Log/Power [step 0.10]",
         "lags": [0, 1, 2],
-        "decays": [0.1, 0.3, 0.5, 0.7],
+        "decays": [0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70],
         "horizons": [1, 2, 3, 4],
-        "saturations": [("none", 0.5, 1.0), ("log", 0.5, 1.0), ("power", 0.5, 1.0)],
+        "saturations": [("none", 0.5, 1.0), ("log", 0.5, 0.8), ("log", 0.5, 1.0), ("log", 0.5, 1.2), ("power", 0.4, 1.0), ("power", 0.5, 1.0), ("power", 0.6, 1.0)],
         "sat_choice_optuna": ["none", "log", "power"],
         "power_k_optuna": [0.4, 0.5, 0.6],
-        "log_k_optuna": [0.5, 1.0, 1.5],
+        "log_k_optuna": [0.8, 1.0, 1.2],
         "default_sat": "log",
         "default_param": 1.0,
     }
@@ -1614,9 +1641,6 @@ def run_optuna_channel_tuning(
     n_trials: int = 40,
     cv_splits: int = 3,
 ) -> Dict[str, Any]:
-    """
-    Optuna-based tuning obeying strict channel-specific parameter boundaries.
-    """
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -1738,17 +1762,85 @@ def run_grid_search_channel_tuning(
     dependent_variable: str,
     date_column: Optional[str] = None,
     pop_column: Optional[str] = None,
+    current_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    Exhaustive Multi-Dimensional Grid Search Engine for Marketing Channel Transformations
-    strictly constrained to domain-specific channel thresholds.
+    Exhaustive Multi-Dimensional Grid Search Engine returning current vs optimized comparison and leaderboard.
     """
     if channel not in df.columns or dependent_variable not in df.columns:
         raise ValueError(f"Channel '{channel}' or Target Variable '{dependent_variable}' not found in dataset.")
 
     y_series = pd.to_numeric(df[dependent_variable], errors="coerce").fillna(0.0).values
-    if len(y_series) < 5:
-        raise ValueError("Insufficient rows to perform grid search optimization.")
+    raw_channel_s = pd.to_numeric(df[channel], errors="coerce").fillna(0.0).values
+    
+    # Baseline raw correlation
+    if np.std(raw_channel_s) > 0 and np.std(y_series) > 0:
+        raw_corr_val = float(np.corrcoef(raw_channel_s, y_series)[0, 1])
+        raw_corr = abs(raw_corr_val) if not np.isnan(raw_corr_val) else 0.0
+    else:
+        raw_corr = 0.0
+
+    primary_geo = geo_column[0] if isinstance(geo_column, list) and len(geo_column) > 0 else geo_column
+
+    # Score current user config
+    current_corr = raw_corr
+    current_params_summary = {
+        "normalization": "none",
+        "decay": 0.5,
+        "horizon": 2,
+        "lag": 0,
+        "saturation": "none",
+        "param": 1.0,
+    }
+    if current_config and isinstance(current_config, dict):
+        cur_norm = current_config.get("normalization", "none")
+        cur_decay = float(current_config.get("decay", 0.5) if current_config.get("decay") is not None else 0.5)
+        cur_horizon = int(current_config.get("horizon", 2) if current_config.get("horizon") is not None else 2)
+        cur_lag = int(current_config.get("lag", 0) if current_config.get("lag") is not None else 0)
+        cur_sat = str(current_config.get("saturation", "none") or "none").lower()
+        cur_param = float(current_config.get("param", 1.0) if current_config.get("param") is not None else 1.0)
+        cur_p = cur_param if cur_sat == "power" else 0.5
+        cur_k = cur_param if cur_sat == "log" else 1.0
+
+        current_params_summary = {
+            "normalization": cur_norm,
+            "decay": cur_decay,
+            "horizon": cur_horizon,
+            "lag": cur_lag,
+            "saturation": cur_sat,
+            "param": cur_param,
+        }
+
+        try:
+            df_cur = df.copy()
+            if cur_lag > 0:
+                if primary_geo and primary_geo in df_cur.columns:
+                    df_cur[channel] = df_cur.groupby(primary_geo)[channel].shift(cur_lag, fill_value=0.0)
+                else:
+                    df_cur[channel] = df_cur[channel].shift(cur_lag, fill_value=0.0)
+
+            cur_pop = None
+            if pop_column and isinstance(pop_column, str) and pop_column in df_cur.columns:
+                cur_pop = pd.to_numeric(df_cur[pop_column], errors="coerce").fillna(1.0)
+
+            cur_trans = transform_single_channel(
+                df=df_cur,
+                channel=channel,
+                geo_column=geo_column,
+                normalization=cur_norm,
+                pop_column=cur_pop,
+                adstock_coeff=cur_decay,
+                lags=cur_horizon,
+                sat_function=cur_sat if cur_sat != "none" else None,
+                power_k=cur_p,
+                log_k=cur_k,
+            ).fillna(0.0).values
+
+            if np.std(cur_trans) > 0 and np.std(y_series) > 0:
+                c_val = float(np.corrcoef(cur_trans, y_series)[0, 1])
+                current_corr = round(abs(c_val), 4) if not np.isnan(c_val) else raw_corr
+        except Exception:
+            current_corr = raw_corr
 
     space = get_channel_parameter_search_space(channel)
 
@@ -1758,22 +1850,8 @@ def run_grid_search_channel_tuning(
     horizon_grid = space["horizons"]
     sat_grid = space["saturations"]
 
-    best_score = -1.0
-    best_config = {
-        "channel": channel,
-        "normalization": "none",
-        "decay": float(decay_grid[0]),
-        "horizon": int(horizon_grid[0]),
-        "lag": int(lag_grid[0]),
-        "saturation": space["default_sat"],
-        "param": float(space["default_param"]),
-        "correlation_score": 0.0,
-        "total_evaluations": 0,
-        "source": "auto",
-    }
-
+    leaderboard = []
     eval_count = 0
-    primary_geo = geo_column[0] if isinstance(geo_column, list) and len(geo_column) > 0 else geo_column
 
     for lag in lag_grid:
         df_shifted = df.copy()
@@ -1786,9 +1864,8 @@ def run_grid_search_channel_tuning(
         for norm in norm_grid:
             raw_s = df_shifted[channel]
             pop_s = None
-            if pop_column:
-                if isinstance(pop_column, str) and pop_column in df_shifted.columns:
-                    pop_s = pd.to_numeric(df_shifted[pop_column], errors="coerce").fillna(1.0)
+            if pop_column and isinstance(pop_column, str) and pop_column in df_shifted.columns:
+                pop_s = pd.to_numeric(df_shifted[pop_column], errors="coerce").fillna(1.0)
             norm_s = normalize_series_vectorized(raw_s, norm, pop_s)
 
             for decay in decay_grid:
@@ -1822,24 +1899,238 @@ def run_grid_search_channel_tuning(
                         corr = float(np.corrcoef(trans_clean, y_series)[0, 1])
                         score = abs(corr) if not np.isnan(corr) else 0.0
 
-                        if score > best_score:
-                            best_score = score
-                            param_val = power_k if sat_fn == "power" else (log_k if sat_fn == "log" else 1.0)
-                            best_config = {
-                                "channel": channel,
-                                "normalization": norm,
-                                "decay": float(decay),
-                                "horizon": int(horizon),
-                                "lag": int(lag),
-                                "saturation": sat_fn,
-                                "param": float(param_val),
-                                "correlation_score": round(score, 4),
-                                "total_evaluations": eval_count,
-                                "source": "auto",
-                            }
+                        param_val = power_k if sat_fn == "power" else (log_k if sat_fn == "log" else 1.0)
+                        leaderboard.append({
+                            "normalization": norm,
+                            "decay": float(decay),
+                            "horizon": int(horizon),
+                            "lag": int(lag),
+                            "saturation": sat_fn,
+                            "param": float(param_val),
+                            "correlation_score": round(score, 4),
+                        })
 
-    best_config["total_evaluations"] = eval_count
-    return best_config
+    leaderboard.sort(key=lambda x: x["correlation_score"], reverse=True)
+    best = leaderboard[0] if leaderboard else {
+        "normalization": "none",
+        "decay": float(decay_grid[0]),
+        "horizon": int(horizon_grid[0]),
+        "lag": int(lag_grid[0]),
+        "saturation": space["default_sat"],
+        "param": float(space["default_param"]),
+        "correlation_score": raw_corr,
+    }
+
+    top_3_clean = []
+    seen_combos = set()
+    for item in leaderboard:
+        sig = (item["decay"], item["horizon"], item["lag"], item["saturation"], item["param"])
+        if sig not in seen_combos:
+            seen_combos.add(sig)
+            top_3_clean.append(item)
+        if len(top_3_clean) >= 3:
+            break
+
+    gain = round(best["correlation_score"] - current_corr, 4)
+
+    return {
+        "channel": channel,
+        "rule_description": space["rule_description"],
+        "current_config": current_params_summary,
+        "current_correlation": round(current_corr, 4),
+        "normalization": best["normalization"],
+        "decay": best["decay"],
+        "horizon": best["horizon"],
+        "lag": best["lag"],
+        "saturation": best["saturation"],
+        "param": best["param"],
+        "raw_correlation": round(raw_corr, 4),
+        "correlation_score": best["correlation_score"],
+        "correlation_gain": gain,
+        "total_evaluations": eval_count,
+        "top_3_leaderboard": top_3_clean,
+        "source": "auto",
+    }
+
+
+def run_grid_search_batch_tuning(
+    df: pd.DataFrame,
+    channels: List[str],
+    geo_column: Optional[str],
+    dependent_variable: str,
+    date_column: Optional[str] = None,
+    pop_column: Optional[str] = None,
+    current_configs: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    results = {}
+    total_evals = 0
+    current_configs = current_configs or {}
+
+    for ch in channels:
+        if ch in df.columns:
+            try:
+                ch_res = run_grid_search_channel_tuning(
+                    df=df,
+                    channel=ch,
+                    geo_column=geo_column,
+                    dependent_variable=dependent_variable,
+                    date_column=date_column,
+                    pop_column=pop_column,
+                    current_config=current_configs.get(ch),
+                )
+                results[ch] = ch_res
+                total_evals += ch_res.get("total_evaluations", 0)
+            except Exception as e:
+                results[ch] = {"channel": ch, "error": str(e)}
+
+    return {
+        "channels_optimized": len(results),
+        "total_permutations_evaluated": total_evals,
+        "results": results,
+    }
+
+
+def run_optuna_optimization(
+    df: pd.DataFrame,
+    geo_column: str,
+    dependent_variable: str,
+    channels_cfg: List[Dict],
+    channel_feature_names: List[str],
+    n_trials: int,
+    cv_splits: int,
+    use_sign_pen: bool,
+    use_mag_pen: bool,
+    use_stab_pen: bool,
+    lambda_sign: float,
+    lambda_mag: float,
+    lambda_stab: float,
+    negative_channels: set,
+    power_choices: List[float],
+    decay_choices: List[float],
+    lag_choices: List[int],
+) -> dict:
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    tscv = TimeSeriesSplit(n_splits=cv_splits)
+
+    def _apply_optuna_adstock(series, decay, lag):
+        result = np.array(series, dtype=np.float64)
+        arr = np.array(series, dtype=np.float64)
+        for l in range(1, lag + 1):
+            shifted = np.concatenate([np.zeros(l), arr[:-l]]) if l < len(arr) else np.zeros(len(arr))
+            result += (decay ** l) * shifted
+        return result
+
+    def objective(trial):
+        params = {}
+        for cfg in channels_cfg:
+            ch = cfg["name"]
+            if cfg["has_adstock"]:
+                params[f"{ch}_decay"] = trial.suggest_categorical(f"{ch}_decay", decay_choices)
+                params[f"{ch}_lag"] = trial.suggest_categorical(f"{ch}_lag", lag_choices)
+            if cfg.get("sat_method") == "Power":
+                params[f"{ch}_power"] = trial.suggest_categorical(f"{ch}_power", power_choices)
+
+        df_temp = df.copy()
+        for cfg in channels_cfg:
+            ch = cfg["name"]
+            if ch not in df_temp.columns:
+                continue
+            has_ads = cfg["has_adstock"]
+            sat_m = cfg.get("sat_method")
+            decay = params.get(f"{ch}_decay", 0.5)
+            lag = int(params.get(f"{ch}_lag", 1))
+            power = params.get(f"{ch}_power", 0.5)
+
+            if has_ads:
+                trans = df_temp.groupby(geo_column)[ch].transform(
+                    lambda x: _apply_optuna_adstock(x.values, decay, lag)
+                )
+            else:
+                trans = df_temp[ch].copy()
+
+            if sat_m == "Power":
+                df_temp[f"{ch}_transformed"] = np.power(np.abs(trans), power)
+            elif sat_m == "Log":
+                df_temp[f"{ch}_transformed"] = np.log1p(np.abs(trans))
+            else:
+                df_temp[f"{ch}_transformed"] = trans
+
+        feat_cols = [c for c in channel_feature_names if c in df_temp.columns]
+        df_model = df_temp.dropna(subset=[dependent_variable] + feat_cols)
+
+        if df_model.empty or len(df_model) < cv_splits * 2:
+            return float("inf")
+
+        X = sm.add_constant(df_model[feat_cols].astype(float))
+        y = df_model[dependent_variable].astype(float)
+
+        errors = []
+        beta_list = []
+        for train_idx, test_idx in tscv.split(X):
+            try:
+                X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
+                y_tr, y_te = y.iloc[train_idx], y.iloc[test_idx]
+                m = sm.OLS(y_tr, X_tr).fit()
+                preds = m.predict(X_te)
+                errors.append(float(np.sqrt(mean_squared_error(y_te, preds))))
+                b = m.params.to_dict()
+                b.pop("const", None)
+                beta_list.append(b)
+            except Exception:
+                errors.append(float("inf"))
+
+        base_error = float(np.mean(errors))
+        if not np.isfinite(base_error):
+            return float("inf")
+
+        avg_betas = pd.DataFrame(beta_list).mean().to_dict() if beta_list else {}
+        total_loss = base_error
+        if use_sign_pen and avg_betas:
+            for name, beta in avg_betas.items():
+                if name in negative_channels and beta > 0:
+                    total_loss += lambda_sign * abs(beta)
+                elif name not in negative_channels and beta < 0:
+                    total_loss += lambda_sign * abs(beta)
+        if use_mag_pen and avg_betas:
+            total_loss += lambda_mag * sum(b ** 2 for b in avg_betas.values())
+        if use_stab_pen and len(beta_list) >= 2:
+            total_loss += lambda_stab * float(pd.DataFrame(beta_list).var().mean())
+        return total_loss
+
+    sampler = optuna.samplers.TPESampler(seed=42)
+    study = optuna.create_study(direction="minimize", sampler=sampler)
+    study.optimize(objective, n_trials=n_trials)
+
+    return {
+        "best_params": study.best_params,
+        "best_value": float(study.best_value) if study.best_value != float("inf") else None,
+        "n_trials": n_trials,
+    }
+
+
+def optuna_params_to_transform_rows(channels_cfg: List[Dict], best_params: Dict) -> List[Dict]:
+    rows = []
+    for cfg in channels_cfg:
+        ch = cfg["name"]
+        row = {"Channel Name": ch, "Normalization": "none"}
+        if cfg["has_adstock"]:
+            row["Adstock"] = round(float(best_params.get(f"{ch}_decay", 0.5)), 2)
+            row["Lags"] = int(best_params.get(f"{ch}_lag", 1))
+        else:
+            row["Adstock"] = None
+            row["Lags"] = None
+        if cfg.get("sat_method") == "Power":
+            row["Saturation Function"] = "Power"
+            row["Power (k)"] = round(float(best_params.get(f"{ch}_power", 0.5)), 2)
+            row["Log (k)"] = 1.0
+        else:
+            row["Saturation Function"] = None
+            row["Power (k)"] = None
+            row["Log (k)"] = 1.0
+        rows.append(row)
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -2461,3 +2752,4 @@ def create_response_curve(
         prev_impactable = impactable_nation
 
     return pd.DataFrame(rows)
+
